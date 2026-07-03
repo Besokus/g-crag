@@ -1,0 +1,208 @@
+# 电网运维 RAG 智能问答系统 - 远端部署版
+# 所有数据预填充到 ./data/ 目录，bind mount 直接挂载
+# 一键启动: docker compose -f docker-compose.deploy.yml up -d --build
+#
+# 与开发版 docker-compose.yml 的区别:
+#   - 所有 named volume → ./data/ 目录 bind mount（数据随包携带）
+#   - Prometheus 增加数据持久化卷
+#   - 端口保持不变
+
+services:
+  # ---------- MySQL：结构化元数据 ----------
+  mysql:
+    image: mysql:8.0
+    container_name: grid-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-grid_qa}
+      MYSQL_USER: ${MYSQL_USER:-grid}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-grid123456}
+      TZ: Asia/Shanghai
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    command:
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ---------- MinIO：源文档对象存储 ----------
+  minio:
+    image: minio/minio:latest
+    container_name: grid-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./data/minio:/data
+    command: server /data --console-address ":9001"
+
+  # ---------- etcd：Milvus 元数据依赖 ----------
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: grid-etcd
+    restart: unless-stopped
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - ./data/etcd:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ---------- Milvus 专用对象存储 ----------
+  milvus-minio:
+    image: minio/minio:latest
+    container_name: grid-milvus-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./data/milvus-minio:/minio_data
+    command: minio server /minio_data
+
+  # ---------- Milvus 2.4 向量库 ----------
+  milvus:
+    image: milvusdb/milvus:v2.4.10
+    container_name: grid-milvus
+    command: ["milvus", "run", "standalone"]
+    restart: unless-stopped
+    depends_on:
+      - etcd
+      - milvus-minio
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  # ---------- Redis：热点问答缓存 ----------
+  redis:
+    image: redis:7-alpine
+    container_name: grid-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    command: redis-server --appendonly yes --maxmemory 10mb --maxmemory-policy allkeys-lru --maxmemory-samples 10
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------- Neo4j：知识图谱（设备-故障-处置 多跳推理）----------
+  neo4j:
+    image: neo4j:5-community
+    container_name: grid-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-neo4j123456}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ./data/neo4j:/data
+
+  # ---------- Nacos：配置中心（可选）----------
+  nacos:
+    image: nacos/nacos-server:v2.4.3
+    container_name: grid-nacos
+    restart: unless-stopped
+    environment:
+      MODE: standalone
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    volumes:
+      - ./data/nacos:/home/nacos/data
+
+  # ---------- 后端 ----------
+  backend:
+    build: ./backend
+    container_name: grid-backend
+    restart: unless-stopped
+    depends_on:
+      - mysql
+      - minio
+      - milvus
+      - redis
+      - neo4j
+    env_file: .env
+    environment:
+      DATABASE_URL: mysql+aiomysql://grid:grid123456@mysql:3306/grid_qa?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MILVUS_HOST: milvus
+      NEO4J_URI: bolt://neo4j:7687
+      HTTPS_PROXY: http://host.docker.internal:7897
+      HTTP_PROXY: http://host.docker.internal:7897
+      NO_PROXY: localhost,127.0.0.1,mysql,minio,milvus,redis,neo4j,prometheus,grafana
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8001:8001"
+
+  # ---------- 前端（nginx）----------
+  frontend:
+    build: ./frontend
+    container_name: grid-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+  # ---------- Prometheus 指标采集 ----------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: grid-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./data/prometheus:/prometheus
+
+  # ---------- Grafana 可视化仪表盘 ----------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grid-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus

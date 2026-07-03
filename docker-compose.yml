@@ -188,6 +188,7 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
 
   # ---------- Grafana 可视化仪表盘（好看的开箱监控界面）----------
   grafana:
@@ -213,4 +214,5 @@ volumes:
   redis-data:
   neo4j-data:
   grafana-data:
+  prometheus-data:
   nacos-data:

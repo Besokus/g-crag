@@ -44,3 +44,38 @@ def confidence_of(grade: str, rewritten: bool) -> str:
     if grade == GRADE_INCORRECT and rewritten:
         return "refused"
     return "medium"
+
+
+def _clamp01(x: float) -> float:
+    """夹到 [0,1] 并保留 3 位小数。"""
+    return round(max(0.0, min(1.0, float(x))), 3)
+
+
+def evidence_strength(
+    *, top1: float | None = None, detail: dict | None = None,
+    rerank_ok: bool = True,
+) -> float | None:
+    """统一证据强度 ∈ [0,1]，拉通 v1/v2 分级口径（confidence refinement T1）。
+
+    优先级：detail（v2 逐条标签聚合）> top1（v1 rerank top1 分）> None。
+
+    - detail: (relevant + 0.5·partial) / n（relevant 全权重、partial 半权重、irrelevant 零）。
+    - rerank_ok=False（rerank 未启用/失败，top1 语义不可靠）→ 返回 None，
+      由 caller 标 evaluatorDegraded，不参与 grade/confidence 分桶（断点 D）。
+    - detail.n=0（异常）→ 回退 top1。
+
+    v1/v2 两路统一为同一 [0,1] 信号，消除"绝对阈值 vs 相对计数"口径漂移（断点 C）。
+    """
+    if not rerank_ok:
+        return None
+    if detail:
+        rel = int(detail.get("relevant", 0))
+        partial = int(detail.get("partial", 0))
+        irr = int(detail.get("irrelevant", 0))
+        n = int(detail.get("n", rel + partial + irr))
+        if n <= 0:
+            return _clamp01(top1) if top1 is not None else None
+        return round(min(1.0, (rel + 0.5 * partial) / n), 3)
+    if top1 is not None:
+        return _clamp01(top1)
+    return None

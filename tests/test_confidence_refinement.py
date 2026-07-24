@@ -221,6 +221,40 @@ def test_grade_uses_rt_crag_hot_update():
         config_service._RUNTIME.pop("crag_low", None)
 
 
+# ===== T7 · 度量 5 指标 + 预注册（可观测）=====
+
+def test_t7_metrics_registered():
+    from app.core import metrics
+    for name in ("CRAG_EVIDENCE_STRENGTH", "CRAG_CONFIDENCE_LABEL",
+                 "CRAG_REFUSED_REASON", "CRAG_REWRITE_DELTA", "OVERCONFIDENT"):
+        assert hasattr(metrics, name), f"缺失指标 {name}"
+
+
+def test_init_metric_series_preregisters_v3_labels():
+    from app.core import metrics
+    from prometheus_client import generate_latest
+    metrics.init_metric_series()  # 不抛
+    text = generate_latest().decode()
+    assert "grid_crag_confidence_label_total" in text
+    assert "grid_crag_refused_reason_total" in text
+    assert "grid_crag_evidence_strength" in text
+
+
+@pytest.mark.asyncio
+async def test_crag_v7_emits_metrics(monkeypatch):
+    """V3 路径跑通后，CRAG_CONFIDENCE_LABEL 被 observe（refused 路径最易断言）。"""
+    from app.services import qa_service
+    from app.core import metrics
+    from prometheus_client import generate_latest
+    await _seed_rewrite(monkeypatch, 0.1)  # rewrite 仍 incorrect → refused
+    for k, v in {"CRAG_ENABLE": True, "CRAG_PERDOC_ENABLE": False,
+                 "CRAG_V3_ENABLE": True, "RERANK_ENABLE": True}.items():
+        monkeypatch.setattr(qa_service.settings, k, v)
+    await qa_service._crag_correct(None, "q", [{"score": 0.1}], "deepseek", 5)
+    text = generate_latest().decode()
+    assert "grid_crag_refused_reason_total" in text
+
+
 # ===== T3 · 连续置信度 + 5档 + 修 low（断点 B）=====
 
 from app.rag.crag import confidence_score, label_to_confidence

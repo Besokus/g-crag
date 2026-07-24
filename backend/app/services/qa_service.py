@@ -205,6 +205,15 @@ async def _crag_correct(
         metrics.CRAG_GRADE.labels(grade).inc()
         metrics.CRAG_ACTION.labels(action).inc()
         metrics.CRAG_CONFIDENCE.labels(confidence).inc()
+        # T7（可观测）：V3 细化度量（证据强度/5档标签/refused归因/改写增益）
+        if _v3:
+            if _es is not None:
+                metrics.CRAG_EVIDENCE_STRENGTH.observe(_es)
+            metrics.CRAG_CONFIDENCE_LABEL.labels(_label).inc()
+            if _rf:
+                metrics.CRAG_REFUSED_REASON.labels(_rf).inc()
+            if _rewrite_delta is not None:
+                metrics.CRAG_REWRITE_DELTA.observe(_rewrite_delta)
     except Exception:
         pass
     return contexts, confidence, action, grade, extras

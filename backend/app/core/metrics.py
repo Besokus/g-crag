@@ -65,6 +65,14 @@ DEGRADED = Counter("grid_degraded_total", "静默降级次数(失败被兜底)",
 CRAG_GRADE = Counter("grid_crag_grade_total", "CRAG 检索分级", ["grade"])
 CRAG_ACTION = Counter("grid_crag_action_total", "CRAG 纠错动作", ["action"])
 CRAG_CONFIDENCE = Counter("grid_crag_confidence_total", "答案置信度分布(high/medium/refused)", ["confidence"])
+# confidence refinement T7：细化度量（证据强度/5档标签/refused归因/改写增益/过自信冲突）
+CRAG_EVIDENCE_STRENGTH = Histogram("grid_crag_evidence_strength", "CRAG 证据强度分布",
+                                   buckets=(0, 0.2, 0.35, 0.5, 0.7, 1.0))
+CRAG_CONFIDENCE_LABEL = Counter("grid_crag_confidence_label_total", "CRAG 5档细分置信度", ["label"])
+CRAG_REFUSED_REASON = Counter("grid_crag_refused_reason_total", "CRAG refused 归因", ["reason"])
+CRAG_REWRITE_DELTA = Histogram("grid_crag_rewrite_delta", "CRAG 改写纠错增益(正=救回)",
+                               buckets=(-1.0, -0.2, 0, 0.2, 0.5, 1.0))
+OVERCONFIDENT = Counter("grid_overconfident_total", "机器人工置信度冲突(high+dislike)")
 # 基础组件健康（MySQL/Milvus/Redis/MinIO 探活结果，1=up/0=down）—— 让 /health 状态进 Grafana 可监控可告警
 COMPONENT_HEALTH = Gauge("grid_component_health", "基础组件健康状态(1=up/0=down)", ["component"])
 # 安全合规：prompt injection 命中 + 答案脱敏次数（D4，电网强监管可见性）
@@ -188,6 +196,11 @@ def init_metric_series() -> None:
         # CRAG 答案置信度（证据有限/不足占比的一等指标）
         for _conf in ("high", "medium", "refused"):
             CRAG_CONFIDENCE.labels(_conf).inc(0)
+        # confidence refinement T7：5档细分标签 + refused归因 预注册（消除面板 No data）
+        for _lbl in ("high", "medium_high", "medium_low", "low", "refused"):
+            CRAG_CONFIDENCE_LABEL.labels(_lbl).inc(0)
+        for _rr in ("no_recall", "rewrite_exhausted", "out_of_domain", "evidence_contradict"):
+            CRAG_REFUSED_REASON.labels(_rr).inc(0)
         # 领域增强
         DOMAIN_CALLS.labels("diagnose").inc(0)
         DOMAIN_CALLS.labels("ticket").inc(0)

@@ -135,7 +135,9 @@ async def _crag_correct(
         top1 = float(contexts[0].get("score", 0.0)) if contexts else 0.0
         grade, _ = crag.grade(top1, len(contexts), rerank_ok)
 
+    _rewrite_delta: float | None = None
     if grade == crag.GRADE_INCORRECT:
+        _es_before = _es
         try:
             from app.services.query_rewrite import rewrite_query
             new_q = await rewrite_query(nq, model_type, force=True)
@@ -149,7 +151,19 @@ async def _crag_correct(
                     else:
                         top1 = float(contexts[0].get("score", 0.0))
                         grade, _ = crag.grade(top1, len(contexts), rerank_ok)
-                    action = "rewritten"
+                    _rewrite_delta = round(
+                        (_es if _es is not None else 0.0)
+                        - (_es_before if _es_before is not None else 0.0), 3)
+                    # T5（断点 E）：action×grade 决策矩阵（V3）；关 V3 老逻辑 rewritten
+                    if _v3:
+                        if grade == crag.GRADE_CORRECT:
+                            action = "rewritten_recovered"
+                        elif grade == crag.GRADE_AMBIGUOUS:
+                            action = "rewritten_partial"
+                        else:
+                            action = "rewritten_failed"
+                    else:
+                        action = "rewritten"
         except Exception as e:
             degraded("crag_rewrite", e)
 
@@ -160,11 +174,13 @@ async def _crag_correct(
         except Exception as e:
             degraded("crag_neighbor_expand", e)
 
-    confidence = crag.confidence_of(grade, action == "rewritten")
-    if grade == crag.GRADE_INCORRECT and action == "rewritten":
+    _rewrote = action.startswith("rewritten")
+    confidence = crag.confidence_of(grade, _rewrote)
+    # 关 V3 老逻辑：incorrect+rewritten → refused（V3 路径 action 已是 rewritten_failed，confidence_score 判 refused）
+    if not _v3 and grade == crag.GRADE_INCORRECT and action == "rewritten":
         action = "refused"
 
-    # T2+T3（断点 A+B）：CRAG_V3_ENABLE 开时连续置信度 + 逐条 detail 归因
+    # T2+T3+T5：CRAG_V3_ENABLE 开时连续置信度 + 归因 + 矩阵
     if _v3:
         # _es 已在 grade 时算（含改写重判后）；兜底重算（如 contexts 被邻域扩展改写）
         if _es is None:
@@ -174,8 +190,13 @@ async def _crag_correct(
         extras["confidenceScore"] = _score
         extras["confidenceLabel"] = _label
         extras["evidenceStrength"] = _es
-        # T2: 逐条 detail 归因（仅 v2 路径有）
-        if _v2_detail:
+        extras["evaluatorDegraded"] = not rerank_ok                  # T5（断点 D）：评估器降级标记
+        if _rewrite_delta is not None:
+            extras["rewriteDelta"] = _rewrite_delta                  # T5（断点 E）：改写纠错增益
+        _rf = _refused_reason(action, len(contexts), grade)          # T5（断点 E）：refused 归因
+        if _rf:
+            extras["refusedReason"] = _rf
+        if _v2_detail:                                                # T2: 逐条 detail 归因（仅 v2 路径）
             extras["cragDetail"] = _v2_detail
             extras["cragReason"] = _format_crag_reason(_v2_detail, grade)
 
@@ -204,6 +225,23 @@ def _format_crag_reason(detail: dict | None, grade: str) -> str:
     grade_cn = {"correct": "证据充分", "ambiguous": "证据有限",
                 "incorrect": "证据不足"}.get(grade, "")
     return f"{grade_cn}：{rel} relevant + {partial} partial + {irr} irrelevant / {n} 条（v2 per-doc）"
+
+
+def _refused_reason(action: str, n_contexts: int, grade: str) -> str:
+    """refused 归因（confidence refinement T5）。非 refused 场景返回 ''。
+
+    - no_recall: 检索无结果（contexts 空）
+    - rewrite_exhausted: 改写重检索后仍 incorrect
+    - out_of_domain: Self-RAG 判定非运维（在 stream_answer 标 self_rag_skip，此处不产）
+    - evidence_contradict: 兜底（v2 无 relevant 且证据矛盾，T5 简化）
+    """
+    if n_contexts == 0:
+        return "no_recall"
+    if action == "rewritten_failed":
+        return "rewrite_exhausted"
+    if grade == "incorrect":
+        return "evidence_contradict"
+    return ""
 
 
 async def _expand_neighbors(db: AsyncSession, contexts: list[dict], window: int = 1, max_add: int = 4) -> list[dict]:

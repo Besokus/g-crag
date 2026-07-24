@@ -112,7 +112,7 @@ def confidence_score(
     - degraded（rerank 未启用/失败，es=None）：封顶 low（不进 high/medium_high，断点 D）。
     - 否则按 es 分桶；es<_CONF_LOW → refused（证据极弱）。
     """
-    if action == "refused":
+    if action in ("refused", "rewritten_failed"):
         return (round(float(es or 0.0), 3), "refused")
     if es is None or degraded:
         return (_CONF_DEGRADED_SCORE, "low")

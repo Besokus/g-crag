@@ -136,6 +136,68 @@ def test_grade_v3_unifies_v1_v2_caliber():
     assert g_v1[0] == g_v2[0] == GRADE_CORRECT
 
 
+# ===== T5 · action×grade 矩阵 + rewriteDelta + refused 归因（断点 D+E）=====
+
+async def _seed_rewrite(monkeypatch, after_score):
+    """mock rewrite_query + mixed_search：rewrite 后返回 score=after_score 的 ctx。"""
+    from app.services import qa_service, query_rewrite
+    async def _fake_rw(q, *a, **k):
+        return q + "_改写"
+    async def _fake_mixed(*a, **k):
+        return [{"score": after_score}]
+    monkeypatch.setattr(query_rewrite, "rewrite_query", _fake_rw)
+    monkeypatch.setattr(qa_service.retrieval_service, "mixed_search", _fake_mixed)
+
+
+async def _v3_crag(monkeypatch, initial_score):
+    from app.services import qa_service
+    for k, v in {"CRAG_ENABLE": True, "CRAG_PERDOC_ENABLE": False,
+                 "CRAG_V3_ENABLE": True, "RERANK_ENABLE": True}.items():
+        monkeypatch.setattr(qa_service.settings, k, v)
+    return await qa_service._crag_correct(None, "q", [{"score": initial_score}], "deepseek", 5)
+
+
+@pytest.mark.asyncio
+async def test_crag_v5_rewrite_recovered(monkeypatch):
+    """rewrite 后 correct → rewritten_recovered, rewriteDelta>0, label high。"""
+    await _seed_rewrite(monkeypatch, 0.9)
+    _c, _conf, action, grade, extras = await _v3_crag(monkeypatch, 0.1)
+    assert grade == "correct"
+    assert action == "rewritten_recovered"
+    assert extras["rewriteDelta"] == 0.8
+    assert extras["confidenceLabel"] == "high"
+    assert "refusedReason" not in extras
+
+
+@pytest.mark.asyncio
+async def test_crag_v5_rewrite_partial(monkeypatch):
+    """rewrite 后 ambiguous → rewritten_partial。"""
+    await _seed_rewrite(monkeypatch, 0.5)
+    _c, _conf, action, grade, extras = await _v3_crag(monkeypatch, 0.1)
+    assert grade == "ambiguous"
+    assert action == "rewritten_partial"
+    assert extras["rewriteDelta"] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_crag_v5_rewrite_failed_refused(monkeypatch):
+    """rewrite 后仍 incorrect → rewritten_failed → refused + refusedReason=rewrite_exhausted。"""
+    await _seed_rewrite(monkeypatch, 0.1)
+    _c, conf, action, grade, extras = await _v3_crag(monkeypatch, 0.1)
+    assert action == "rewritten_failed"
+    assert grade == "incorrect"
+    assert conf == "refused"
+    assert extras["confidenceLabel"] == "refused"
+    assert extras["refusedReason"] == "rewrite_exhausted"
+
+
+def test_refused_reason_classification():
+    from app.services.qa_service import _refused_reason
+    assert _refused_reason("rewritten_failed", 1, "incorrect") == "rewrite_exhausted"
+    assert _refused_reason("normal", 0, "incorrect") == "no_recall"
+    assert _refused_reason("normal", 3, "ambiguous") == ""  # 非 refused 场景
+
+
 # ===== T3 · 连续置信度 + 5档 + 修 low（断点 B）=====
 
 from app.rag.crag import confidence_score, label_to_confidence

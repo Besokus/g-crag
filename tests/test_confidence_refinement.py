@@ -99,13 +99,41 @@ async def test_crag_correct_v3_picks_up_detail(monkeypatch):
     _ctxs, conf, _action, grade, extras = await qa_service._crag_correct(
         None, "q", [{"score": 0.9}], "deepseek", 5
     )
-    assert grade == "correct"
-    # T3: es=(2+0.5)/5=0.5 → medium_high → 老字段 confidence 映射 medium
+    # T4: V3 开时 grade 由 es 统一分桶，es=(2+0.5)/5=0.5 → ambiguous（非 v2 labels 的 correct）
+    assert grade == "ambiguous"
+    # es=0.5 → medium_high → 老字段 confidence 映射 medium
     assert conf == "medium"
     assert extras["confidenceLabel"] == "medium_high"
     assert extras["confidenceScore"] == 0.5
     assert extras["cragDetail"] == detail
     assert "2 relevant" in extras["cragReason"]
+
+
+# ===== T4 · v1/v2 口径统一 grade 吃 es（断点 C）=====
+
+from app.rag.crag import grade as crag_grade, GRADE_CORRECT, GRADE_AMBIGUOUS, GRADE_INCORRECT
+
+
+def test_grade_uses_es_when_provided():
+    # es 提供 → 用 es 分桶（忽略 top1）
+    assert crag_grade(0.99, 5, True, es=0.5)[0] == GRADE_AMBIGUOUS  # top1 高但 es=0.5
+    assert crag_grade(0.1, 5, True, es=0.8)[0] == GRADE_CORRECT     # top1 低但 es=0.8
+
+
+def test_grade_top1_when_es_none():
+    # es=None → 老 top1 逻辑（现状）
+    assert crag_grade(0.8, 5, True, es=None)[0] == GRADE_CORRECT
+
+
+def test_grade_v3_unifies_v1_v2_caliber():
+    """同 es 值，v1(top1) 与 v2(detail→es) 给同 grade（口径稳定，断点 C 收口）。"""
+    es_val = 0.65
+    g_v1 = crag_grade(es_val, 5, True, es=es_val)
+    # v2 detail 算出同 es：13 relevant / 20 = 0.65
+    es_v2 = evidence_strength(detail={"relevant": 13, "partial": 0, "irrelevant": 7, "n": 20})
+    assert es_v2 == 0.65
+    g_v2 = crag_grade(0.0, 20, True, es=es_v2)
+    assert g_v1[0] == g_v2[0] == GRADE_CORRECT
 
 
 # ===== T3 · 连续置信度 + 5档 + 修 low（断点 B）=====

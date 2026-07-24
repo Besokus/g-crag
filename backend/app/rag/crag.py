@@ -18,15 +18,26 @@ GRADE_AMBIGUOUS = "ambiguous"
 GRADE_INCORRECT = "incorrect"
 
 
-def grade(top1_score: float, n_contexts: int, rerank_ok: bool = True) -> tuple[str, str]:
+def grade(
+    top1_score: float, n_contexts: int, rerank_ok: bool = True,
+    es: float | None = None,
+) -> tuple[str, str]:
     """检索结果分级。返回 (grade, reason)。
 
     rerank_ok=False（rerank 关闭/失败，score 不可靠）→ 降级 ambiguous，不误触发纠错。
+    T4（断点 C）：es 非 None 时用 es 分桶（统一 v1 绝对阈值 / v2 相对计数口径），
+    否则老 top1 逻辑（关 V3 现状）。
     """
     if not rerank_ok:
         return GRADE_AMBIGUOUS, "rerank 未启用，无法可靠分级（保守降级）"
     if n_contexts == 0:
         return GRADE_INCORRECT, "检索无结果"
+    if es is not None:
+        if es >= settings.CRAG_HIGH:
+            return GRADE_CORRECT, f"es {es:.2f} ≥ {settings.CRAG_HIGH}"
+        if es < settings.CRAG_LOW:
+            return GRADE_INCORRECT, f"es {es:.2f} < {settings.CRAG_LOW}"
+        return GRADE_AMBIGUOUS, f"es {es:.2f} 介于阈值间"
     if top1_score >= settings.CRAG_HIGH:
         return GRADE_CORRECT, f"top1 相关性 {top1_score:.2f} ≥ {settings.CRAG_HIGH}"
     if top1_score < settings.CRAG_LOW:

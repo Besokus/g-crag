@@ -116,7 +116,22 @@ async def _crag_correct(
             grade, _v2_detail = await crag_v2.grade_with_llm(nq, contexts, model_type)
         except Exception as e:
             degraded("crag_v2", e)
-    if not grade:
+    _v3 = getattr(settings, "CRAG_V3_ENABLE", False)
+
+    def _es_of(ctxs: list[dict], detail: dict | None) -> float | None:
+        """当前 contexts/detail 的证据强度（v2 detail 优先，否则 v1 top1）。"""
+        if detail:
+            return crag.evidence_strength(detail=detail, rerank_ok=rerank_ok)
+        if ctxs:
+            return crag.evidence_strength(top1=float(ctxs[0].get("score", 0.0)), rerank_ok=rerank_ok)
+        return None
+
+    _es: float | None = None
+    # T4（断点 C）：V3 开时 grade 统一由 es 分桶（消除 v1 绝对阈值/v2 相对计数口径漂移）
+    if _v3:
+        _es = _es_of(contexts, _v2_detail)
+        grade, _ = crag.grade(0.0, len(contexts), rerank_ok, es=_es)
+    elif not grade:
         top1 = float(contexts[0].get("score", 0.0)) if contexts else 0.0
         grade, _ = crag.grade(top1, len(contexts), rerank_ok)
 
@@ -128,8 +143,12 @@ async def _crag_correct(
                 new_ctx = await retrieval_service.mixed_search(db, new_q, topk, tenant=tenant)
                 if new_ctx:
                     contexts = new_ctx
-                    top1 = float(contexts[0].get("score", 0.0))
-                    grade, _ = crag.grade(top1, len(contexts), rerank_ok)
+                    if _v3:
+                        _es = _es_of(contexts, None)  # 改写后无 v2 detail
+                        grade, _ = crag.grade(0.0, len(contexts), rerank_ok, es=_es)
+                    else:
+                        top1 = float(contexts[0].get("score", 0.0))
+                        grade, _ = crag.grade(top1, len(contexts), rerank_ok)
                     action = "rewritten"
         except Exception as e:
             degraded("crag_rewrite", e)
@@ -146,13 +165,10 @@ async def _crag_correct(
         action = "refused"
 
     # T2+T3（断点 A+B）：CRAG_V3_ENABLE 开时连续置信度 + 逐条 detail 归因
-    if getattr(settings, "CRAG_V3_ENABLE", False):
-        # 证据强度：v2 detail 优先，否则 v1 top1（rerank 降级 → es=None）
-        if _v2_detail:
-            _es = crag.evidence_strength(detail=_v2_detail, rerank_ok=rerank_ok)
-        else:
-            _top1 = float(contexts[0].get("score", 0.0)) if contexts else 0.0
-            _es = crag.evidence_strength(top1=_top1, rerank_ok=rerank_ok)
+    if _v3:
+        # _es 已在 grade 时算（含改写重判后）；兜底重算（如 contexts 被邻域扩展改写）
+        if _es is None:
+            _es = _es_of(contexts, _v2_detail)
         _score, _label = crag.confidence_score(_es, action, degraded=not rerank_ok)
         confidence = crag.label_to_confidence(_label)  # 老字段映射（前端零改动）
         extras["confidenceScore"] = _score

@@ -198,6 +198,29 @@ def test_refused_reason_classification():
     assert _refused_reason("normal", 3, "ambiguous") == ""  # 非 refused 场景
 
 
+# ===== T6 · CRAG 阈值热调 rt_crag_high/low（断点 F）=====
+
+def test_rt_crag_defaults():
+    from app.services import config_service
+    from app.config import settings
+    assert config_service.rt_crag_high() == settings.CRAG_HIGH
+    assert config_service.rt_crag_low() == settings.CRAG_LOW
+
+
+def test_grade_uses_rt_crag_hot_update():
+    from app.services import config_service
+    from app.rag import crag
+    config_service._RUNTIME["crag_high"] = 0.9
+    config_service._RUNTIME["crag_low"] = 0.1
+    try:
+        assert crag.grade(0, 5, True, es=0.5)[0] == "ambiguous"   # 0.1<0.5<0.9
+        assert crag.grade(0, 5, True, es=0.95)[0] == "correct"    # ≥0.9
+        assert crag.grade(0, 5, True, es=0.05)[0] == "incorrect"  # <0.1
+    finally:
+        config_service._RUNTIME.pop("crag_high", None)
+        config_service._RUNTIME.pop("crag_low", None)
+
+
 # ===== T3 · 连续置信度 + 5档 + 修 low（断点 B）=====
 
 from app.rag.crag import confidence_score, label_to_confidence

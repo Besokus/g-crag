@@ -32,6 +32,15 @@ async def load_runtime() -> None:
         _RUNTIME["system_prompt"] = sp or None
     except Exception:
         pass
+    try:
+        cv = await redis_client.cache_get_json("config:crag")
+        if cv:
+            if "high" in cv:
+                _RUNTIME["crag_high"] = float(cv["high"])
+            if "low" in cv:
+                _RUNTIME["crag_low"] = float(cv["low"])
+    except Exception:
+        pass
 
 
 def rt_ef() -> int:
@@ -46,6 +55,18 @@ def rt_temperature() -> float:
 
 def rt_max_tokens() -> int:
     return _RUNTIME["max_tokens"]
+
+
+def rt_crag_high() -> float:
+    """CRAG 分级 high 阈值（运行时可调，T6 断点 F）。默认 settings.CRAG_HIGH。"""
+    from app.config import settings
+    return float(_RUNTIME.get("crag_high", settings.CRAG_HIGH))
+
+
+def rt_crag_low() -> float:
+    """CRAG 分级 low 阈值（运行时可调，T6 断点 F）。默认 settings.CRAG_LOW。"""
+    from app.config import settings
+    return float(_RUNTIME.get("crag_low", settings.CRAG_LOW))
 
 
 async def get_milvus_config() -> dict:

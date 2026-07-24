@@ -32,16 +32,23 @@ def grade(
         return GRADE_AMBIGUOUS, "rerank 未启用，无法可靠分级（保守降级）"
     if n_contexts == 0:
         return GRADE_INCORRECT, "检索无结果"
+    # T6（断点 F）：阈值热调（config_service.rt_*，Redis config:crag 即改即生效），回退 settings
+    try:
+        from app.services import config_service
+        _high = config_service.rt_crag_high()
+        _low = config_service.rt_crag_low()
+    except Exception:
+        _high, _low = settings.CRAG_HIGH, settings.CRAG_LOW
     if es is not None:
-        if es >= settings.CRAG_HIGH:
-            return GRADE_CORRECT, f"es {es:.2f} ≥ {settings.CRAG_HIGH}"
-        if es < settings.CRAG_LOW:
-            return GRADE_INCORRECT, f"es {es:.2f} < {settings.CRAG_LOW}"
+        if es >= _high:
+            return GRADE_CORRECT, f"es {es:.2f} ≥ {_high}"
+        if es < _low:
+            return GRADE_INCORRECT, f"es {es:.2f} < {_low}"
         return GRADE_AMBIGUOUS, f"es {es:.2f} 介于阈值间"
-    if top1_score >= settings.CRAG_HIGH:
-        return GRADE_CORRECT, f"top1 相关性 {top1_score:.2f} ≥ {settings.CRAG_HIGH}"
-    if top1_score < settings.CRAG_LOW:
-        return GRADE_INCORRECT, f"top1 相关性 {top1_score:.2f} < {settings.CRAG_LOW}"
+    if top1_score >= _high:
+        return GRADE_CORRECT, f"top1 相关性 {top1_score:.2f} ≥ {_high}"
+    if top1_score < _low:
+        return GRADE_INCORRECT, f"top1 相关性 {top1_score:.2f} < {_low}"
     return GRADE_AMBIGUOUS, f"top1 相关性 {top1_score:.2f} 介于阈值间"
 
 

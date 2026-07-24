@@ -298,4 +298,5 @@ def citation_cache_version() -> str:
     """
     s = settings
     return (f"cv{int(s.CITATION_VERIFIER_ENABLE)}{int(s.CITATION_STRUCTURED_OUTPUT)}"
-            f"{int(s.CITATION_NLI_ENABLE)}{_gov_generation}")
+            f"{int(s.CITATION_NLI_ENABLE)}{_gov_generation}"
+            f"R{int(getattr(s, 'CRAG_V3_ENABLE', False))}")  # T9: confidence 模型代际(V3开关)，切换→老缓存自动失效

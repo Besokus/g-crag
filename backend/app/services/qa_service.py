@@ -145,10 +145,23 @@ async def _crag_correct(
     if grade == crag.GRADE_INCORRECT and action == "rewritten":
         action = "refused"
 
-    # T2（断点 A）：CRAG_V3_ENABLE 开时捡回 v2 逐条 detail + 归因，随 extras 下发
-    if getattr(settings, "CRAG_V3_ENABLE", False) and _v2_detail:
-        extras["cragDetail"] = _v2_detail
-        extras["cragReason"] = _format_crag_reason(_v2_detail, grade)
+    # T2+T3（断点 A+B）：CRAG_V3_ENABLE 开时连续置信度 + 逐条 detail 归因
+    if getattr(settings, "CRAG_V3_ENABLE", False):
+        # 证据强度：v2 detail 优先，否则 v1 top1（rerank 降级 → es=None）
+        if _v2_detail:
+            _es = crag.evidence_strength(detail=_v2_detail, rerank_ok=rerank_ok)
+        else:
+            _top1 = float(contexts[0].get("score", 0.0)) if contexts else 0.0
+            _es = crag.evidence_strength(top1=_top1, rerank_ok=rerank_ok)
+        _score, _label = crag.confidence_score(_es, action, degraded=not rerank_ok)
+        confidence = crag.label_to_confidence(_label)  # 老字段映射（前端零改动）
+        extras["confidenceScore"] = _score
+        extras["confidenceLabel"] = _label
+        extras["evidenceStrength"] = _es
+        # T2: 逐条 detail 归因（仅 v2 路径有）
+        if _v2_detail:
+            extras["cragDetail"] = _v2_detail
+            extras["cragReason"] = _format_crag_reason(_v2_detail, grade)
 
     try:
         from app.core import metrics

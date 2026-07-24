@@ -79,3 +79,50 @@ def evidence_strength(
     if top1 is not None:
         return _clamp01(top1)
     return None
+
+
+# confidence refinement T3：5 档细分阈值（由 evidence_strength 分桶）
+_CONF_HIGH = 0.7
+_CONF_MEDIUM_HIGH = 0.5
+_CONF_MEDIUM_LOW = 0.35
+_CONF_LOW = 0.2
+_CONF_DEGRADED_SCORE = 0.3  # rerank 降级封顶 low 的标定分
+
+
+def confidence_score(
+    es: float | None, action: str, degraded: bool = False,
+) -> tuple[float, str]:
+    """连续置信度 + 5 档标签（confidence refinement T3）。
+
+    es: evidence_strength ∈ [0,1]（None=评估器降级）；action: normal/rewritten/refused。
+    返回 (score, label)，label ∈ high/medium_high/medium_low/low/refused。
+
+    - action=refused（改写后仍 incorrect）：强 refused（score 用 es，通常极低）。
+    - degraded（rerank 未启用/失败，es=None）：封顶 low（不进 high/medium_high，断点 D）。
+    - 否则按 es 分桶；es<_CONF_LOW → refused（证据极弱）。
+    """
+    if action == "refused":
+        return (round(float(es or 0.0), 3), "refused")
+    if es is None or degraded:
+        return (_CONF_DEGRADED_SCORE, "low")
+    es = max(0.0, min(1.0, float(es)))
+    if es >= _CONF_HIGH:
+        lbl = "high"
+    elif es >= _CONF_MEDIUM_HIGH:
+        lbl = "medium_high"
+    elif es >= _CONF_MEDIUM_LOW:
+        lbl = "medium_low"
+    elif es >= _CONF_LOW:
+        lbl = "low"
+    else:
+        lbl = "refused"
+    return (round(es, 3), lbl)
+
+
+def label_to_confidence(label: str) -> str:
+    """5 档细分标签 → 老对外置信度 high/medium/refused（前端 confLabel 零改动）。
+
+    low 映射 medium（老字段无 low；low 仅在 confidenceLabel 新字段可见）。
+    """
+    return {"high": "high", "medium_high": "medium", "medium_low": "medium",
+            "low": "medium", "refused": "refused"}.get(label, "medium")

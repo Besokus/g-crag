@@ -100,9 +100,74 @@ async def test_crag_correct_v3_picks_up_detail(monkeypatch):
         None, "q", [{"score": 0.9}], "deepseek", 5
     )
     assert grade == "correct"
-    assert conf == "high"
+    # T3: es=(2+0.5)/5=0.5 → medium_high → 老字段 confidence 映射 medium
+    assert conf == "medium"
+    assert extras["confidenceLabel"] == "medium_high"
+    assert extras["confidenceScore"] == 0.5
     assert extras["cragDetail"] == detail
     assert "2 relevant" in extras["cragReason"]
+
+
+# ===== T3 · 连续置信度 + 5档 + 修 low（断点 B）=====
+
+from app.rag.crag import confidence_score, label_to_confidence
+
+
+def test_confidence_score_buckets():
+    assert confidence_score(0.9, "normal") == (0.9, "high")
+    assert confidence_score(0.6, "normal") == (0.6, "medium_high")
+    assert confidence_score(0.4, "normal") == (0.4, "medium_low")
+    assert confidence_score(0.25, "normal") == (0.25, "low")        # low 真产出
+    assert confidence_score(0.1, "normal") == (0.1, "refused")
+
+
+def test_confidence_score_refused_action():
+    # action=refused（改写后仍 incorrect）→ 强 refused（不论 es）
+    assert confidence_score(0.5, "refused") == (0.5, "refused")
+
+
+def test_confidence_score_degraded_caps_low():
+    # rerank 降级（es=None/degraded）→ 封顶 low，绝不进 high
+    assert confidence_score(None, "normal", degraded=True) == (0.3, "low")
+    assert confidence_score(None, "normal") == (0.3, "low")
+
+
+def test_confidence_score_boundaries():
+    assert confidence_score(0.7, "normal")[1] == "high"
+    assert confidence_score(0.5, "normal")[1] == "medium_high"
+    assert confidence_score(0.35, "normal")[1] == "medium_low"
+    assert confidence_score(0.2, "normal")[1] == "low"
+
+
+def test_label_to_confidence_legacy_mapping():
+    # 老字段兼容：high/refused 保留，medium_*/low → medium（前端零改动）
+    assert label_to_confidence("high") == "high"
+    assert label_to_confidence("medium_high") == "medium"
+    assert label_to_confidence("medium_low") == "medium"
+    assert label_to_confidence("low") == "medium"     # low 仅 confidenceLabel 新字段可见
+    assert label_to_confidence("refused") == "refused"
+
+
+@pytest.mark.asyncio
+async def test_crag_correct_v3_v1_path_confidence(monkeypatch):
+    """V3 开 + v1 路径（无 detail）→ extras 含 confidenceScore/Label/evidenceStrength。"""
+    from app.services import qa_service
+
+    monkeypatch.setattr(qa_service.settings, "CRAG_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "CRAG_PERDOC_ENABLE", False)  # 走 v1
+    monkeypatch.setattr(qa_service.settings, "CRAG_V3_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "RERANK_ENABLE", True)
+
+    # top1=0.8 → grade=correct, es=0.8 → high
+    _ctxs, conf, _action, grade, extras = await qa_service._crag_correct(
+        None, "q", [{"score": 0.8}], "deepseek", 5
+    )
+    assert grade == "correct"
+    assert conf == "high"
+    assert extras["confidenceLabel"] == "high"
+    assert extras["confidenceScore"] == 0.8
+    assert extras["evidenceStrength"] == 0.8
+    assert "cragDetail" not in extras  # v1 路径无逐条 detail
 
 
 @pytest.mark.asyncio

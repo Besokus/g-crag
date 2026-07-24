@@ -334,6 +334,44 @@ async def maybe_blacklist_on_dislike(query: str) -> int:
         return 0
 
 
+async def check_overconfident(query: str, tenant: str = "default") -> bool:
+    """dislike 时查该 query 缓存 confidence=high → over_confident 冲突（断点 G）。
+
+    机器判 high 但用户 dislike → OVERCONFIDENT 计数 + 进 evidence_gap 复核。
+    用独立 Redis 读（不依赖请求 db），供后台 task 安全调用。返回是否检出冲突。
+    """
+    if not getattr(settings, "CONFIDENCE_OVERCONFIDENT_ENABLE", False):
+        return False
+    try:
+        import json
+        from app.services.term_service import normalize as _normalize
+        from app.clients import redis_client
+        from app.core import metrics
+        nq = _normalize(query or "")
+        if not nq:
+            return False
+        r = redis_client.get_redis()
+        async for key in r.scan_iter(match=f"qa:*:{nq}", count=50):
+            try:
+                v = await r.get(key)
+                if not v:
+                    continue
+                cached = json.loads(v)
+                if cached.get("confidence") == "high":
+                    metrics.OVERCONFIDENT.inc()
+                    from app.services import evidence_gap_service
+                    await evidence_gap_service.collect(
+                        nq, cached.get("answer", ""), "high", "", "", "overconfident", tenant,
+                    )
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception as e:
+        degraded("optimizer_overconfident", e)
+        return False
+
+
 async def add_blacklist(query: str) -> str:
     """管理员手动加入黑名单。返回归一化后的 nq。"""
     from app.services.term_service import normalize as _normalize

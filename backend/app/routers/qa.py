@@ -190,11 +190,14 @@ async def feedback(
     if body.feedback == "dislike" and body.query:
         try:
             from app.services.feedback_optimizer_service import (
-                invalidate_cache_on_dislike, maybe_blacklist_on_dislike,
+                invalidate_cache_on_dislike, maybe_blacklist_on_dislike, check_overconfident,
             )
             _bg_tasks.add(asyncio.create_task(invalidate_cache_on_dislike(body.query)))
             # maybe 内部用独立 session，后台 task 安全
             _bg_tasks.add(asyncio.create_task(maybe_blacklist_on_dislike(body.query)))
+            # T8（断点 G）：dislike×历史high置信 → over_confident 冲突检测 + evidence_gap 复核
+            _bg_tasks.add(asyncio.create_task(check_overconfident(
+                body.query, getattr(user, "tenant_id", None) or "default")))
         except Exception:
             pass
         # B1 数据飞轮：dislike → 质量事件总线 → 订阅者(evidence_gap 补全等)；opt-in

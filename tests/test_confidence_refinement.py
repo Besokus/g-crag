@@ -255,6 +255,69 @@ async def test_crag_v7_emits_metrics(monkeypatch):
     assert "grid_crag_refused_reason_total" in text
 
 
+# ===== T8 · over_confident 机器人工对齐仲裁（断点 G）=====
+
+@pytest.mark.asyncio
+async def test_check_overconfident_disabled_default(monkeypatch):
+    from app.services import feedback_optimizer_service as fos
+    monkeypatch.setattr(fos.settings, "CONFIDENCE_OVERCONFIDENT_ENABLE", False)
+    assert await fos.check_overconfident("q") is False
+
+
+@pytest.mark.asyncio
+async def test_check_overconfident_detects_high_conflict(monkeypatch):
+    """dislike 时缓存 confidence=high → 检出 over_confident + 触发 evidence_gap 复核。"""
+    from app.services import feedback_optimizer_service as fos
+    from app.clients import redis_client as rc
+    import app.services.evidence_gap_service as egs
+
+    monkeypatch.setattr(fos.settings, "CONFIDENCE_OVERCONFIDENT_ENABLE", True)
+
+    class _FakeRedis:
+        async def scan_iter(self, match=None, count=100):
+            yield "qa:default:deepseek:nq:1"
+
+        async def get(self, key):
+            import json
+            return json.dumps({"confidence": "high", "answer": "ans"})
+
+    monkeypatch.setattr(rc, "get_redis", lambda: _FakeRedis())
+
+    called = []
+
+    async def _fake_collect(*a, **k):
+        called.append(a)
+
+    monkeypatch.setattr(egs, "collect", _fake_collect)
+
+    assert await fos.check_overconfident("某query") is True
+    assert len(called) == 1  # evidence_gap 复核被调
+
+
+@pytest.mark.asyncio
+async def test_check_overconfident_no_high_skips(monkeypatch):
+    """缓存 confidence 非 high → 不检出（无冲突）。"""
+    from app.services import feedback_optimizer_service as fos
+    from app.clients import redis_client as rc
+    import app.services.evidence_gap_service as egs
+
+    monkeypatch.setattr(fos.settings, "CONFIDENCE_OVERCONFIDENT_ENABLE", True)
+
+    class _FakeRedis:
+        async def scan_iter(self, match=None, count=100):
+            yield "qa:default:deepseek:nq:1"
+
+        async def get(self, key):
+            import json
+            return json.dumps({"confidence": "medium", "answer": "ans"})
+
+    monkeypatch.setattr(rc, "get_redis", lambda: _FakeRedis())
+    called = []
+    monkeypatch.setattr(egs, "collect", lambda *a, **k: called.append(a))
+    assert await fos.check_overconfident("q") is False
+    assert called == []
+
+
 # ===== T3 · 连续置信度 + 5档 + 修 low（断点 B）=====
 
 from app.rag.crag import confidence_score, label_to_confidence

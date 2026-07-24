@@ -91,25 +91,29 @@ async def _cache_knowledge_valid(
 async def _crag_correct(
     db: AsyncSession, nq: str, contexts: list[dict],
     model_type: str | None, topk: int, tenant: str = "default",
-) -> tuple[list[dict], str, str, str]:
-    """CRAG 分级 + 纠错闭环。返回 (contexts, confidence, action, grade)。
+) -> tuple[list[dict], str, str, str, dict]:
+    """CRAG 分级 + 纠错闭环。返回 (contexts, confidence, action, grade, extras)。
 
     分级：CRAG v2（LLM 逐条评估证据）优先，未启用/失败回退 v1（rerank top1 分数）。
     incorrect → query 改写重检索 → 仍 incorrect → refused 保守拒答。
     contexts 可能被纠错重检索替换。
+    extras: CRAG_V3_ENABLE 开时含 cragDetail/cragReason（捡回 v2 逐条 detail，断点 A），
+            关={} 现状（前端零改动）。缓存字段同步见 T9 cv R 段。
     """
     confidence, action, grade = "high", "normal", ""
+    extras: dict = {}
     if not settings.CRAG_ENABLE:
-        return contexts, confidence, action, grade
+        return contexts, confidence, action, grade, extras
     from app.rag import crag
 
     rerank_ok = settings.RERANK_ENABLE
     # 分级：v2 优先，失败回退 v1
     grade = ""
+    _v2_detail: dict = {}
     if settings.CRAG_PERDOC_ENABLE:
         from app.rag import crag_v2
         try:
-            grade, _ = await crag_v2.grade_with_llm(nq, contexts, model_type)
+            grade, _v2_detail = await crag_v2.grade_with_llm(nq, contexts, model_type)
         except Exception as e:
             degraded("crag_v2", e)
     if not grade:
@@ -140,6 +144,12 @@ async def _crag_correct(
     confidence = crag.confidence_of(grade, action == "rewritten")
     if grade == crag.GRADE_INCORRECT and action == "rewritten":
         action = "refused"
+
+    # T2（断点 A）：CRAG_V3_ENABLE 开时捡回 v2 逐条 detail + 归因，随 extras 下发
+    if getattr(settings, "CRAG_V3_ENABLE", False) and _v2_detail:
+        extras["cragDetail"] = _v2_detail
+        extras["cragReason"] = _format_crag_reason(_v2_detail, grade)
+
     try:
         from app.core import metrics
         metrics.CRAG_GRADE.labels(grade).inc()
@@ -147,7 +157,24 @@ async def _crag_correct(
         metrics.CRAG_CONFIDENCE.labels(confidence).inc()
     except Exception:
         pass
-    return contexts, confidence, action, grade
+    return contexts, confidence, action, grade, extras
+
+
+def _format_crag_reason(detail: dict | None, grade: str) -> str:
+    """v2 逐条 detail → 人话归因（confidence refinement T2）。
+
+    detail: crag_v2.labels_to_grade 产物 {relevant, partial, irrelevant, n}。
+    grade: correct/ambiguous/incorrect。空 detail 返回 ""。
+    """
+    if not detail:
+        return ""
+    rel = int(detail.get("relevant", 0))
+    partial = int(detail.get("partial", 0))
+    irr = int(detail.get("irrelevant", 0))
+    n = int(detail.get("n", rel + partial + irr))
+    grade_cn = {"correct": "证据充分", "ambiguous": "证据有限",
+                "incorrect": "证据不足"}.get(grade, "")
+    return f"{grade_cn}：{rel} relevant + {partial} partial + {irr} irrelevant / {n} 条（v2 per-doc）"
 
 
 async def _expand_neighbors(db: AsyncSession, contexts: list[dict], window: int = 1, max_add: int = 4) -> list[dict]:
@@ -538,7 +565,7 @@ async def answer(
         }
 
     # Corrective RAG：分级 + 纠错闭环
-    contexts, confidence, crag_action, crag_grade = await _crag_correct(
+    contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
         db, nq, contexts, model_type, topk, tenant
     )
 
@@ -668,6 +695,7 @@ async def answer(
         "routeReason": routing.reason if routing else "",
         "conversationId": conversation_id,
         **citation_extras,   # Task 10: 空 dict（开关关）时不新增字段，零破坏
+        **crag_extras,       # T2: CRAG_V3 归因字段（关={}零破坏；随 result 进缓存自动同步）
     }
 
     # 单轮 或 多轮 且 高置信(confidence==high) 才写；黑名单/证据有限/不足不写
@@ -1041,7 +1069,7 @@ async def stream_answer(
         return
 
     # Corrective RAG：分级 + 纠错闭环
-    contexts, confidence, crag_action, crag_grade = await _crag_correct(
+    contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
         db, nq, contexts, model_type, topk, tenant
     )
 
@@ -1202,6 +1230,8 @@ async def stream_answer(
     # C3：校验开时随 done 下发 citationVerified（关时不带此字段=现状，前端零改动）
     if _stream_citation_extras.get("citationVerified"):
         done_ev["citationVerified"] = _stream_citation_extras["citationVerified"]
+    # T2：CRAG_V3 新字段附加下发（CRAG_V3_ENABLE 关时 crag_extras={}，前端零改动）
+    done_ev.update(crag_extras)
     yield done_ev
 
 

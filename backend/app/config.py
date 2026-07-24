@@ -144,6 +144,7 @@ class Settings(BaseSettings):
     CRAG_LOW: float = 0.3        # top1 rerank分<此值=incorrect(触发纠错)
     CRAG_PERDOC_ENABLE: bool = False  # CRAG v2：LLM 逐条评估证据相关性（非仅 top1，增延迟，默认关）
     CRAG_TIMEOUT: float = 5.0         # CRAG v2：LLM 评估单次超时限制（秒）
+    CRAG_V3_ENABLE: bool = False  # confidence refinement 总开关: 连续置信度+归因+矩阵(关=现状3档,前端零改动)
 
     # ---------- 检索参数调优（只建议模式）----------
     TUNE_ENABLE: bool = True

@@ -57,3 +57,73 @@ def test_evidence_strength_n_zero_fallback_top1():
 def test_evidence_strength_no_input_none():
     # 啥都没给 → None
     assert evidence_strength() is None
+
+
+# ===== T2 · 捡回 v2 detail + 归因（断点 A）=====
+
+import pytest
+from app.rag import crag as crag_mod
+
+
+def test_format_crag_reason_with_detail():
+    from app.services.qa_service import _format_crag_reason
+    r = _format_crag_reason({"relevant": 2, "partial": 1, "irrelevant": 2, "n": 5}, "ambiguous")
+    assert "证据有限" in r
+    assert "2 relevant" in r and "1 partial" in r and "5 条" in r
+
+
+def test_format_crag_reason_empty():
+    from app.services.qa_service import _format_crag_reason
+    assert _format_crag_reason({}, "correct") == ""
+    assert _format_crag_reason(None, "correct") == ""
+
+
+@pytest.mark.asyncio
+async def test_crag_correct_v3_picks_up_detail(monkeypatch):
+    """CRAG_V3_ENABLE + PERDOC 开 → extras 含 cragDetail/cragReason（断点 A）。"""
+    from app.services import qa_service
+    from app.rag import crag_v2
+
+    monkeypatch.setattr(qa_service.settings, "CRAG_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "CRAG_PERDOC_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "CRAG_V3_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "RERANK_ENABLE", True)
+
+    detail = {"relevant": 2, "partial": 1, "irrelevant": 2, "n": 5}
+
+    async def _fake_grade(*a, **k):
+        return crag_mod.GRADE_CORRECT, detail
+
+    monkeypatch.setattr(crag_v2, "grade_with_llm", _fake_grade)
+
+    _ctxs, conf, _action, grade, extras = await qa_service._crag_correct(
+        None, "q", [{"score": 0.9}], "deepseek", 5
+    )
+    assert grade == "correct"
+    assert conf == "high"
+    assert extras["cragDetail"] == detail
+    assert "2 relevant" in extras["cragReason"]
+
+
+@pytest.mark.asyncio
+async def test_crag_correct_v3_off_no_extras(monkeypatch):
+    """CRAG_V3_ENABLE 关 → extras={} 现状（前端零改动）。"""
+    from app.services import qa_service
+    from app.rag import crag_v2
+
+    monkeypatch.setattr(qa_service.settings, "CRAG_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "CRAG_PERDOC_ENABLE", True)
+    monkeypatch.setattr(qa_service.settings, "CRAG_V3_ENABLE", False)
+    monkeypatch.setattr(qa_service.settings, "RERANK_ENABLE", True)
+
+    detail = {"relevant": 2, "partial": 1, "irrelevant": 2, "n": 5}
+
+    async def _fake_grade(*a, **k):
+        return crag_mod.GRADE_CORRECT, detail
+
+    monkeypatch.setattr(crag_v2, "grade_with_llm", _fake_grade)
+
+    _ctxs, _conf, _action, _grade, extras = await qa_service._crag_correct(
+        None, "q", [{"score": 0.9}], "deepseek", 5
+    )
+    assert extras == {}

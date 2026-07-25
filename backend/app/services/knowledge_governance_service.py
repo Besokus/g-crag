@@ -45,6 +45,7 @@ ISSUE_TYPES = {
     "review_due",
     "conflict_negation",
     "conflict_threshold",
+    "quality_low",  # B3：judge 聚合差评文档 → 治理 issue（aggregate_doc_quality 生成）
 }
 
 _STATUS_TRANSITIONS = {
@@ -912,6 +913,10 @@ async def run_scan(
     # B2 数据飞轮：成功路径末尾 set KB_FRESHNESS（active 未过期文档占比）。
     # 异常路径不挂（degraded 兜底，避免噪声淹没指标）。
     await _set_freshness_metric(db, tenant_id)
+    # B3 数据飞轮：judge 聚合差评文档 → quality_low 治理 issue（路径3，不动在线权重）。
+    # 复用 governance scan 周期，无需新建 loop；DOC_QUALITY_ISSUE_ENABLE=False / 异常 → 跳过。
+    from app.services.doc_quality_service import aggregate_doc_quality
+    doc_quality_result = await aggregate_doc_quality(db, tenant_id)
     return {
         "tenantId": tenant_id,
         "scanTime": _iso(now),
@@ -925,6 +930,7 @@ async def run_scan(
             "mode": "explainable_rules",
             "autoOverwrite": False,
         },
+        "docQuality": doc_quality_result,
     }
 
 

@@ -233,6 +233,12 @@ class Settings(BaseSettings):
     EVOLUTION_RETEST_ENABLE: bool = True   # 回测开关：run_scan 入口对 indexed 草稿重跑 member_queries 算 lift
     EVOLUTION_RETEST_AFTER_DAYS: int = 7   # 回测触发阈值：仅 indexed_at 早于 N 天的草稿参与回测（给回流留生效窗口）
 
+    # ---------- judge 聚合差评文档 → 治理 issue（B3 路径3，不动在线权重）----------
+    DOC_QUALITY_ISSUE_ENABLE: bool = True        # 开关：governance scan 末尾聚合差评文档生成 quality_low issue
+    DOC_QUALITY_DISLIKE_THRESHOLD: float = 0.5   # dislike 率阈值：≥ 此值触发（默认 50%）
+    DOC_QUALITY_MIN_COUNT: int = 3               # 最小 dislike 样本数：低于此数不触发（防小样本误判）
+    DOC_QUALITY_WINDOW_DAYS: int = 30            # 统计窗口（近 N 天的 Feedback 计入聚合）
+
     # ===== 数据飞轮（跨闭环质量事件总线，opt-in，默认=现状）=====
     QUALITY_BUS_ENABLE: bool = False  # 质量事件总线总开关（emit 入库恒做；开=异步派发订阅者）
     DISLIKE_TO_GAP_ENABLE: bool = False  # B1 dislike→质量事件(→evidence_gap 补全)；opt-in

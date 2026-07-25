@@ -405,7 +405,7 @@ const lifecycleStages = [
   { title: '定期复审', desc: '周期性校验内容' },
   { title: '版本退出', desc: '替代、撤回可追溯' },
 ]
-const issueTypes = ['metadata_missing', 'not_yet_effective', 'expired', 'expiring', 'review_due', 'conflict_negation', 'conflict_threshold']
+const issueTypes = ['metadata_missing', 'not_yet_effective', 'expired', 'expiring', 'review_due', 'conflict_negation', 'conflict_threshold', 'quality_low']
 const pageSize = 12
 
 const activeTab = ref('documents')
@@ -740,7 +740,7 @@ function missingFieldLabel(field) {
   return ({ owner: '责任人', applicableRegion: '适用区域', effectiveAt: '生效时间', expiryPolicy: '失效策略', reviewPolicy: '复审策略', versionLabel: '版本标识', versionStatus: '版本状态' })[field] || field
 }
 function issueTypeLabel(type) {
-  return ({ metadata_missing: '元数据缺失', not_yet_effective: '尚未生效', expired: '文档失效', expiring: '即将失效', review_due: '复审逾期', conflict_negation: '相反规定', conflict_threshold: '阈值冲突' })[type] || type || '未知类型'
+  return ({ metadata_missing: '元数据缺失', not_yet_effective: '尚未生效', expired: '文档失效', expiring: '即将失效', review_due: '复审逾期', conflict_negation: '相反规定', conflict_threshold: '阈值冲突', quality_low: '质量差评' })[type] || type || '未知类型'
 }
 function severityLabel(severity) { return ({ critical: '严重', warning: '警告', info: '提示' })[severity] || severity || '未知' }
 function severityBadge(severity) { return ({ critical: 'badge-danger', warning: 'badge-warning', info: 'badge-info' })[severity] || 'badge-neutral' }

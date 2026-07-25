@@ -186,6 +186,15 @@ async def feedback(
         reason=body.reason or "",
         retrieval_sources=body.retrievalSources or "",
     )
+    # like 时写入高频问答对到 Redis（永不过期，后续流程可复用）
+    if body.feedback == "like" and body.query:
+        try:
+            from app.services.feedback_optimizer_service import write_hotqa
+            _bg_tasks.add(asyncio.create_task(write_hotqa(
+                body.query, body.answer or "", body.retrievalSources or "",
+                getattr(user, "tenant_id", None) or "default")))
+        except Exception:
+            pass
     # dislike 时异步失效缓存 + 自动黑名单判定（累计≥阈值则进黑名单，打通自动链路）
     if body.feedback == "dislike" and body.query:
         try:

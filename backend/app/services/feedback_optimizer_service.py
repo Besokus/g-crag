@@ -334,6 +334,45 @@ async def maybe_blacklist_on_dislike(query: str) -> int:
         return 0
 
 
+async def write_hotqa(query: str, answer: str, sources: str = "",
+                      tenant: str = "default") -> None:
+    """like 时写入高频问答对到 Redis（永不过期）。
+
+    key=hotqa:{nq}, value=JSON{query,answer,sources,count,lastLikedAt,tenant}。
+    count 读改写累加（同 query 再 like +1），answer/sources 覆盖更新最新。
+    后续 qa_service 可按 nq 精确命中复用（跳检索/生成）。无 TTL=永不过期。
+    用独立 Redis 操作，供后台 task 安全调用。
+    """
+    try:
+        import json
+        import time
+        from app.services.term_service import normalize as _normalize
+        from app.clients import redis_client
+        nq = _normalize(query or "")
+        if not nq:
+            return
+        r = redis_client.get_redis()
+        key = f"hotqa:{nq}"
+        existing = await r.get(key)
+        count = 1
+        if existing:
+            try:
+                count = int(json.loads(existing).get("count", 0)) + 1
+            except Exception:
+                count = 1
+        payload = {
+            "query": nq,
+            "answer": (answer or "")[:2000],
+            "sources": sources or "",
+            "count": count,
+            "lastLikedAt": int(time.time()),
+            "tenant": tenant or "default",
+        }
+        await r.set(key, json.dumps(payload, ensure_ascii=False))  # 无 TTL = 永不过期
+    except Exception as e:
+        degraded("hotqa_write", e)
+
+
 async def check_overconfident(query: str, tenant: str = "default") -> bool:
     """dislike 时查该 query 的 high 基线 → over_confident 冲突（断点 G + B6）。
 

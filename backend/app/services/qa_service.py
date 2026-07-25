@@ -63,6 +63,49 @@ async def _is_blacklisted(nq: str) -> bool:
         return False
 
 
+async def _hit_hotqa(nq: str, conversation_id: str, t0: float) -> dict | None:
+    """hotqa 高频问答对命中（永久缓存，like 写入）。命中返回完整 answer dict，未命中返回 None。
+
+    key=hotqa:{nq}（normalize 后的 query），value=JSON{query,answer,sources,count,lastLikedAt,tenant}。
+    永不过期（TTL=-1）—— 用户认可的高频答案直接复用，跳过检索/CRAG/生成链路。
+    sources 是逗号分隔字符串，这里重建为 retrievalSource 列表（docName 占位）。
+    任何异常吞掉降级（degraded 日志），返回 None → 走正常检索链路。
+    """
+    if not getattr(settings, "HOTQA_ENABLE", True):
+        return None
+    if not nq:
+        return None
+    try:
+        from app.clients import redis_client
+        hot = await redis_client.get_redis().get(f"hotqa:{nq}")
+        if not hot:
+            return None
+        d = json.loads(hot)
+        sources_str = d.get("sources") or ""
+        sources_list = [
+            {
+                "docId": "", "docName": s.strip(), "docType": "",
+                "chunkIdx": None, "chunk": "", "score": 0.0, "sources": [],
+            }
+            for s in sources_str.split(",")
+            if s.strip()
+        ]
+        return {
+            "answer": d.get("answer", ""),
+            "retrievalSource": sources_list,
+            "responseTime": round(time.time() - t0, 3),
+            "hallucinationRate": 0.0,
+            "cached": True,
+            "cacheLayer": "hotqa",
+            "confidence": "high",
+            "conversationId": conversation_id or "",
+            "hotqaCount": d.get("count", 1),
+        }
+    except Exception as e:
+        degraded("hotqa_hit", e)
+        return None
+
+
 async def _cache_knowledge_valid(
     db: AsyncSession, cached: dict | None, tenant: str | None,
 ) -> bool:
@@ -565,6 +608,18 @@ async def answer(
                 "confidence": "refused", "cragAction": "self_rag_skip",
             }
 
+    # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接返回，跳检索/CRAG/生成。
+    # 多轮也命中（用户认可的高频答案与上下文无关）；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
+    hot = await _hit_hotqa(nq, conversation_id or "", t0)
+    if hot:
+        try:
+            from app.core import metrics
+            metrics.cache_hit_inc("hotqa")
+            metrics.QA_TOTAL.labels(model_type or settings.LLM_PROVIDER, "true").inc()
+        except Exception:
+            pass
+        return hot
+
     # 多轮不走缓存（上下文变化）；单轮走三级缓存：Redis(L1) → 语义缓存(L1.5) → MySQL(L2) → LLM(L3)
     cache_layer = "llm"  # 默认走 LLM
     if is_single and not await _is_blacklisted(nq):
@@ -1064,6 +1119,43 @@ async def stream_answer(
             yield {"type": "done", "responseTime": round(time.time() - t0, 3),
                    "confidence": "refused", "cragAction": "self_rag_skip",
                    "conversationId": conversation_id or "", "cached": False}
+            return
+
+    # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接快流，跳检索/CRAG/生成。
+    # regen=True（强制重新生成）跳过 hotqa；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
+    if not regen:
+        hot = await _hit_hotqa(nq, conversation_id or "", t0)
+        if hot:
+            # 多轮命中 hotqa 也建独立 conv 落消息（与现有缓存命中段一致），单轮用 conversation_id
+            cid = conversation_id
+            if not cid:
+                try:
+                    conv = await conversation_service.create_conversation(db, username, query)
+                    cid = conv.id
+                except Exception as e:
+                    degraded("hotqa_conv_create", e)
+                    cid = conversation_id or ""
+            else:
+                try:
+                    await conversation_service.save_message(db, cid, "user", query)
+                    await conversation_service.save_message(db, cid, "assistant", hot.get("answer", ""))
+                except Exception as e:
+                    degraded("hotqa_conv_save", e)
+            yield {"type": "meta", "sources": hot.get("retrievalSource", []),
+                   "conversationId": cid or "", "cached": True, "cacheLayer": "hotqa"}
+            yield {"type": "token", "content": hot.get("answer", "")}
+            try:
+                from app.core import metrics
+                metrics.cache_hit_inc("hotqa")
+                metrics.QA_TOTAL.labels(_p, "true").inc()
+            except Exception:
+                pass
+            yield {
+                "type": "done", "responseTime": round(time.time() - t0, 3),
+                "hallucinationRate": 0.0, "conversationId": cid or "",
+                "cached": True, "cacheLayer": "hotqa", "confidence": "high",
+                "route": "hotqa",
+            }
             return
 
     # 0) 单轮三级缓存：Redis(L1) → MySQL(L2) → LLM(L3)

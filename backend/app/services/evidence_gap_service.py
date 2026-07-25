@@ -76,8 +76,62 @@ async def get_gap(gap_id: int) -> dict | None:
         return None
 
 
+# ===== 自适应 prompt：根据问题类型 + gap 上下文动态构造草稿指令 =====
+
+_QUERY_TYPE_RULES: dict[str, list[str]] = {
+    "fault": ["故障", "异常", "跳闸", "告警", "处置", "排查", "事故", "短路", "接地",
+              "过载", "拒动", "误动", "闪络", "击穿", "放电", "渗漏", "发热"],
+    "procedure": ["操作", "步骤", "检修", "巡视", "投运", "退出", "送电", "停电",
+                  "倒闸", "验收", "检测", "试验", "维护", "更换", "安装"],
+    "safety": ["安全距离", "限值", "温度", "电压", "电流", "标准", "规范", "规程",
+               "保护定值", "整定", "额定", "允许", "最高", "最低", "上限", "下限"],
+}
+
+_GAP_PROMPT_EXTRA: dict[str, str] = {
+    "fault": (
+        "\n\n【知识补全·特别要求】本次为证据补全草稿（原始置信度：{confidence}）。"
+        "请严格按以下结构作答：\n"
+        "1. 【现象描述】：故障的典型表现和判据\n"
+        "2. 【可能原因】：列出常见原因（按可能性排序）\n"
+        "3. 【处置措施】：具体操作步骤（按顺序，标注安全注意事项）\n"
+        "4. 【依据规程】：引用相关规程条款或标准编号\n"
+        "若参考资料不足以覆盖某个环节，该环节必须写明'现有资料无法确认，需补充XX规程'。"
+    ),
+    "procedure": (
+        "\n\n【知识补全·特别要求】本次为证据补全草稿（原始置信度：{confidence}）。"
+        "请严格按操作步骤顺序编写，每步标注：\n"
+        "1. 操作内容和顺序编号\n"
+        "2. 安全注意事项（停电/验电/挂地线等）\n"
+        "3. 依据的安规条款或操作票编号\n"
+        "缺少依据的步骤必须标注'需补充操作票'。"
+    ),
+    "safety": (
+        "\n\n【知识补全·特别要求】本次为证据补全草稿（原始置信度：{confidence}）。"
+        "请给出：\n"
+        "1. 明确的数值和单位\n"
+        "2. 适用条件（电压等级、设备类型等）\n"
+        "3. 依据的标准/规程条款编号\n"
+        "4. 例外情况和特殊说明\n"
+        "数值必须绑定引用来源，无来源的数值不得给出。"
+    ),
+    "general": (
+        "\n\n【知识补全·特别要求】本次为证据补全草稿（原始置信度：{confidence}）。"
+        "请先给结论，再给依据/步骤，最后引用来源。"
+        "标注不确定的部分，避免绝对化结论。"
+    ),
+}
+
+
+def classify_query(query: str) -> str:
+    """轻量问题分类（rule-based，零 LLM 成本）。返回 fault/procedure/safety/general。"""
+    for qtype, keywords in _QUERY_TYPE_RULES.items():
+        if any(kw in query for kw in keywords):
+            return qtype
+    return "general"
+
+
 async def ai_draft(gap_id: int, model_type: str | None = None) -> str:
-    """AI 续写草稿：放宽检索(topk×倍) 再 LLM 生成。失败返回空串。状态 pending→ai_drafted。"""
+    """AI 续写草稿：自适应 prompt（问题分类 + gap 上下文注入）+ 放宽检索。失败返回空串。"""
     from app.config import settings
     from app.services import retrieval_service
     from app.providers.factory import get_llm_provider
@@ -87,9 +141,29 @@ async def ai_draft(gap_id: int, model_type: str | None = None) -> str:
             row = (await db.execute(select(EvidenceGap).where(EvidenceGap.id == gap_id))).scalar_one_or_none()
             if not row:
                 return ""
+            # 1. 放宽检索
             topk = 5 * settings.EVIDENCE_GAP_DRAFT_TOPK_MULT
             contexts = await retrieval_service.mixed_search(db, row.query, topk, tenant=row.tenant)
-            messages = prompt_templates.build_messages_with_history(row.query, contexts, [], [], "medium")
+            # 2. 问题分类 → 选择针对性 prompt
+            qtype = classify_query(row.query)
+            extra = _GAP_PROMPT_EXTRA[qtype].format(confidence=row.confidence or "medium")
+            # 3. 注入 gap 上下文（之前答案 + 补强方向）到 user message
+            refs = "\n\n".join(
+                f"[{i + 1}] {c.get('docName', '')}：{c.get('chunk', '')}"
+                for i, c in enumerate(contexts)
+            )
+            gap_ctx = ""
+            if row.original_answer:
+                gap_ctx += f"\n【之前答案（需补强）】\n{row.original_answer[:500]}"
+            if row.confidence == "refused":
+                gap_ctx += "\n【补强方向】强相关证据缺失，需从规程/案例中找支撑"
+            elif row.confidence == "medium":
+                gap_ctx += "\n【补强方向】证据有限，需补充更具体的依据和数值"
+            system = prompt_templates.get_system_prompt() + extra
+            user = (f"【参考资料】\n{refs}{gap_ctx}\n\n"
+                    f"【问题】{row.query}\n\n请严格依据参考资料按规则作答，重点补强上述不足。")
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            # 4. 生成草稿
             draft = (await get_llm_provider(model_type).chat(messages, temperature=0.3)).strip()
             row.ai_draft = draft
             row.status = "ai_drafted"

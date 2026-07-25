@@ -219,6 +219,32 @@ async def _crag_correct(
     return contexts, confidence, action, grade, extras
 
 
+async def _maybe_collect_refused(
+    *, nq: str, answer: str, confidence: str,
+    grade: str, action: str, tenant: str = "default",
+) -> None:
+    """B4/B7：refused / 无结果 自动入证据补全队列（fire-and-forget 由 caller 决定）。
+
+    触发条件：confidence=='refused' 或 action in {rewritten_failed, refused}（含 stream 无结果路径）。
+    collect 本身去重（同 query pending 跳过），多次调用安全。
+    开关 CRAG_REFUSED_TO_GAP_ENABLE 关时整体跳过。
+    source：action 空（stream 无结果路径）→ auto_no_recall；否则 auto_crag。
+    """
+    if not getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
+        return
+    is_refused = confidence == "refused" or action in ("rewritten_failed", "refused")
+    if not is_refused:
+        return
+    source = "auto_no_recall" if (grade == "incorrect" and not action) else "auto_crag"
+    try:
+        from app.services import evidence_gap_service
+        await evidence_gap_service.collect(
+            nq, answer or "", confidence or "refused",
+            grade or "", action or "", source, tenant or "default")
+    except Exception as e:
+        degraded("crag_refused_to_gap", e)
+
+
 def _format_crag_reason(detail: dict | None, grade: str) -> str:
     """v2 逐条 detail → 人话归因（confidence refinement T2）。
 
@@ -644,6 +670,11 @@ async def answer(
     contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
         db, nq, contexts, model_type, topk, tenant
     )
+    # B4：CRAG refused（改写后仍证据不足）自动入证据补全队列（fire-and-forget bg task）
+    if confidence == "refused" or crag_action in ("rewritten_failed", "refused"):
+        _bg_tasks.add(asyncio.create_task(_maybe_collect_refused(
+            nq=nq, answer="", confidence=confidence,
+            grade=crag_grade, action=crag_action, tenant=tenant or "default")))
 
     # GraphRAG：融合知识图谱结构化上下文（KG_RAG_ENABLE 默认开）
     graph: list[str] = []
@@ -1141,6 +1172,11 @@ async def stream_answer(
         user_dept=user_dept, user_role=user_role,
     )
     if not contexts:
+        # B7：stream 无结果 → 自动入证据补全队列（auto_no_recall）
+        if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
+            _bg_tasks.add(asyncio.create_task(_maybe_collect_refused(
+                nq=nq, answer="", confidence="refused",
+                grade="incorrect", action="", tenant=tenant or "default")))
         yield {"type": "done", "content": "根据现有资料无法确认该问题，请先上传并解析相关运维文档后重试。"}
         return
 
@@ -1148,6 +1184,11 @@ async def stream_answer(
     contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
         db, nq, contexts, model_type, topk, tenant
     )
+    # B4：stream CRAG refused 自动入证据补全队列（fire-and-forget bg task）
+    if confidence == "refused" or crag_action in ("rewritten_failed", "refused"):
+        _bg_tasks.add(asyncio.create_task(_maybe_collect_refused(
+            nq=nq, answer="", confidence=confidence,
+            grade=crag_grade, action=crag_action, tenant=tenant or "default")))
 
     # GraphRAG
     graph: list[str] = []

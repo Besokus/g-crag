@@ -173,6 +173,8 @@ class Settings(BaseSettings):
     EVIDENCE_GAP_AUTO_COLLECT: bool = True        # 自动收集 medium/refused
     EVIDENCE_GAP_DRAFT_TOPK_MULT: int = 2         # AI 续写检索放宽倍数
     EVIDENCE_GAP_FAQ_DOCTYPE: str = "证据补全FAQ"  # 同步入库的 docType
+    # CRAG refused / stream 无结果 自动入证据补全队列（B4/B7）
+    CRAG_REFUSED_TO_GAP_ENABLE: bool = True
     # ---------- C5 知识治理 fail-open 兜底（默认关=fail-closed 全拒，生产可开）----------
     KNOWLEDGE_GOVERNANCE_FAIL_OPEN: bool = False  # 治理存储异常时放行+DEGRADED告警(默认fail-closed)
     # ---------- C4 多轮 standalone 缓存扩面（默认关，opt-in）----------

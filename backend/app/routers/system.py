@@ -616,12 +616,13 @@ async def optimizer_rewrite_events(
 
 @router.get("/evidence-gap")
 async def evidence_gap_list(
-    status: str | None = None, page: int = 1, size: int = 20,
+    status: str | None = None, source: str | None = None,
+    page: int = 1, size: int = 20,
     admin: User = Depends(require_admin),
 ):
-    """证据补全列表（按 status 过滤）。"""
+    """证据补全列表（按 status / source 过滤；source: auto/auto_crag/auto_no_recall/overconfident/manual...）。"""
     from app.services.evidence_gap_service import list_gaps
-    return success(await list_gaps(status, page, size), "查询成功")
+    return success(await list_gaps(status, source, page, size), "查询成功")
 
 
 @router.post("/evidence-gap/{gap_id}/ai-draft")

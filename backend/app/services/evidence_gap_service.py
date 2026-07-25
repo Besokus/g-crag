@@ -37,7 +37,8 @@ async def collect(query: str, answer: str, confidence: str, grade: str, action: 
         return 0
 
 
-async def list_gaps(status: str | None = None, page: int = 1, size: int = 20) -> dict:
+async def list_gaps(status: str | None = None, source: str | None = None,
+                    page: int = 1, size: int = 20) -> dict:
     try:
         async with AsyncSessionLocal() as db:
             q = select(EvidenceGap).where(EvidenceGap.is_deleted == 0).order_by(desc(EvidenceGap.ts))
@@ -45,6 +46,9 @@ async def list_gaps(status: str | None = None, page: int = 1, size: int = 20) ->
             if status:
                 q = q.where(EvidenceGap.status == status)
                 cq = cq.where(EvidenceGap.status == status)
+            if source:
+                q = q.where(EvidenceGap.source == source)
+                cq = cq.where(EvidenceGap.source == source)
             total = (await db.execute(cq)).scalar() or 0
             rows = (await db.execute(q.offset((page - 1) * size).limit(size))).scalars().all()
             return {"total": total, "list": [{

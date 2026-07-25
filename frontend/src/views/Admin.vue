@@ -374,6 +374,15 @@
             <option value="ai_drafted">已续写</option><option value="synced">已同步</option>
             <option value="ignored">已忽略</option>
           </select>
+          <select v-model="egSourceFilter" @change="loadEvidenceGaps" class="btn btn-ghost btn-sm" title="按来源筛选">
+            <option value="">全部来源</option>
+            <option value="auto">自动·无结果</option>
+            <option value="auto_crag">自动·CRAG refused</option>
+            <option value="auto_no_recall">自动·流式无结果</option>
+            <option value="overconfident">自动·过自信</option>
+            <option value="feedback_dislike">用户·点踩</option>
+            <option value="manual">用户·上报</option>
+          </select>
         </div>
         <div v-if="!egList.length" class="empty">暂无证据补全记录（medium/refused 自动收集 + Chat 上报）</div>
         <div class="opt-card" v-for="g in egList" :key="g.id" :class="g.confidence==='refused'?'sev-high':'sev-medium'">
@@ -389,6 +398,7 @@
               <option value="expired">已过保</option>
             </select>
             <span class="badge" :class="{pending:'badge-info',ai_drafted:'badge-warning',synced:'badge-success',ignored:'badge-neutral'}[g.status]">{{ {pending:'待处理',ai_drafted:'已续写',synced:'已同步',ignored:'已忽略'}[g.status] }}</span>
+            <span v-if="g.source" class="badge badge-neutral" :title="`来源: ${g.source}`">{{ {auto:'自动',auto_crag:'CRAG',auto_no_recall:'无结果',overconfident:'过自信',feedback_dislike:'点踩',manual:'人工'}[g.source] || g.source }}</span>
             <strong class="opt-title" style="cursor:pointer" @click="g._expanded = !g._expanded" :title="'点击' + (g._expanded ? '收起' : '展开全部答案')">{{ g._expanded ? '▼' : '▶' }} {{ g.query }}</strong>
             <span v-if="g.operator === 'auto-deep-sync'" class="badge badge-success" style="margin-left:6px">✅ 自动深度补全</span>
           </div>
@@ -1005,10 +1015,10 @@ async function removeBlacklist(q) {
 }
 const rwStats = ref(null); const rwEvents = ref([]); const rwPeriod = ref('today')
 const rwPieEl = ref(null); const rwScatterEl = ref(null); const rwTrendEl = ref(null)
-const egList = ref([]); const egFilter = ref('pending'); const egSelected = ref([])
+const egList = ref([]); const egFilter = ref('pending'); const egSelected = ref([]); const egSourceFilter = ref('')
 async function loadEvidenceGaps() {
   try {
-    const d = (await request.get('/system/evidence-gap', { params: { status: egFilter.value || undefined, size: 50 } })).data
+    const d = (await request.get('/system/evidence-gap', { params: { status: egFilter.value || undefined, source: egSourceFilter.value || undefined, size: 50 } })).data
     egList.value = (d && d.list) || []
   } catch (e) { toast('加载失败') }
 }

@@ -228,6 +228,10 @@ class Settings(BaseSettings):
     FIX_RATE_WINDOW_DAYS: int = 30      # 统计窗口（近 N 天的 dislike 计入分母）
     FIX_RATE_CRON_MINUTES: int = 30     # 周期 cron 调度间隔（分钟）—— Task 2 接入
 
+    # ---------- 知识自进化草稿回流回测（B5）----------
+    EVOLUTION_RETEST_ENABLE: bool = True   # 回测开关：run_scan 入口对 indexed 草稿重跑 member_queries 算 lift
+    EVOLUTION_RETEST_AFTER_DAYS: int = 7   # 回测触发阈值：仅 indexed_at 早于 N 天的草稿参与回测（给回流留生效窗口）
+
     # ===== 数据飞轮（跨闭环质量事件总线，opt-in，默认=现状）=====
     QUALITY_BUS_ENABLE: bool = False  # 质量事件总线总开关（emit 入库恒做；开=异步派发订阅者）
     DISLIKE_TO_GAP_ENABLE: bool = False  # B1 dislike→质量事件(→evidence_gap 补全)；opt-in

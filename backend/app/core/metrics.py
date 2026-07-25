@@ -125,6 +125,12 @@ QUALITY_EVENT_TOTAL = Counter(
 FEEDBACK_FIX_RATE = Gauge("grid_feedback_fix_rate", "坏case修复率(dislike→补全→同query再like)")
 FAITHFULNESS_TREND = Gauge("grid_faithfulness_trend", "faithfulness 周环比")
 KB_FRESHNESS = Gauge("grid_kb_freshness", "active文档占比(治理覆盖率)")
+# 知识自进化回流增益（B5）：lift = after - before；正=回流有效，<=0=无效下调 quality_score
+EVOLUTION_LIFT = Histogram(
+    "grid_evolution_lift",
+    "自进化回流增益(正=有效)",
+    buckets=(-1.0, -0.2, 0, 0.2, 0.5, 1.0),
+)
 
 # ===== 进程内缓存命中 mirror =====
 # 底层逻辑：prometheus_client Counter 进程内无法直接读值（只能抓 /metrics 文本），
@@ -257,6 +263,8 @@ def init_metric_series() -> None:
         FEEDBACK_FIX_RATE.set(0)
         FAITHFULNESS_TREND.set(0)
         KB_FRESHNESS.set(0)
+        # B5 回流增益：Histogram 无 label 但事件驱动（仅 scan 触发），observe 0 一次让面板先在场
+        EVOLUTION_LIFT.observe(0.0)
     except Exception:
         # 预注册失败不影响服务启动
         pass

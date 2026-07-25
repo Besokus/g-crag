@@ -151,8 +151,66 @@ async def _embed(queries):
     return await embedding_service.embed_texts(queries)
 
 
+async def _retest_indexed_drafts(db, tenant):
+    """B5 回流回测：对 status=indexed 且 indexed_at 早于 EVOLUTION_RETEST_AFTER_DAYS 的草稿
+    重跑 member_queries 检索，对比回流前基线（gap_evidence_json.top1_score）算 lift，
+    写回 gap_evidence_json。lift<=0 → quality_score *= 0.5（回流无效降权）。
+
+    单条异常 degraded("evo_retest_one", e) 不阻塞整批；开关 EVOLUTION_RETEST_ENABLE 守关。
+    返回参与回测的草稿数。
+    """
+    from app.config import settings
+    from app.core import metrics
+
+    if not getattr(settings, "EVOLUTION_RETEST_ENABLE", True):
+        return 0
+    after_days = int(getattr(settings, "EVOLUTION_RETEST_AFTER_DAYS", 7))
+    cutoff = utcnow() - timedelta(days=after_days)
+    rows = (await db.execute(
+        select(KnowledgeEvolutionDraft).where(
+            KnowledgeEvolutionDraft.tenant_id == tenant,
+            KnowledgeEvolutionDraft.status == "indexed",
+            KnowledgeEvolutionDraft.indexed_at.is_not(None),
+            KnowledgeEvolutionDraft.indexed_at < cutoff,
+        )
+    )).scalars().all()
+    retested = 0
+    for r in rows:
+        try:
+            member_queries = json.loads(r.member_queries_json or "[]")
+            if not member_queries:
+                continue   # 无样本可回测，跳过（非异常）
+            evi = json.loads(r.gap_evidence_json or "{}")
+            before = float(evi.get("top1_score") or 0.0)
+            scores = []
+            for q in member_queries:
+                top = await _retrieve_top1(db, q, tenant, top_k=1)
+                if top:
+                    scores.append(float(top[0].get("score", 0.0) or 0.0))
+            after = round(sum(scores) / len(scores), 3) if scores else 0.0
+            lift = round(after - before, 3)
+            evi["after_score"] = after
+            evi["lift"] = lift
+            evi["retested_at"] = utcnow().isoformat()
+            r.gap_evidence_json = json.dumps(evi, ensure_ascii=False)
+            if lift <= 0:
+                # 回流后检索分数未提升 → 判定回流无效，下调 quality_score（人工复审信号）
+                r.quality_score = round(r.quality_score * 0.5, 3)
+            metrics.EVOLUTION_LIFT.observe(lift)
+            retested += 1
+        except Exception as e:
+            degraded("evo_retest_one", e)
+    if retested:
+        await db.commit()
+    return retested
+
+
 async def run_scan(db, tenant, *, since_hours=168, model_type=None):
-    """全管道：抽取→聚类→盲区→草稿→落库(status=draft)。返回 {clusters, drafts}。"""
+    """全管道：抽取→聚类→盲区→草稿→落库(status=draft)。返回 {clusters, drafts}。
+
+    B5：入口先回测已 indexed 的草稿（_retest_indexed_drafts），再扫新 dislike。
+    """
+    await _retest_indexed_drafts(db, tenant)
     queries = await _extract_dislike(db, tenant, since_hours)
     if not queries:
         return {"clusters": 0, "drafts": 0}

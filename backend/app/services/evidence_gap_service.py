@@ -355,7 +355,9 @@ async def batch_deep_and_sync(tenant: str = "default", limit: int = 5,
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(
                 select(EvidenceGap).where(
-                    EvidenceGap.status == "pending", EvidenceGap.tenant_id == tenant
+                    EvidenceGap.status == "pending",
+                    EvidenceGap.is_deleted == 0,
+                    EvidenceGap.tenant == tenant,
                 ).order_by(EvidenceGap.ts.asc()).limit(limit)
             )).scalars().all()
         stats["scanned"] = len(rows)

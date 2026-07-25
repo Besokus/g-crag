@@ -84,8 +84,13 @@ async def _extract_dislike(db, tenant, since_hours):
     rows = (await db.execute(stmt)).scalars().all()
     queries = [q.strip() for q in rows if q and q.strip()]
     seen = set(queries)
+    # EvidenceGap 租户字段为 tenant（非 tenant_id）；is_deleted 逻辑删除保护
     gaps = (await db.execute(
-        select(EvidenceGap.query).where(EvidenceGap.status == "pending", EvidenceGap.tenant_id == tenant)
+        select(EvidenceGap.query).where(
+            EvidenceGap.status == "pending",
+            EvidenceGap.is_deleted == 0,
+            EvidenceGap.tenant == tenant,
+        )
     )).scalars().all()
     for q in gaps:
         q = (q or "").strip()
@@ -250,7 +255,7 @@ async def enqueue_evolution_scan(tenant, *, since_hours=168, model_type=None):
     async with AsyncSessionLocal() as db:
         task = await task_queue_service.enqueue_task_record(
             db, TASK_TYPE, {"since_hours": since_hours, "model_type": model_type},
-            queue="evolution", idempotency_key=f"evo:{tenant}:{int(time.time()) // 300}",
+            queue="default", idempotency_key=f"evo:{tenant}:{int(time.time()) // 300}",
             tenant_id=tenant, max_attempts=2, commit=True,
         )
     return task_queue_service.task_to_dict(task) if task else None

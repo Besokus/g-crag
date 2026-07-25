@@ -6,6 +6,19 @@ import asyncio
 
 _bg_tasks: set = set()  # 持有后台 task 引用，防 GC
 
+
+def _fire_and_forget(coro):
+    """后台 task 持引用防 GC + 完成后自动从集合移除（防已完成 Task 长期累积）。
+
+    替代裸 `_bg_tasks.add(asyncio.create_task(...))` 范式：后者缺 add_done_callback，
+    已完成 Task 引用会长期驻留 _bg_tasks 集合造成泄漏。本 helper 统一收口。
+    """
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -670,11 +683,8 @@ async def answer(
     contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
         db, nq, contexts, model_type, topk, tenant
     )
-    # B4：CRAG refused（改写后仍证据不足）自动入证据补全队列（fire-and-forget bg task）
-    if confidence == "refused" or crag_action in ("rewritten_failed", "refused"):
-        _bg_tasks.add(asyncio.create_task(_maybe_collect_refused(
-            nq=nq, answer="", confidence=confidence,
-            grade=crag_grade, action=crag_action, tenant=tenant or "default")))
+    # 注：CRAG refused 的证据补全收集已挪到答案生成后（与 medium 共用既有 collect 点），
+    # 避免 answer="" 被先写入导致真实答案被去重吞掉（I1 修复）。
 
     # GraphRAG：融合知识图谱结构化上下文（KG_RAG_ENABLE 默认开）
     graph: list[str] = []
@@ -863,12 +873,14 @@ async def answer(
     except Exception:
         pass
     # 证据补全：medium/refused 自动收集（bg task，独立 session，不阻塞响应）
+    # I1：refused 路径 source=auto_crag（覆盖原 B4 非流式独立路径，answer=真实 ans 保留）
     if settings.EVIDENCE_GAP_AUTO_COLLECT and confidence in ("medium", "refused"):
         try:
             from app.services import evidence_gap_service
-            _bg_tasks.add(asyncio.create_task(evidence_gap_service.collect(
-                nq, ans, confidence, crag_grade, crag_action, "auto", tenant,
-            )))
+            _src = "auto_crag" if (confidence == "refused" or crag_action in ("rewritten_failed", "refused")) else "auto"
+            _fire_and_forget(evidence_gap_service.collect(
+                nq, ans, confidence, crag_grade, crag_action, _src, tenant,
+            ))
         except Exception:
             pass
     return result
@@ -1174,9 +1186,9 @@ async def stream_answer(
     if not contexts:
         # B7：stream 无结果 → 自动入证据补全队列（auto_no_recall）
         if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
-            _bg_tasks.add(asyncio.create_task(_maybe_collect_refused(
+            _fire_and_forget(_maybe_collect_refused(
                 nq=nq, answer="", confidence="refused",
-                grade="incorrect", action="", tenant=tenant or "default")))
+                grade="incorrect", action="", tenant=tenant or "default"))
         yield {"type": "done", "content": "根据现有资料无法确认该问题，请先上传并解析相关运维文档后重试。"}
         return
 
@@ -1184,11 +1196,8 @@ async def stream_answer(
     contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
         db, nq, contexts, model_type, topk, tenant
     )
-    # B4：stream CRAG refused 自动入证据补全队列（fire-and-forget bg task）
-    if confidence == "refused" or crag_action in ("rewritten_failed", "refused"):
-        _bg_tasks.add(asyncio.create_task(_maybe_collect_refused(
-            nq=nq, answer="", confidence=confidence,
-            grade=crag_grade, action=crag_action, tenant=tenant or "default")))
+    # 注：stream CRAG refused 的证据补全收集已挪到答案生成后（与 medium 共用既有 collect 点），
+    # 避免 answer="" 被先写入导致真实答案被去重吞掉（I1 修复，与非流式路径对齐）。
 
     # GraphRAG
     graph: list[str] = []
@@ -1318,12 +1327,14 @@ async def stream_answer(
     except Exception:
         pass
     # 证据补全：medium/refused 自动收集（bg task，独立 session，不阻塞流式）
+    # I1：refused 路径 source=auto_crag（覆盖原 stream B4 独立路径，answer=真实 annotated 保留）
     if settings.EVIDENCE_GAP_AUTO_COLLECT and confidence in ("medium", "refused"):
         try:
             from app.services import evidence_gap_service
-            _bg_tasks.add(asyncio.create_task(evidence_gap_service.collect(
-                nq, annotated, confidence, crag_grade, crag_action, "auto", tenant,
-            )))
+            _src = "auto_crag" if (confidence == "refused" or crag_action in ("rewritten_failed", "refused")) else "auto"
+            _fire_and_forget(evidence_gap_service.collect(
+                nq, annotated, confidence, crag_grade, crag_action, _src, tenant,
+            ))
         except Exception:
             pass
     done_ev = {

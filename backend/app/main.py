@@ -214,6 +214,10 @@ async def lifespan(app: FastAPI):
     _gap_cron = getattr(app.state, "evidence_gap_cron_task", None)
     if _gap_cron:
         _gap_cron.cancel()
+    # M3：坏case修复率 cron 也需 cancel（getattr 防 AttributeError，未启用时不存在该属性）
+    _fix_cron = getattr(app.state, "fix_rate_cron_task", None)
+    if _fix_cron:
+        _fix_cron.cancel()
     try:
         from app.clients import neo4j_client
         await neo4j_client.close()

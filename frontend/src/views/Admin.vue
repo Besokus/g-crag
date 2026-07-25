@@ -376,7 +376,7 @@
           </select>
           <select v-model="egSourceFilter" @change="loadEvidenceGaps" class="btn btn-ghost btn-sm" title="按来源筛选">
             <option value="">全部来源</option>
-            <option value="auto">自动·无结果</option>
+            <option value="auto">自动·常规</option>
             <option value="auto_crag">自动·CRAG refused</option>
             <option value="auto_no_recall">自动·流式无结果</option>
             <option value="overconfident">自动·过自信</option>

@@ -221,6 +221,11 @@ class Settings(BaseSettings):
     CITATION_NLI_TIMEOUT: int = 5            # 校验3 NLI 超时秒（超时降级仅走校验1+2）
     CITATION_NLI_ASYNC_ENABLE: bool = False  # C1 校验3 NLI 异步后置（done 后后台跑,不阻塞首答;关=verify 内同步现状）
 
+    # ---------- 数据飞轮修复率（B1）----------
+    FIX_RATE_ENABLE: bool = True        # 修复率聚合开关（cron 调 recompute_fix_rate）
+    FIX_RATE_WINDOW_DAYS: int = 30      # 统计窗口（近 N 天的 dislike 计入分母）
+    FIX_RATE_CRON_MINUTES: int = 30     # 周期 cron 调度间隔（分钟）—— Task 2 接入
+
     # ===== 数据飞轮（跨闭环质量事件总线，opt-in，默认=现状）=====
     QUALITY_BUS_ENABLE: bool = False  # 质量事件总线总开关（emit 入库恒做；开=异步派发订阅者）
     DISLIKE_TO_GAP_ENABLE: bool = False  # B1 dislike→质量事件(→evidence_gap 补全)；opt-in

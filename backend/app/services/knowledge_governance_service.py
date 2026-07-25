@@ -22,6 +22,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.obs import degraded
 from app.core.response import BizError
 from app.db.session import AsyncSessionLocal
 from app.models.chunk import Chunk
@@ -841,6 +842,38 @@ async def _persist_findings(
     return created, updated
 
 
+async def _set_freshness_metric(db: AsyncSession, tenant_id: str) -> float:
+    """B2: active未过期文档占比 → metrics.KB_FRESHNESS.set。返回占比。
+
+    active = version_status='active' 且 (is_permanent 或 expires_at is null 或 expires_at>now)。
+    占比 = active数 / Document总文档数。异常 degraded 不崩。
+    """
+    try:
+        from app.core import metrics
+        now = _utcnow_naive()
+        total = (await db.execute(
+            select(func.count()).select_from(Document).where(Document.tenant_id == tenant_id)
+        )).scalar() or 0
+        if total == 0:
+            metrics.KB_FRESHNESS.set(0)
+            return 0.0
+        active = (await db.execute(
+            select(func.count()).select_from(KnowledgeDocumentMetadata).where(
+                KnowledgeDocumentMetadata.tenant_id == tenant_id,
+                KnowledgeDocumentMetadata.version_status == "active",
+                (KnowledgeDocumentMetadata.is_permanent.is_(True))
+                | (KnowledgeDocumentMetadata.expires_at.is_(None))
+                | (KnowledgeDocumentMetadata.expires_at > now),
+            )
+        )).scalar() or 0
+        rate = round(active / total, 3)
+        metrics.KB_FRESHNESS.set(rate)
+        return rate
+    except Exception as e:
+        degraded("kb_freshness_set", e)
+        return 0.0
+
+
 async def run_scan(
     db: AsyncSession,
     tenant_id: str = "default",
@@ -876,6 +909,9 @@ async def run_scan(
     by_type: dict[str, int] = defaultdict(int)
     for finding in findings:
         by_type[finding.issue_type] += 1
+    # B2 数据飞轮：成功路径末尾 set KB_FRESHNESS（active 未过期文档占比）。
+    # 异常路径不挂（degraded 兜底，避免噪声淹没指标）。
+    await _set_freshness_metric(db, tenant_id)
     return {
         "tenantId": tenant_id,
         "scanTime": _iso(now),

@@ -85,3 +85,29 @@ async def recompute_fix_rate(tenant: str = "default") -> float | None:
     except Exception as e:
         degraded("fix_rate_recompute", e)
         return None
+
+
+async def fix_rate_cron_loop(tenant: str = "default"):
+    """定时重算修复率 → metrics.FEEDBACK_FIX_RATE.set。
+
+    lifespan 启动；周期=FIX_RATE_CRON_MINUTES，FIX_RATE_ENABLE=False 或周期<=0 时关闭。
+    """
+    import asyncio
+    if not getattr(settings, "FIX_RATE_ENABLE", True):
+        return
+    interval = float(getattr(settings, "FIX_RATE_CRON_MINUTES", 30))
+    if interval <= 0:
+        return
+    last_rate: float | None = None
+    while True:
+        await asyncio.sleep(interval * 60)
+        try:
+            rate = await recompute_fix_rate(tenant)
+            if rate is None:
+                rate = last_rate or 0.0   # 异常保持上次值
+            else:
+                last_rate = rate
+            from app.core import metrics
+            metrics.FEEDBACK_FIX_RATE.set(rate)
+        except Exception as e:
+            degraded("fix_rate_cron_loop", e)

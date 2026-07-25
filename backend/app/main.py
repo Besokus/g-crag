@@ -176,6 +176,15 @@ async def lifespan(app: FastAPI):
         print("[evidence-gap] 证据补全定时深度补全已启动")
     except Exception as e:
         print(f"[evidence-gap] 定时补全启动跳过：{e}")
+    # 坏case修复率定时聚合（周期 FIX_RATE_CRON_MINUTES，FIX_RATE_ENABLE=False 或<=0 关闭）
+    try:
+        from app.services.feedback_fix_rate_service import fix_rate_cron_loop
+        from app.config import settings as _settings
+        if bool(getattr(_settings, "FIX_RATE_ENABLE", True)) and float(getattr(_settings, "FIX_RATE_CRON_MINUTES", 30)) > 0:
+            app.state.fix_rate_cron_task = asyncio.create_task(fix_rate_cron_loop("default"))
+            print("[fix-rate] 坏case修复率定时聚合后台任务已启动")
+    except Exception as e:
+        print(f"[fix-rate] 修复率定时聚合启动跳过：{e}")
     # ---- 关闭 ----
     yield
     try:

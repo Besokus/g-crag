@@ -166,3 +166,33 @@ async def test_retest_switch_disable(unique_tenant, monkeypatch):
         n = await ev._retest_indexed_drafts(db, tenant)
         assert n == 0
         assert called == []
+
+
+@pytest.mark.asyncio
+async def test_run_scan_invokes_retest(unique_tenant, monkeypatch):
+    """run_scan 入口先调 _retest_indexed_drafts（接线测试）。
+
+    防回归：若有人误删 run_scan 中的 `await _retest_indexed_drafts(db, tenant)`，
+    该测可发现——即使 fixture 无 dislike（run_scan 在 _extract_dislike 返回空时
+    提前 return，但 retest 在入口最先调用，必须先于 dislike 抽取执行）。
+    仿 B3 test_run_scan_invokes_aggregation 模式：spy 替换 _retest_indexed_drafts
+    记录调用次数，调 run_scan 后断言 spy 被调用。
+    """
+    tenant = unique_tenant
+
+    calls = []
+    async def spy_retest(db, t):
+        calls.append(t)
+        return 0   # 不实际回测，只验证接线
+
+    monkeypatch.setattr(ev, "_retest_indexed_drafts", spy_retest)
+    # _extract_dislike 返回空 → run_scan 在 retest 之后提前 return，进一步隔离
+    async def fake_extract_dislike(*a, **kw):
+        return []
+    monkeypatch.setattr(ev, "_extract_dislike", fake_extract_dislike)
+
+    async with AsyncSessionLocal() as db:
+        result = await ev.run_scan(db, tenant, since_hours=168, model_type=None)
+
+    assert calls == [tenant]            # run_scan 入口调过 retest，且 tenant 透传正确
+    assert result == {"clusters": 0, "drafts": 0}

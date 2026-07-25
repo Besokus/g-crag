@@ -232,6 +232,33 @@ async def _crag_correct(
     return contexts, confidence, action, grade, extras
 
 
+async def _write_highbase(nq: str, answer: str, tenant: str = "default") -> None:
+    """B6: high 答案写入独立 highbase key（不依赖问答缓存存活）。
+
+    dislike 时 check_overconfident 扫 `qa:highbase:{nq}` 检出冲突——
+    原实现扫 `qa:*:{nq}` 问答缓存，TTL 过期就丢，导致历史 high 失忆。
+    highbase TTL=OVERCONFIDENT_BASELINE_TTL_DAYS（默认 30 天），独立于 QA_CACHE_TTL。
+    Redis 异常 → degraded 吞掉（安全侧：不检出）。
+    """
+    if not getattr(settings, "CONFIDENCE_OVERCONFIDENT_ENABLE", False):
+        return
+    try:
+        import time
+        ttl_days = int(getattr(settings, "OVERCONFIDENT_BASELINE_TTL_DAYS", 30) or 30)
+        payload = {
+            "confidence": "high",
+            "answer": (answer or "")[:500],
+            "ts": time.time(),
+            "tenant": tenant or "default",
+        }
+        await redis_client.get_redis().set(
+            f"qa:highbase:{nq}", json.dumps(payload, ensure_ascii=False),
+            ex=ttl_days * 86400,
+        )
+    except Exception as e:
+        degraded("overconfident_baseline_write", e)
+
+
 async def _maybe_collect_refused(
     *, nq: str, answer: str, confidence: str,
     grade: str, action: str, tenant: str = "default",
@@ -846,6 +873,9 @@ async def answer(
                 await semantic_cache_set(model_type, nq, _cache_key(model_type, nq, tenant), tenant_id=tenant)
             except Exception as e:
                 degraded("semantic_cache_set", e)
+    # B6: high 答案写独立 highbase key（TTL 30 天，不依赖问答缓存存活）——供 dislike 时 overconfident 检出
+    if confidence == "high":
+        _fire_and_forget(_write_highbase(nq, ans, tenant))
     try:
         from app.core import metrics
         metrics.QA_TOTAL.labels(model_type or settings.LLM_PROVIDER, "false").inc()
@@ -1320,6 +1350,9 @@ async def stream_answer(
                 await semantic_cache_set(model_type, nq, _cache_key(model_type, nq, tenant), tenant_id=tenant)
             except Exception as e:
                 degraded("semantic_cache_set_stream", e)
+    # B6: high 答案写独立 highbase key（TTL 30 天，不依赖问答缓存存活）——供 dislike 时 overconfident 检出
+    if confidence == "high":
+        _fire_and_forget(_write_highbase(nq, annotated, tenant))
     try:
         from app.core import metrics
         metrics.QA_TOTAL.labels(_p, "false").inc()

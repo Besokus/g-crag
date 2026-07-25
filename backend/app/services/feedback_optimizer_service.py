@@ -335,10 +335,13 @@ async def maybe_blacklist_on_dislike(query: str) -> int:
 
 
 async def check_overconfident(query: str, tenant: str = "default") -> bool:
-    """dislike 时查该 query 缓存 confidence=high → over_confident 冲突（断点 G）。
+    """dislike 时查该 query 的 high 基线 → over_confident 冲突（断点 G + B6）。
 
     机器判 high 但用户 dislike → OVERCONFIDENT 计数 + 进 evidence_gap 复核。
+    B6 改动：扫 `qa:highbase:{nq}`（独立 30 天 TTL，answer() 写入），不再依赖问答缓存是否存活
+    （问答缓存 TTL 短，过期后老逻辑会失忆；highbase TTL=OVERCONFIDENT_BASELINE_TTL_DAYS）。
     用独立 Redis 读（不依赖请求 db），供后台 task 安全调用。返回是否检出冲突。
+    Redis 异常 → degraded 吞掉（安全侧：不检出）。
     """
     if not getattr(settings, "CONFIDENCE_OVERCONFIDENT_ENABLE", False):
         return False
@@ -351,7 +354,8 @@ async def check_overconfident(query: str, tenant: str = "default") -> bool:
         if not nq:
             return False
         r = redis_client.get_redis()
-        async for key in r.scan_iter(match=f"qa:*:{nq}", count=50):
+        # B6: 只扫 highbase key（单 key 精确读，scan_iter 保留以兼容未来多租户/版本扩展）
+        async for key in r.scan_iter(match=f"qa:highbase:{nq}", count=50):
             try:
                 v = await r.get(key)
                 if not v:

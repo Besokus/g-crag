@@ -51,11 +51,11 @@
     <!-- 文档列表 -->
     <div class="card doc-list">
       <div class="card-header">
-        <h3 class="card-title">📚 文档列表 <span class="badge badge-neutral">{{ filtered.length }}</span></h3>
+        <h3 class="card-title">📚 文档列表 <span class="badge badge-neutral">{{ total }}</span></h3>
         <div class="row">
           <input class="input" v-model="filterKw" placeholder="🔍 按文件名筛选" style="width:200px" />
-          <select class="select" v-model="filterType" style="width:auto"><option value="">全部类型</option><option v-for="t in types" :key="t">{{ t }}</option></select>
-          <select class="select" v-model="filterStatus" style="width:auto"><option value="">全部状态</option><option value="pending">待解析</option><option value="parsed">已解析</option><option value="vectorized">已向量化</option></select>
+          <select class="select" v-model="filterType" @change="resetPage" style="width:auto"><option value="">全部类型</option><option v-for="t in types" :key="t">{{ t }}</option></select>
+          <select class="select" v-model="filterStatus" @change="resetPage" style="width:auto"><option value="">全部状态</option><option value="pending">待解析</option><option value="parsed">已解析</option><option value="vectorized">已向量化</option></select>
           <button class="btn btn-ghost btn-sm" @click="batchParse" :disabled="!selected.length">批量解析({{ selected.length }})</button>
           <button class="btn btn-ghost btn-sm" @click="batchVectorize" :disabled="!selected.length">批量向量化({{ selected.length }})</button>
           <button v-if="can('doc:delete')" class="btn btn-danger btn-sm" @click="batchDelete" :disabled="!selected.length">批量删除</button>
@@ -85,6 +85,13 @@
             <tr v-if="!filtered.length"><td colspan="7" class="empty">无匹配文档</td></tr>
           </tbody>
         </table>
+        <div class="row" style="justify-content:space-between;align-items:center;padding:10px 4px">
+          <span class="hint">共 {{ total }} 条 · 第 {{ page }}/{{ totalPages }} 页</span>
+          <div class="row" style="gap:6px">
+            <button class="btn btn-ghost btn-sm" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
+            <button class="btn btn-ghost btn-sm" :disabled="page >= totalPages" @click="goPage(page + 1)">下一页</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -128,6 +135,10 @@ const selected = ref([])
 const filterKw = ref('')
 const filterType = ref('')
 const filterStatus = ref('')
+const page = ref(1)
+const pageSize = ref(20)
+const total = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 const loading = ref(false)
 const statusMap = { pending: '待解析', parsed: '已解析', vectorized: '已向量化' }
 const preview = reactive({ show: false, type: '', url: '', text: '' })
@@ -145,8 +156,10 @@ const allChecked = computed(() => filtered.value.length > 0 && selected.value.le
 
 async function load() {
   loading.value = true
-  try { const [d, s] = await Promise.all([listDocs(), getStats()]); docs.value = d.data.list || []; stats.value = s.data } finally { loading.value = false }
+  try { const [d, s] = await Promise.all([listDocs(page.value, pageSize.value), getStats()]); docs.value = d.data.list || []; total.value = d.data.total || 0; stats.value = s.data } finally { loading.value = false }
 }
+function goPage(p) { if (p < 1 || p > totalPages.value) return; page.value = p; load() }
+function resetPage() { page.value = 1; load() }
 function fmtSize(b) { if (!b) return '0B'; if (b < 1024) return b + 'B'; if (b < 1048576) return (b / 1024).toFixed(1) + 'KB'; return (b / 1048576).toFixed(1) + 'MB' }
 function onFile(e) { files.value = [...files.value, ...Array.from(e.target.files)]; e.target.value = '' }
 function onDrop(e) { dragOver.value = false; files.value = [...files.value, ...Array.from(e.dataTransfer.files)] }

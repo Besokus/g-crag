@@ -39,7 +39,7 @@ export const resetUserPassword = (id, password) => request.post(`/system/users/$
 export const uploadDocs = (form, onProgress) => request.post('/document/upload', form, {
   onUploadProgress: onProgress,
 })
-export const listDocs = (keyword = '') => request.get('/document/list', { params: { keyword } })
+export const listDocs = (page = 1, size = 20, keyword = '') => request.get('/document/list', { params: { page, size, keyword } })
 export const parseDocs = (docIds) => request.post('/document/parse', { docIds })
 export const vectorize = (docId) => request.post('/document/vector/generate', { docId })
 export const vectorizeBatch = (docIds) => request.post('/document/vector/batch', { docIds })

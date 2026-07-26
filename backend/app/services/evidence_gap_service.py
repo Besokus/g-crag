@@ -185,7 +185,7 @@ async def deep_draft(gap_id: int, model_type: str | None = None) -> str:
             row = (await db.execute(select(EvidenceGap).where(EvidenceGap.id == gap_id))).scalar_one_or_none()
             if not row:
                 return ""
-            persona = await get_persona("qa")
+            persona = await get_persona("evidence_gap")
             result = await run_agent(db, persona, row.query, model_type)
             draft = result.answer if isinstance(result.answer, str) else str(result.answer)
             row.ai_draft = draft
@@ -214,7 +214,7 @@ async def deep_draft_stream(gap_id: int, model_type: str | None = None):
         yield {"type": "done", "error": "记录不存在或 query 为空"}
         return
     yield {"type": "meta", "query": query}
-    persona = await get_persona("qa")
+    persona = await get_persona("evidence_gap")
     queue: asyncio.Queue = asyncio.Queue()
 
     async def _run():

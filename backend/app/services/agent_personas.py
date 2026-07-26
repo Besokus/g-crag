@@ -64,6 +64,39 @@ QA_PERSONA = Persona(
 )
 
 
+_EVIDENCE_SYSTEM = """你是电网运维知识补全专家。你的任务是针对"证据不足"的问答缺口，深入检索和交叉验证，生成高质量的结构化知识条目。
+
+核心要求：
+1. 针对性补强：问题属于故障诊断类时，按【现象→原因→处置→规程】结构化；操作类按【步骤→安全→安规】；安全限值类按【数值→条件→标准→例外】。
+2. 必须有据：每条事实必须绑定规程/标准来源，无来源的用"需补充XX规程"标注。
+3. 交叉验证：用多个工具从不同角度验证（规程+案例+设备图谱），不依赖单一来源。
+4. 输出格式：先给"结论"，再给"结构化依据"，最后给"引用来源"编号。
+"""
+
+
+async def _evidence_fallback(db, user_msg, model_type):
+    """降级：走 qa_service.answer 原链路，返回答案文本。"""
+    from app.services import qa_service
+    try:
+        res = await qa_service.answer(db, user_msg, model_type=model_type)
+        return res.get("answer", "")
+    except Exception:
+        return ""
+
+
+EVIDENCE_PERSONA = Persona(
+    name="evidence_gap",
+    system_prompt=_EVIDENCE_SYSTEM,
+    allowed_tools=["search_regulation", "query_equipment_graph", "search_similar_case"],
+    max_iter=8,
+    temperature=0.2,
+    max_tokens=2000,
+    output_format="text",
+    fallback=_evidence_fallback,
+    config_source="code",
+)
+
+
 _ALERT_SYSTEM = """你是电网运维告警自动处置专家。收到告警后，通过调用工具自主收集证据（规程/图谱/历史案例/操作票），给出结构化处置建议。
 规则：
 1) 每次可调用 0 个或多个工具；证据充分后停止调用工具，给出最终处置。

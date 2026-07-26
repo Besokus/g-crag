@@ -515,6 +515,17 @@ async def mixed_search(
         for i in items:
             if i.get("docType") == "ai_evolution":
                 i["score"] = float(i.get("score", 0.0) or 0.0) * _ai_q
+    # 统计 AI 知识在检索结果中的占比（降权后仍留下的）
+    try:
+        from app.core import metrics
+        _ai_count = sum(1 for i in items if i.get("docType") == "ai_evolution")
+        _total = len(items)
+        if _ai_count:
+            metrics.AI_RETRIEVAL_HIT.labels("ai_evolution").inc(_ai_count)
+        if _total > _ai_count:
+            metrics.AI_RETRIEVAL_HIT.labels("human").inc(_total - _ai_count)
+    except Exception:
+        pass
     # 插件扩展点 · retrieval_filter：第三方可注册检索结果过滤/重排（BRD §5.3.1）
     try:
         from app.services import plugin_registry

@@ -131,6 +131,12 @@ EVOLUTION_LIFT = Histogram(
     "自进化回流增益(正=有效)",
     buckets=(-1.0, -0.2, 0, 0.2, 0.5, 1.0),
 )
+# AI 回流知识检索命中计数（doc_type 维度：ai_evolution / human）
+AI_RETRIEVAL_HIT = Counter(
+    "grid_ai_retrieval_hit_total",
+    "AI回流知识检索命中计数(降权前进入结果集)",
+    ["doc_type"],
+)
 
 # ===== 进程内缓存命中 mirror =====
 # 底层逻辑：prometheus_client Counter 进程内无法直接读值（只能抓 /metrics 文本），
@@ -265,6 +271,9 @@ def init_metric_series() -> None:
         KB_FRESHNESS.set(0)
         # B5 回流增益：Histogram 无 label 但事件驱动（仅 scan 触发），observe 0 一次让面板先在场
         EVOLUTION_LIFT.observe(0.0)
+        # AI 回流知识检索命中（doc_type 维度预注册）
+        AI_RETRIEVAL_HIT.labels("ai_evolution").inc(0)
+        AI_RETRIEVAL_HIT.labels("human").inc(0)
     except Exception:
         # 预注册失败不影响服务启动
         pass

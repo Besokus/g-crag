@@ -1,0 +1,207 @@
+{
+  "uid": "grid-evolution",
+  "title": "电网运维 RAG — 自进化监控",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-3h", "to": "now"},
+  "tags": ["evolution", "rag", "ai"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "EVOLUTION LIFT 增益 P50",
+      "type": "stat",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(grid_evolution_lift_bucket[5m])) by (le))",
+          "legendFormat": "P50",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3,
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0},
+              {"color": "green", "value": 0.2}
+            ]
+          },
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "EVOLUTION LIFT 分布 (P50/P90/P99 趋势)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(grid_evolution_lift_bucket[5m])) by (le))",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum(rate(grid_evolution_lift_bucket[5m])) by (le))",
+          "legendFormat": "P90",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(grid_evolution_lift_bucket[5m])) by (le))",
+          "legendFormat": "P99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "gridPos": {"h": 7, "w": 16, "x": 8, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "AI vs 人工检索命中占比 (按 doc_type)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(grid_ai_retrieval_hit_total[5m])) by (doc_type)",
+          "legendFormat": "{{doc_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7}
+    },
+    {
+      "id": 4,
+      "title": "CRAG 置信度分布 (按 confidence)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(grid_crag_confidence_total[5m])) by (confidence)",
+          "legendFormat": "{{confidence}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7}
+    },
+    {
+      "id": 5,
+      "title": "过自信冲突计数 (high+dislike)",
+      "type": "stat",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "grid_overconfident_total or vector(0)",
+          "legendFormat": "overconfident",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 5},
+              {"color": "red", "value": 20}
+            ]
+          },
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 15}
+    },
+    {
+      "id": 6,
+      "title": "AI 知识检索命中累计 (ai_evolution / human)",
+      "type": "stat",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(grid_ai_retrieval_hit_total) by (doc_type)",
+          "legendFormat": "{{doc_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "blue", "value": null}
+            ]
+          },
+          "color": {"mode": "thresholds"}
+        }
+      },
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 15}
+    },
+    {
+      "id": 7,
+      "title": "CRAG 5档细分置信度",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(grid_crag_confidence_label_total[5m])) by (label)",
+          "legendFormat": "{{label}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 0, "y": 21}
+    },
+    {
+      "id": 8,
+      "title": "CRAG refused 归因分布",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(grid_crag_refused_reason_total[5m])) by (reason)",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {"mode": "palette-classic"}
+        }
+      },
+      "gridPos": {"h": 7, "w": 12, "x": 12, "y": 21}
+    }
+  ]
+}

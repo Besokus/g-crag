@@ -80,6 +80,9 @@ async def _hit_hotqa(nq: str, conversation_id: str, t0: float) -> dict | None:
         hot = await redis_client.get_redis().get(f"hotqa:{nq}")
         if not hot:
             return None
+        # 黑名单优先：该 query 被多人 dislike 进黑名单后，hotqa 不应复用
+        if await _is_blacklisted(nq):
+            return None
         d = json.loads(hot)
         sources_str = d.get("sources") or ""
         sources_list = [
@@ -639,6 +642,9 @@ async def answer(
                 metrics.cache_hit_inc("redis")
             except Exception:
                 pass
+            # M6: 缓存命中路径也写 highbase（供 dislike 时 overconfident 检出）
+            if cached.get("confidence") == "high":
+                _fire_and_forget(_write_highbase(nq, cached.get("answer", ""), tenant))
             return cached
 
         # L2: MySQL 二级缓存（精确持久，Redis 过期/evict 时兜底；优先于模糊语义匹配）
@@ -656,6 +662,8 @@ async def answer(
                         metrics.cache_hit_inc("mysql")
                     except Exception:
                         pass
+                    if mysql_cached.get("confidence") == "high":
+                        _fire_and_forget(_write_highbase(nq, mysql_cached.get("answer", ""), tenant))
                     return mysql_cached
             except Exception as e:
                 degraded("qa_cache_mysql", e)
@@ -680,6 +688,8 @@ async def answer(
                         metrics.cache_hit_inc("semantic")
                     except Exception:
                         pass
+                    if sc_data.get("confidence") == "high":
+                        _fire_and_forget(_write_highbase(nq, sc_data.get("answer", ""), tenant))
                     return sc_data
             except Exception as e:
                 degraded("semantic_cache_get", e)
@@ -706,6 +716,8 @@ async def answer(
                     metrics.cache_hit_inc("redis")
                 except Exception:
                     pass
+                if cached.get("confidence") == "high":
+                    _fire_and_forget(_write_highbase(nq, cached.get("answer", ""), tenant))
                 return cached
         except Exception as e:
             degraded("qa_cache_get_multi", e)
@@ -727,6 +739,8 @@ async def answer(
                     metrics.cache_hit_inc("redis_multi")
                 except Exception:
                     pass
+                if cached.get("confidence") == "high":
+                    _fire_and_forget(_write_highbase(nq, cached.get("answer", ""), tenant))
                 return cached
         except Exception as e:
             degraded("qa_cache_get_multi_standalone", e)
@@ -1017,6 +1031,8 @@ async def _stream_agent(db, query, model_type, conversation_id, username, tenant
                 metrics.cache_hit_inc(cached.get("cacheLayer", "redis") or "redis")
             except Exception:
                 pass
+            if cached.get("confidence") == "high":
+                _fire_and_forget(_write_highbase(nq, cached.get("answer", ""), tenant))
             yield {"type": "done", "responseTime": round(time.time() - t0, 3),
                    "conversationId": cid, "agentMode": True, "cached": True,
                    "cacheLayer": cached.get("cacheLayer", "redis")}
@@ -1184,6 +1200,8 @@ async def stream_answer(
                 metrics.cache_hit_inc("redis")
             except Exception:
                 pass
+            if cached.get("confidence") == "high":
+                _fire_and_forget(_write_highbase(nq, cached.get("answer", ""), tenant))
             yield {
                 "type": "done", "responseTime": round(time.time() - t0, 3),
                 "hallucinationRate": cached.get("hallucinationRate", 0.0),
@@ -1213,6 +1231,8 @@ async def stream_answer(
                         metrics.cache_hit_inc("mysql")
                     except Exception:
                         pass
+                    if mysql_cached.get("confidence") == "high":
+                        _fire_and_forget(_write_highbase(nq, mysql_cached.get("answer", ""), tenant))
                     yield {
                         "type": "done", "responseTime": round(time.time() - t0, 3),
                         "hallucinationRate": mysql_cached.get("hallucinationRate", 0.0),
@@ -1248,6 +1268,8 @@ async def stream_answer(
                         metrics.cache_hit_inc("semantic")
                     except Exception:
                         pass
+                    if sc_data.get("confidence") == "high":
+                        _fire_and_forget(_write_highbase(nq, sc_data.get("answer", ""), tenant))
                     yield {
                         "type": "done", "responseTime": round(time.time() - t0, 3),
                         "hallucinationRate": sc_data.get("hallucinationRate", 0.0),
@@ -1284,6 +1306,8 @@ async def stream_answer(
                     metrics.cache_hit_inc("redis")
                 except Exception:
                     pass
+                if cached.get("confidence") == "high":
+                    _fire_and_forget(_write_highbase(nq, cached.get("answer", ""), tenant))
                 yield {"type": "done", "responseTime": round(time.time() - t0, 3),
                        "hallucinationRate": cached.get("hallucinationRate", 0.0),
                        "conversationId": conversation_id, "cached": True, "cacheLayer": "redis",

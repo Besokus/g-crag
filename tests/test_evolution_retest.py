@@ -66,7 +66,7 @@ async def test_retest_lift_positive_writes_back(unique_tenant, monkeypatch):
 
     observed = []
     async def fake_top1(db, q, t, top_k=1):
-        return [{"score": 0.8, "doc_id": "d"}]
+        return [{"score": 0.8, "doc_id": f"ai-evo-{t}"}]
     monkeypatch.setattr(ev, "_retrieve_top1", fake_top1)
     monkeypatch.setattr(metrics.EVOLUTION_LIFT, "observe",
                         lambda x: observed.append(x))
@@ -89,17 +89,20 @@ async def test_retest_lift_positive_writes_back(unique_tenant, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_retest_lift_nonpositive_downgrades_quality(unique_tenant, monkeypatch):
-    """回流后检索分数无改善（0.3→0.2）→ lift=-0.1≤0，quality_score 下调（0.6→0.3）。"""
+async def test_retest_zero_recall_no_downgrade(unique_tenant, monkeypatch):
+    """零召回（top1 命中非 AI 草稿文档）→ after=0.0 → 不降权（可能是检索故障而非草稿无效）。
+
+    I2 修复：after==0.0 时跳过降权，防批量误判。
+    """
     tenant = unique_tenant
     old = utcnow() - timedelta(days=30)
     async with AsyncSessionLocal() as db:
-        db.add(_make_draft("b5-neg", tenant, indexed_at=old, top1_score=0.3,
+        db.add(_make_draft("b5-zero", tenant, indexed_at=old, top1_score=0.3,
                            member_queries=["q1"]))
         await db.commit()
 
     async def fake_top1(db, q, t, top_k=1):
-        return [{"score": 0.2, "doc_id": "d"}]
+        return [{"score": 0.2, "doc_id": "d"}]  # doc_id != ai-evo-{tenant} → 零召回
     monkeypatch.setattr(ev, "_retrieve_top1", fake_top1)
     monkeypatch.setattr(metrics.EVOLUTION_LIFT, "observe", lambda x: None)
 
@@ -108,10 +111,44 @@ async def test_retest_lift_nonpositive_downgrades_quality(unique_tenant, monkeyp
         assert n == 1
         row = (await db.execute(
             select(KnowledgeEvolutionDraft).where(
-                KnowledgeEvolutionDraft.id == "b5-neg")
+                KnowledgeEvolutionDraft.id == "b5-zero")
         )).scalar_one()
         evi = json.loads(row.gap_evidence_json)
-        assert evi["lift"] == round(0.2 - 0.3, 3)   # -0.1
+        assert evi["after_score"] == 0.0
+        assert evi["lift"] == round(0.0 - 0.3, 3)   # -0.3
+        # after==0.0（零召回）→ 不降权
+        assert row.quality_score == 0.6
+
+
+@pytest.mark.asyncio
+async def test_retest_low_lift_with_recall_downgrades_quality(unique_tenant, monkeypatch):
+    """有召回但 lift≤0（top1 命中 AI 草稿但分数低于基线）→ 降权。
+
+    I2 修复：只有 after>0 且 lift≤0 才降权（回流确实无效）。
+    """
+    tenant = unique_tenant
+    old = utcnow() - timedelta(days=30)
+    async with AsyncSessionLocal() as db:
+        db.add(_make_draft("b5-low", tenant, indexed_at=old, top1_score=0.5,
+                           member_queries=["q1"]))
+        await db.commit()
+
+    async def fake_top1(db, q, t, top_k=1):
+        return [{"score": 0.3, "doc_id": f"ai-evo-{tenant}"}]  # 命中 AI 草稿但分数低
+    monkeypatch.setattr(ev, "_retrieve_top1", fake_top1)
+    monkeypatch.setattr(metrics.EVOLUTION_LIFT, "observe", lambda x: None)
+
+    async with AsyncSessionLocal() as db:
+        n = await ev._retest_indexed_drafts(db, tenant)
+        assert n == 1
+        row = (await db.execute(
+            select(KnowledgeEvolutionDraft).where(
+                KnowledgeEvolutionDraft.id == "b5-low")
+        )).scalar_one()
+        evi = json.loads(row.gap_evidence_json)
+        assert evi["after_score"] == 0.3
+        assert evi["lift"] == round(0.3 - 0.5, 3)   # -0.2
+        # after>0 且 lift≤0 → 降权
         assert row.quality_score == round(0.6 * 0.5, 3)  # 0.3
 
 

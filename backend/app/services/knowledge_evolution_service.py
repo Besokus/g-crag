@@ -181,6 +181,7 @@ async def _retest_indexed_drafts(db, tenant):
             )
         )).scalars().all()
         retested = 0
+        zero_recall_count = 0
         for r in rows:
             try:
                 member_queries = json.loads(r.member_queries_json or "[]")
@@ -197,19 +198,26 @@ async def _retest_indexed_drafts(db, tenant):
                         scores.append(float(top[0].get("score", 0.0) or 0.0))
                     # top1 命中人工文档 → AI 草稿无贡献，score 记 0
                 after = round(sum(scores) / len(scores), 3) if scores else 0.0
+                if after == 0.0:
+                    zero_recall_count += 1
                 lift = round(after - before, 3)
                 evi["after_score"] = after
                 evi["lift"] = lift
                 evi["retested_at"] = utcnow().isoformat()
                 r.gap_evidence_json = json.dumps(evi, ensure_ascii=False)
-                if lift <= 0:
-                    # 回流后检索分数未提升 → 判定回流无效，下调 quality_score（人工复审信号）
+                if lift <= 0 and after > 0.0:
+                    # 有召回但 lift≤0 → 回流确实无效，降权
                     # floor 0.05：防指数衰减到 0（spec §12 quality_score 仅信号，不可恢复可接受）
                     r.quality_score = max(round(r.quality_score * 0.5, 3), 0.05)
+                # after==0.0（零召回）不降权——可能是检索故障而非草稿无效，防批量误判
                 metrics.EVOLUTION_LIFT.observe(lift)
                 retested += 1
             except Exception as e:
                 degraded("evo_retest_one", e)
+        # 批次级告警：零召回占比 > 50% 说明检索可能故障（非草稿无效）
+        if retested and zero_recall_count / retested > 0.5:
+            degraded("evo_retest_zero_recall_batch",
+                     Exception(f"zero_recall={zero_recall_count}/{retested}"))
         if retested:
             await db.commit()
         return retested

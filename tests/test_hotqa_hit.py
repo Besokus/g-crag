@@ -32,6 +32,8 @@ def _fake_redis_with_hotqa(payload: dict | None):
         r.get = AsyncMock(return_value=None)
     else:
         r.get = AsyncMock(return_value=json.dumps(payload, ensure_ascii=False))
+    # sismember 默认返回 False（不在黑名单），防止 AsyncMock 自动创建返回 truthy 值
+    r.sismember = AsyncMock(return_value=False)
     return r
 
 
@@ -135,4 +137,23 @@ def test_hit_hotqa_empty_sources_yields_empty_list():
             hot = await qa_service._hit_hotqa(_HOTQA_NQ, "", 0.0)
             assert hot is not None
             assert hot["retrievalSource"] == []
+    asyncio.run(go())
+
+
+def test_hit_hotqa_blacklisted_returns_none():
+    """query 在黑名单中 → hotqa 不命中（黑名单优先，该答案被多人 dislike 过）。"""
+    payload = {
+        "query": _HOTQA_NQ,
+        "answer": "已被踩过的答案",
+        "sources": "doc.docx",
+        "count": 5,
+        "tenant": "default",
+    }
+
+    async def go():
+        with patch.object(qa_service.redis_client, "get_redis") as mk:
+            mk.return_value = _fake_redis_with_hotqa(payload)
+            with patch.object(qa_service, "_is_blacklisted", return_value=True):
+                hot = await qa_service._hit_hotqa(_HOTQA_NQ, "", 0.0)
+        assert hot is None
     asyncio.run(go())

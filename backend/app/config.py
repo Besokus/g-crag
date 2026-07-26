@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     CRAG_ENABLE: bool = True     # 检索后分级+纠错(低相关触发query改写重检索/拒答)
     CRAG_NEIGHBOR_EXPAND_ENABLE: bool = False  # ambiguous 档邻域 chunk 扩展（补证据完整性，默认关）
     CRAG_NEIGHBOR_WINDOW: int = 1              # 邻域窗口（±N 个 chunk_idx）
-    CRAG_HIGH: float = 0.6       # top1 rerank分>=此值=correct(证据充分)
+    CRAG_HIGH: float = 0.72      # top1 rerank分>=此值=correct(证据充分; 原0.6太松致燃料少,0.72让更多medium进gap)
     CRAG_LOW: float = 0.3        # top1 rerank分<此值=incorrect(触发纠错)
     CRAG_PERDOC_ENABLE: bool = False  # CRAG v2：LLM 逐条评估证据相关性（非仅 top1，增延迟，默认关）
     CRAG_TIMEOUT: float = 5.0         # CRAG v2：LLM 评估单次超时限制（秒）

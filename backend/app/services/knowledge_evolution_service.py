@@ -21,7 +21,7 @@ from app.services.task_queue_service import utcnow
 # ===== 常量（spec global constraints）=====
 TASK_TYPE = "knowledge_evolution.scan"
 CLUSTER_THRESHOLD = 0.82
-CLUSTER_MIN_SIZE = 3
+CLUSTER_MIN_SIZE = 2            # 原3; 降到2让少量燃料也能成簇产出草稿
 BLIND_TOP1_THRESHOLD = 0.55
 AI_QUALITY_SCORE = 0.6
 WEEKLY_QUOTA_DEFAULT = 20
@@ -189,10 +189,13 @@ async def _retest_indexed_drafts(db, tenant):
                 evi = json.loads(r.gap_evidence_json or "{}")
                 before = float(evi.get("top1_score") or 0.0)
                 scores = []
+                ai_doc_id = f"ai-evo-{tenant}"   # AI 草稿共享虚拟文档 ID
                 for q in member_queries:
                     top = await _retrieve_top1(db, q, tenant, top_k=1)
-                    if top:
+                    if top and top[0].get("doc_id") == ai_doc_id:
+                        # 只有 top1 命中的是 AI 草稿本身才算 lift，否则功劳不归本草稿
                         scores.append(float(top[0].get("score", 0.0) or 0.0))
+                    # top1 命中人工文档 → AI 草稿无贡献，score 记 0
                 after = round(sum(scores) / len(scores), 3) if scores else 0.0
                 lift = round(after - before, 3)
                 evi["after_score"] = after

@@ -325,48 +325,15 @@ async def get_stats(db, tenant):
 
 
 # ===== T9: 回流 Milvus + 撤回 =====
-AI_DOC_NAME = "AI自进化草稿集"
-
-
-async def _ensure_ai_doc(db, tenant):
-    """建/复用虚拟 AI 文档（检索元数据过滤需 Document 行；doc_type=ai_evolution 供降权识别）。"""
-    from app.models.document import Document
-    doc_id = f"ai-evo-{tenant}"
-    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
-    if not doc:
-        db.add(Document(
-            id=doc_id, doc_name=AI_DOC_NAME, doc_type="ai_evolution",
-            minio_object=f"ai-evolution/{tenant}", status="vectorized",
-            tenant_id=tenant, upload_user="system",
-        ))
-        await db.flush()
-    return doc_id
+# 虚拟 AI 文档 + Chunk/Milvus 持久化已迁移到 knowledge_backbone（供两套服务共用）
+from app.services.knowledge_backbone import AI_DOC_NAME, ensure_ai_doc, persist_chunk  # noqa: F401
 
 
 async def _persist_chunk_to_kb(db, draft):
-    """写 Chunk 行 + embed + Milvus insert（cloud collection）。返回 chunk_id。"""
-    from app.models.chunk import Chunk
-    from app.clients import milvus_client
-    from app.providers.factory import get_embedding_provider
-    from app.config import settings
-    doc_id = await _ensure_ai_doc(db, draft.tenant_id)
-    cnt = (await db.execute(
-        select(func.count()).select_from(Chunk).where(Chunk.doc_id == doc_id)
-    )).scalar() or 0
-    content = draft.draft_content or ""
-    chunk = Chunk(
-        id=uuid.uuid4().hex, doc_id=doc_id, chunk_idx=cnt,
-        content=content, char_count=len(content),
-        section=f"[AI]{draft.draft_title}"[:256], chunk_type="child",
+    """写 Chunk 行 + embed + Milvus insert。返回 chunk_id。委托 backbone。"""
+    return await persist_chunk(
+        db, draft.draft_content or "", draft.draft_title or "", draft.tenant_id,
     )
-    db.add(chunk)
-    await db.flush()
-    vec = (await get_embedding_provider(settings.EMB_PROVIDER).embed([content]))[0]
-    await asyncio.to_thread(
-        milvus_client.insert_chunks, settings.MILVUS_COLLECTION, [vec], [content],
-        [doc_id], [AI_DOC_NAME], [cnt],
-    )
-    return chunk.id
 
 
 async def reflow_to_kb(db, draft):

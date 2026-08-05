@@ -8,7 +8,8 @@ from app.providers.base import LLMProvider
 class QwenLLM(LLMProvider):
     def __init__(self):
         self.client = AsyncOpenAI(
-            api_key=settings.DASHSCOPE_API_KEY, base_url=settings.DASHSCOPE_BASE_URL
+            api_key=settings.DASHSCOPE_API_KEY, base_url=settings.DASHSCOPE_BASE_URL,
+            timeout=settings.LLM_TIMEOUT, max_retries=settings.LLM_MAX_RETRIES,
         )
         self.model = settings.QWEN_LLM_MODEL
 

@@ -808,10 +808,11 @@ async def answer(
     _llm_usage: dict | None = None
     if getattr(settings, "LLM_USAGE_TRACK_ENABLE", False):
         raw, _llm_usage = await get_llm_provider(model_type).chat_with_usage(
-            messages, temperature=config_service.rt_temperature(),
+            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS,
         )
     else:
-        raw = await get_llm_provider(model_type).chat(messages, temperature=config_service.rt_temperature())
+        raw = await get_llm_provider(model_type).chat(
+            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS)
     _tc = _get_trace(); _tc and _tc.record("llm", time.time() - _llm0)
     raw = safety.safe_answer(raw)  # 答案脱敏（PII_MASK_ENABLE 开启时，D4）
     # STRUCTURED_OUTPUT：LLM 输出 JSON → parse 取 answer_text + 结构化 citation_map(每 ref 一项不重复)
@@ -1390,7 +1391,8 @@ async def stream_answer(
     # 2) 逐 token 流式（打字机）+ LLM 调用埋点
     parts: list[str] = []
     _llm0 = time.time()
-    async for token in get_llm_provider(model_type).stream(messages, temperature=config_service.rt_temperature()):
+    async for token in get_llm_provider(model_type).stream(
+        messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
         parts.append(token)
         yield {"type": "token", "content": token}
     try:
@@ -1399,6 +1401,7 @@ async def stream_answer(
         metrics.LLM_LATENCY.labels(_p).observe(time.time() - _llm0)
     except Exception:
         pass
+    _tc = _get_trace(); _tc and _tc.record("llm", time.time() - _llm0)   # 流式 LLM 总耗时(首token→末token)
 
     # 3) 持久化完整答案
     full = "".join(parts)

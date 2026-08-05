@@ -8,7 +8,8 @@ from app.providers.base import LLMProvider
 class DeepSeekLLM(LLMProvider):
     def __init__(self):
         self.client = AsyncOpenAI(
-            api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL
+            api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL,
+            timeout=settings.LLM_TIMEOUT, max_retries=settings.LLM_MAX_RETRIES,
         )
         self.model = settings.DEEPSEEK_MODEL
 

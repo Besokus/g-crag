@@ -59,6 +59,11 @@ class Settings(BaseSettings):
     # B4：真实 token usage 透传（opt-in，默认关）。开关开 → qa_service 走 chat_with_usage
     # 拿 r.usage 真实 prompt/completion tokens 记录到 cost_tracker；关 → 沿用 len//2 估算。
     LLM_USAGE_TRACK_ENABLE: bool = False
+    # LLM 生成性能（实测驱动）：qwen-plus 默认输出 1000+字致生成段 14-16s；砍 max_tokens + 简洁指令
+    # 把单次总时长压到 ~8s。timeout/retry 防 deepseek 卡死/空 answer 拖到分钟级（OpenAI SDK 默认 600s/2次）。
+    LLM_MAX_TOKENS: int = 768          # 单次生成上限（运维问答无需 2048 长篇）
+    LLM_TIMEOUT: float = 30.0          # 单次请求超时（SDK 默认 600s 过大）
+    LLM_MAX_RETRIES: int = 1           # 失败重试次数（默认 2 次指数退避，缩到 1 防尾部放大）
 
     # --- DeepSeek ---
     DEEPSEEK_API_KEY: str = ""

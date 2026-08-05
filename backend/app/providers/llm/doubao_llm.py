@@ -8,7 +8,8 @@ from app.providers.base import LLMProvider
 class DoubaoLLM(LLMProvider):
     def __init__(self):
         self.client = AsyncOpenAI(
-            api_key=settings.ARK_API_KEY, base_url=settings.ARK_BASE_URL
+            api_key=settings.ARK_API_KEY, base_url=settings.ARK_BASE_URL,
+            timeout=settings.LLM_TIMEOUT, max_retries=settings.LLM_MAX_RETRIES,
         )
         self.model = settings.DOUBAO_LLM_ENDPOINT_ID  # ep-xxxx，非模型名
 

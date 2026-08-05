@@ -163,16 +163,19 @@ services:
       MINIO_ENDPOINT: minio:9000
       MILVUS_HOST: milvus
       NEO4J_URI: bolt://neo4j:7687
-      # 容器访问外网(云API + bge模型下载)走宿主机代理; 内部服务不走代理
-      HTTPS_PROXY: http://host.docker.internal:7897
-      HTTP_PROXY: http://host.docker.internal:7897
-      NO_PROXY: localhost,127.0.0.1,mysql,minio,milvus,redis,neo4j,prometheus,grafana
+      # 容器直连外网：云API(dashscope/deepseek/doubao 国内可达) + bge 走 hf-mirror 国内镜像。
+      # 注：宿主机代理 7897 仅监听 127.0.0.1（未开 Allow LAN），容器经 host.docker.internal 连不上，
+      # 故不设 HTTPS_PROXY——否则 httpx/requests 把所有出站（含 hf-mirror、云API）都发往不可达代理。
+      HF_ENDPOINT: https://hf-mirror.com
+      HF_HUB_OFFLINE: "1"            # 离线模式：用挂载的宿主机 HF 缓存，避免联网下载受阻
+      TRANSFORMERS_OFFLINE: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "8001:8001"
     volumes:
       - grid-backend-data:/app/data   # 持久化 data/（运行日志 + 数据备份 .sql），容器重建不丢
+      - C:/Users/Administrator/.cache/huggingface/hub:/root/.cache/huggingface/hub:ro   # 宿主机 bge 缓存（离线加载，免下载）
 
   # ---------- 前端（nginx）----------
   frontend:

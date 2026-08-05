@@ -20,6 +20,15 @@ from app.models.document import Document
 from app.rag import mmr, rrf
 from app.core.obs import degraded
 from app.services import bm25_service, config_service, embedding_service, query_rewrite, rerank_service
+from contextlib import nullcontext
+
+from app.core.qa_trace import get_collector as _get_trace
+
+
+def _retr_span(name: str):
+    """检索子链 trace 打点（group=retrieval）；无 collector 时 no-op。to_thread 不深入线程内部。"""
+    c = _get_trace()
+    return c.span(name, "retrieval") if c else nullcontext()
 
 
 def _ov(ov: dict | None, key: str, default):
@@ -187,16 +196,18 @@ async def _dense_and_sparse(
     """
     dense_q = (await _hyde_or_cache(q, model_type)) or q
 
-    qvec_cloud, qvec_bge = await asyncio.gather(
-        embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
-        embedding_service.embed_query(dense_q, "bge"),
-    )
+    with _retr_span("embedding"):
+        qvec_cloud, qvec_bge = await asyncio.gather(
+            embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
+            embedding_service.embed_query(dense_q, "bge"),
+        )
     _base_ef = max(config_service.rt_ef(), cand)  # HNSW ef ≥ 召回窗口，保证精度
     _ef = _ef_for_route(route, query_type, _base_ef) if route_aware else _base_ef
-    dense_cloud, dense_bge = await asyncio.gather(
-        asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, _ef),
-        asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, _ef),
-    )
+    with _retr_span("dense_search"):
+        dense_cloud, dense_bge = await asyncio.gather(
+            asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, _ef),
+            asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, _ef),
+        )
     dense_hits = []
     for d in dense_cloud:
         dense_hits.append({**d, "key": (d.get("doc_id"), d.get("chunk_idx")), "srcs": ["dense_cloud"]})
@@ -259,7 +270,8 @@ async def mixed_search(
     cand = max(topk * 4, 20)
 
     # 0) query 改写（口语→规范，含 adaptive 跳过 + 缓存 + 评估闭环）
-    q = (await query_rewrite.rewrite_query_v2(query, model_type))["query"]
+    with _retr_span("query_rewrite"):
+        q = (await query_rewrite.rewrite_query_v2(query, model_type))["query"]
 
     # 路由调度：根据决策选择检索路径
     route = routing_decision.route if routing_decision else "hybrid"
@@ -316,16 +328,18 @@ async def mixed_search(
         # dense-only: 仅双路向量，跳过 BM25
         for qq in queries:
             dense_q = (await _hyde_or_cache(qq, model_type)) or qq
-            qvec_cloud, qvec_bge = await asyncio.gather(
-                embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
-                embedding_service.embed_query(dense_q, "bge"),
-            )
+            with _retr_span("embedding"):
+                qvec_cloud, qvec_bge = await asyncio.gather(
+                    embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
+                    embedding_service.embed_query(dense_q, "bge"),
+                )
             _base_ef = max(config_service.rt_ef(), cand)  # HNSW ef ≥ 召回窗口，保证精度
             _ef = _ef_for_route(route, _query_type, _base_ef) if _route_aware else _base_ef
-            dense_cloud, dense_bge = await asyncio.gather(
-                asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, _ef),
-                asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, _ef),
-            )
+            with _retr_span("dense_search"):
+                dense_cloud, dense_bge = await asyncio.gather(
+                    asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, _ef),
+                    asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, _ef),
+                )
             for src, results in (("dense_cloud", dense_cloud), ("dense_bge", dense_bge)):
                 for d in results:
                     all_dense.append({
@@ -378,13 +392,14 @@ async def mixed_search(
 
     # 3) 重排（高置信 sparse 可跳过，单路 dense/sparse 也可跳过）
     if _ov(overrides, "RERANK_ENABLE", settings.RERANK_ENABLE) and len(pool) > 1 and not skip_rerank:
-        try:
-            docs = [h.get("text", "") for h in pool]
-            ranked = await rerank_service.get_reranker().rerank(q, docs, top_n=min(_pool_cap, len(pool)))
-            pool = [{**pool[idx], "score": float(score)} for idx, score in ranked]
-        except Exception as e:
-            degraded("rerank", e)
-            # pool 保持原样，不改变
+        with _retr_span("rerank"):
+            try:
+                docs = [h.get("text", "") for h in pool]
+                ranked = await rerank_service.get_reranker().rerank(q, docs, top_n=min(_pool_cap, len(pool)))
+                pool = [{**pool[idx], "score": float(score)} for idx, score in ranked]
+            except Exception as e:
+                degraded("rerank", e)
+                # pool 保持原样，不改变
     # pool 已经就绪（sparse/dense 单路直接使用，hybrid 已 RRF 融合）
 
     # 4) 元数据过滤：租户隔离 + docType/设备（多租户 + D5）+ RBAC 文档级 ACL（dept/allowed_roles）

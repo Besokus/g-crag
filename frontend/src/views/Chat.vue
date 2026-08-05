@@ -107,6 +107,7 @@
                 <a @click="dislike(m)" :class="{ on: m.fb === 'dislike' }">👎</a>
               </span>
               <a v-if="m.content && !m.streaming" class="ev-btn" @click="showEvidence(m)">🔍 证据溯源</a>
+              <a v-if="m.trace" class="ev-btn" @click="m._linkOpen = !m._linkOpen">📊 链路耗时</a>
               <a v-if="m.content && !m.streaming && (m.confidence==='medium'||m.confidence==='refused')" class="ev-btn" @click="reportGap(m)">⚠️ 上报证据不足</a>
             </div>
             <!-- 证据溯源弹窗 -->
@@ -140,6 +141,7 @@
               </div>
             </div>
 
+            <QaTraceChart v-if="m.trace && m._linkOpen" :trace="m.trace" />
             <div class="related" v-if="!m.streaming && m.related && m.related.length">
               <div class="src-head">💡 相关追问</div>
               <div class="rq-list">
@@ -181,6 +183,7 @@ import { ref, reactive, onMounted, nextTick, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import AgentTrace from '../components/AgentTrace.vue'
+import QaTraceChart from '../components/QaTraceChart.vue'
 import hljs from 'highlight.js/lib/core'
 import python from 'highlight.js/lib/languages/python'
 import javascript from 'highlight.js/lib/languages/javascript'
@@ -293,7 +296,7 @@ async function ask() {
 async function runStream(q, opts = {}) {
   const { regen = false, cid } = opts
   loading.value = true
-  const msg = reactive({ role: 'assistant', content: '', sources: [], time: 0, halluc: 0, route: '', routeReason: '', modelType: '', conversationId: cid || currentConvId.value || '', query: q, fb: '', streaming: true, aborted: false, agentSteps: [], agentMode: false, _traceOpen: true })
+  const msg = reactive({ role: 'assistant', content: '', sources: [], time: 0, halluc: 0, route: '', routeReason: '', modelType: '', conversationId: cid || currentConvId.value || '', query: q, fb: '', streaming: true, aborted: false, agentSteps: [], agentMode: false, _traceOpen: true, trace: null, _linkOpen: false })
   messages.value.push(msg)
   nextTick(() => { if (msgListEl.value) msgListEl.value.scrollTop = msgListEl.value.scrollHeight })
   const onStreamEvent = (ev) => {
@@ -316,6 +319,7 @@ async function runStream(q, opts = {}) {
       if (ev.modelType) msg.modelType = ev.modelType
       if (ev.cached !== undefined) msg.cached = ev.cached
       if (ev.cacheLayer) msg.cacheLayer = ev.cacheLayer
+      if (ev.trace) msg.trace = ev.trace
       msg.streaming = false
       loading.value = false
       abortCtrl.value = null

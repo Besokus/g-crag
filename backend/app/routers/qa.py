@@ -41,6 +41,9 @@ async def answer(
 ):
     from app.config import settings
     from app.services import plugin_registry
+    from app.core.qa_trace import new_collector
+    # 链路 trace：请求入口建 collector（绑 contextvar，下游 answer/mixed_search 自动打点）
+    _trace_c = new_collector(body.query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
     # 插件 · query 预处理（BRD §5.3.1 扩展点）
     q = plugin_registry.run_hook("query_preprocess", body.query, {"user": user.username})
     if getattr(settings, "DUAL_RAG_ENABLE", False):
@@ -63,6 +66,18 @@ async def answer(
     # X-Cache-Hit 响应头：供 HTTP 层面调试/监控缓存分层命中了哪层
     layer = data.get("cacheLayer") or data.get("cached") and "redis" or "llm"
     request.state.cache_layer = layer
+    # 链路 trace：注入响应（实时内嵌）+ 异步落库（采样；失败绝不影响主链路）
+    if _trace_c is not None:
+        try:
+            data["trace"] = _trace_c.to_dict()
+            from app.services.qa_trace_service import save_trace
+            _bg_tasks.add(asyncio.create_task(save_trace(
+                data["trace"], query=q, tenant=user.tenant_id or "default",
+                username=user.username, cache_layer=data.get("cacheLayer", ""),
+                confidence=data.get("confidence", ""))))
+        except Exception as e:
+            from app.core.obs import degraded
+            degraded("qa_trace_attach", e)
     await write_log(db, user.username, "智能问答", f"提问：{body.query[:50]}")
     return success(data, "问答成功")
 
@@ -77,16 +92,65 @@ async def answer_stream(
     regen: bool = False,
 ):
     async def gen():
+        from app.config import settings
+        from app.core.qa_trace import new_collector
+        _trace_c = new_collector(body.query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
         async for item in qa_service.stream_answer(
             db, body.query, body.modelType,
             conversation_id=body.conversationId, username=user.username, tenant=user.tenant_id,
             regen=regen, agent_mode=body.agentMode,
             user_dept=user.dept, user_role=user.role,
         ):
+            # done 事件统一注入 trace（stream_answer 内部已打点）+ 异步落库
+            if _trace_c is not None and isinstance(item, dict) and item.get("type") == "done":
+                try:
+                    item["trace"] = _trace_c.to_dict()
+                    from app.services.qa_trace_service import save_trace
+                    _bg_tasks.add(asyncio.create_task(save_trace(
+                        item["trace"], query=body.query, tenant=user.tenant_id or "default",
+                        username=user.username, cache_layer=item.get("cacheLayer", ""),
+                        confidence=item.get("confidence", ""))))
+                except Exception as e:
+                    from app.core.obs import degraded
+                    degraded("qa_trace_attach_stream", e)
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@router.get("/trace")
+@limiter.limit("60/minute")
+async def list_trace(
+    request: Request,
+    page: int = 1,
+    size: int = 20,
+    slowMs: float | None = None,
+    bottleneck: str = "",
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_perm(QA_ANSWER)),
+):
+    """链路诊断·历史列表：可过滤慢查询(slowMs)/瓶颈节点。admin 查全租户，他人仅查自己。"""
+    from app.services.qa_trace_service import list_traces
+    username = "" if user.role == "admin" else user.username
+    data = await list_traces(tenant=user.tenant_id, page=page, size=size,
+                             slow_ms=slowMs, bottleneck=bottleneck, username=username)
+    return success(data, "查询成功")
+
+
+@router.get("/trace/{trace_id}")
+async def get_trace_api(
+    trace_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_perm(QA_ANSWER)),
+):
+    """链路诊断·单条明细：含各阶段 spans（前端复用 QaTraceChart 渲染瀑布图）。"""
+    from app.core.response import BizError
+    from app.services.qa_trace_service import get_trace
+    data = await get_trace(trace_id, tenant=user.tenant_id)
+    if not data:
+        raise BizError("链路记录不存在", 404)
+    return success(data, "查询成功")
 
 
 @router.get("/conversations")
@@ -360,11 +424,19 @@ async def answer_ws(ws: WebSocket):
                 await ws.send_json({"type": "error", "message": "用户不存在"})
                 await ws.close()
                 return
+            from app.config import settings
+            from app.core.qa_trace import new_collector
+            _trace_c = new_collector(query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
             async for item in qa_service.stream_answer(
                 db, query, req.get("modelType"),
                 conversation_id=req.get("conversationId"),
                 username=user.username, tenant=user.tenant_id,
             ):
+                if _trace_c is not None and isinstance(item, dict) and item.get("type") == "done":
+                    try:
+                        item["trace"] = _trace_c.to_dict()
+                    except Exception:
+                        pass
                 await ws.send_json(item)
     except WebSocketDisconnect:
         return

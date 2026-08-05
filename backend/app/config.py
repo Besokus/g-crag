@@ -267,6 +267,9 @@ class Settings(BaseSettings):
     OTEL_SAMPLE_RATE: float = 1.0          # 采样率：开发期 1.0(100%)，上线后 0.1(10%) + 异常必采
     OTEL_ENDPOINT: str = "http://localhost:3001/api/public/otel"  # Langfuse OTLP HTTP 端点
     OTEL_SERVICE_NAME: str = "grid-qa-backend"  # OTel service.name 标识
+    # ---------- 链路 trace 可视化（per-request 瀑布图，定位"卡在哪个节点"） ----------
+    QA_TRACE_ENABLE: bool = True           # 总开关：采集各阶段耗时随响应返回前端 + 落库
+    QA_TRACE_SAMPLE_RATE: float = 1.0      # 落库采样率（响应体 trace 不采样，实时展示必带）
     # FAITHFULNESS_GATE 已在上方"可信度评测"区定义(0.85)，复用，不重复声明
 
     # ---------- N1 Agent 长期记忆层 ----------

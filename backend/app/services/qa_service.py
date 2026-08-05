@@ -26,6 +26,7 @@ from app.clients import redis_client
 from app.config import settings
 from app.core import safety
 from app.core.obs import degraded
+from app.core.qa_trace import get_collector as _get_trace, span as _trace_span
 from app.providers.factory import get_llm_provider
 from app.rag import citation, prompt_templates
 from app.models.document import Document
@@ -596,8 +597,9 @@ async def answer(
     tenant: str = "default", user_dept: str | None = None, user_role: str | None = None,
 ) -> dict:
     t0 = time.time()
-    nq = term_service.normalize(query)
-    safety.guard_query(query)  # 入站 prompt injection 告警（D4）
+    with _trace_span("normalize"):
+        nq = term_service.normalize(query)
+        safety.guard_query(query)  # 入站 prompt injection 告警（D4）
     is_single = not conversation_id  # 仅单轮查/写缓存（多轮上下文变化不缓存）
 
     # Self-RAG：非运维问题跳过检索直接拒答（省成本+防污染，SELF_RAG_ENABLE 默认关）
@@ -613,7 +615,8 @@ async def answer(
 
     # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接返回，跳检索/CRAG/生成。
     # 多轮也命中（用户认可的高频答案与上下文无关）；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
-    hot = await _hit_hotqa(nq, conversation_id or "", t0)
+    with _trace_span("hotqa"):
+        hot = await _hit_hotqa(nq, conversation_id or "", t0)
     if hot:
         try:
             from app.core import metrics
@@ -699,7 +702,8 @@ async def answer(
     if conversation_id:
         history = await conversation_service.get_messages(db, conversation_id, _HISTORY_LIMIT)
     # 多轮指代消解：检索用改写后的独立查询
-    search_q = await _search_query_for_retrieve(db, query, nq, conversation_id, history, model_type)
+    with _trace_span("standalone_rewrite"):
+        search_q = await _search_query_for_retrieve(db, query, nq, conversation_id, history, model_type)
 
     # 多轮且 query 完整(standalone 未改写 search_q==nq) → 也查 Redis 热点缓存
     # 场景：用户点推荐问题(完整 query)接续对话，答案不依赖上下文，可安全命中
@@ -746,18 +750,20 @@ async def answer(
             degraded("qa_cache_get_multi_standalone", e)
 
     # 智能路由：根据查询特征选择最优检索路径（Phase A）
-    routing = None
-    if settings.ROUTING_ENABLE:
-        try:
-            from app.routing.routing_service import route_query
-            routing = route_query(search_q)
-        except Exception as e:
-            degraded("routing_dispatch", e)
+    with _trace_span("routing"):
+        routing = None
+        if settings.ROUTING_ENABLE:
+            try:
+                from app.routing.routing_service import route_query
+                routing = route_query(search_q)
+            except Exception as e:
+                degraded("routing_dispatch", e)
 
-    contexts = await retrieval_service.mixed_search(
-        db, search_q, topk, tenant=tenant, routing_decision=routing,
-        user_dept=user_dept, user_role=user_role,
-    )
+    with _trace_span("retrieval"):
+        contexts = await retrieval_service.mixed_search(
+            db, search_q, topk, tenant=tenant, routing_decision=routing,
+            user_dept=user_dept, user_role=user_role,
+        )
     if not contexts:
         # 无结果兜底：记录为知识缺口（喂证据补全闭环）+ 友好引导，而非生硬拒答
         try:
@@ -776,20 +782,22 @@ async def answer(
         }
 
     # Corrective RAG：分级 + 纠错闭环
-    contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
-        db, nq, contexts, model_type, topk, tenant
-    )
+    with _trace_span("crag"):
+        contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
+            db, nq, contexts, model_type, topk, tenant
+        )
     # 注：CRAG refused 的证据补全收集已挪到答案生成后（与 medium 共用既有 collect 点），
     # 避免 answer="" 被先写入导致真实答案被去重吞掉（I1 修复）。
 
     # GraphRAG：融合知识图谱结构化上下文（KG_RAG_ENABLE 默认开）
-    graph: list[str] = []
-    if settings.KG_RAG_ENABLE:
-        try:
-            graph = await kg_service.graph_context(nq, db=db, tenant=tenant)
-        except Exception as e:
-            degraded("kg_graph_context", e)
-            graph = []
+    with _trace_span("graphrag"):
+        graph: list[str] = []
+        if settings.KG_RAG_ENABLE:
+            try:
+                graph = await kg_service.graph_context(nq, db=db, tenant=tenant)
+            except Exception as e:
+                degraded("kg_graph_context", e)
+                graph = []
     _structured = (getattr(settings, "CITATION_STRUCTURED_OUTPUT", False)
                    and getattr(settings, "CITATION_VERIFIER_ENABLE", False))
     messages = prompt_templates.build_messages_with_history(
@@ -804,6 +812,7 @@ async def answer(
         )
     else:
         raw = await get_llm_provider(model_type).chat(messages, temperature=config_service.rt_temperature())
+    _tc = _get_trace(); _tc and _tc.record("llm", time.time() - _llm0)
     raw = safety.safe_answer(raw)  # 答案脱敏（PII_MASK_ENABLE 开启时，D4）
     # STRUCTURED_OUTPUT：LLM 输出 JSON → parse 取 answer_text + 结构化 citation_map(每 ref 一项不重复)
     # 跳过 auto_cite(结构化已有 cmap)；否则走 auto_cite 补标(现状)。
@@ -822,9 +831,10 @@ async def answer(
         ans = raw
         _trace = citation.evidence_trace(ans)
     # ===== Task 10: 可核验引用三层校验 + 校验-CRAG 联动 =====
-    final_ans, citation_extras = await _apply_citation_verification(
-        ans, contexts, model_type, db=db, cmap_override=_cmap_override,
-    )
+    with _trace_span("citation"):
+        final_ans, citation_extras = await _apply_citation_verification(
+            ans, contexts, model_type, db=db, cmap_override=_cmap_override,
+        )
     # 校验要求 rewrite 且开关开 → 复用 rewrite_query + mixed_search 重检索重生成再 verify（最多 1 次，防死循环）
     # C2: CRAG 已 rewritten 时不再二次 rewrite（citation 仍 needed→用现 contexts，省二次 LLM，防级联重检索）
     if (citation_extras.get("citationVerified", {}).get("rewrite_needed")
@@ -1140,7 +1150,8 @@ async def stream_answer(
     # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接快流，跳检索/CRAG/生成。
     # regen=True（强制重新生成）跳过 hotqa；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
     if not regen:
-        hot = await _hit_hotqa(nq, conversation_id or "", t0)
+        with _trace_span("hotqa"):
+            hot = await _hit_hotqa(nq, conversation_id or "", t0)
         if hot:
             # 多轮命中 hotqa 也建独立 conv 落消息（与现有缓存命中段一致），单轮用 conversation_id
             cid = conversation_id
@@ -1286,7 +1297,8 @@ async def stream_answer(
     history: list[dict] = []
     if conversation_id:
         history = await conversation_service.get_messages(db, conversation_id, _HISTORY_LIMIT)
-    search_q = await _search_query_for_retrieve(db, query, nq, conversation_id, history, model_type)
+    with _trace_span("standalone_rewrite"):
+        search_q = await _search_query_for_retrieve(db, query, nq, conversation_id, history, model_type)
 
     # 多轮且 query 完整(search_q==nq) → 也查 Redis 热点（流式，存消息接续对话）
     if conversation_id and search_q == nq and not regen and not await _is_blacklisted(nq):
@@ -1317,18 +1329,20 @@ async def stream_answer(
             degraded("qa_cache_get_multi_stream", e)
 
     # 智能路由：根据查询特征选择最优检索路径（Phase A）
-    routing = None
-    if settings.ROUTING_ENABLE:
-        try:
-            from app.routing.routing_service import route_query
-            routing = route_query(search_q)
-        except Exception as e:
-            degraded("routing_dispatch", e)
+    with _trace_span("routing"):
+        routing = None
+        if settings.ROUTING_ENABLE:
+            try:
+                from app.routing.routing_service import route_query
+                routing = route_query(search_q)
+            except Exception as e:
+                degraded("routing_dispatch", e)
 
-    contexts = await retrieval_service.mixed_search(
-        db, search_q, topk, tenant=tenant, routing_decision=routing,
-        user_dept=user_dept, user_role=user_role,
-    )
+    with _trace_span("retrieval"):
+        contexts = await retrieval_service.mixed_search(
+            db, search_q, topk, tenant=tenant, routing_decision=routing,
+            user_dept=user_dept, user_role=user_role,
+        )
     if not contexts:
         # B7：stream 无结果 → 自动入证据补全队列（auto_no_recall）
         if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
@@ -1339,9 +1353,10 @@ async def stream_answer(
         return
 
     # Corrective RAG：分级 + 纠错闭环
-    contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
-        db, nq, contexts, model_type, topk, tenant
-    )
+    with _trace_span("crag"):
+        contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
+            db, nq, contexts, model_type, topk, tenant
+        )
     # 注：stream CRAG refused 的证据补全收集已挪到答案生成后（与 medium 共用既有 collect 点），
     # 避免 answer="" 被先写入导致真实答案被去重吞掉（I1 修复，与非流式路径对齐）。
 

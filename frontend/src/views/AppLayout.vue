@@ -90,6 +90,7 @@ const navItems = computed(() => {
   }
   if (hasPerm(auth.role, 'metric:read')) {
     items.push({ to: '/prediction', icon: '🔮', label: '故障预测' })
+    items.push({ to: '/trace', icon: '⏱', label: '链路诊断' })
   }
   if (hasPerm(auth.role, 'system:config')) {
     items.push({ to: '/retrieval-debug', icon: '🔬', label: '检索调试' })

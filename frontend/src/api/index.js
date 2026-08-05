@@ -170,6 +170,10 @@ export const streamAnswerWS = (query, modelType, conversationId, onEvent) => {
   return ws
 }
 
+// 链路诊断：历史 trace 列表 + 单条明细（前端瀑布图复用 QaTraceChart）
+export const getQaTraces = (params = {}) => request.get('/qa/trace', { params })
+export const getQaTrace = (traceId) => request.get(`/qa/trace/${traceId}`)
+
 // 反馈管理（admin）：坏 case 看板 + 一键回流 golden
 export const getFeedbacks = (params) => request.get('/qa/feedbacks', { params })
 export const markFeedbackGolden = (id) => request.post(`/qa/feedbacks/${id}/golden`)

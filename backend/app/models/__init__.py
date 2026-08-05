@@ -11,10 +11,12 @@ from app.models.knowledge_governance import (
 from app.models.persistent_task import PersistentTask
 from app.models.realtime_event import ProactiveOpsRun, RealtimeDeviceMapping, RealtimeEvent
 from app.models.knowledge_evolution import KnowledgeEvolutionDraft
+from app.models.qa_trace import QaTrace
 
 __all__ = [
     "DomainEvent", "EventDelivery", "PersistentTask",
     "KnowledgeDocumentMetadata", "KnowledgeGovernanceIssue", "KnowledgeGovernanceReview",
     "RealtimeEvent", "RealtimeDeviceMapping", "ProactiveOpsRun",
     "KnowledgeEvolutionDraft",
+    "QaTrace",
 ]

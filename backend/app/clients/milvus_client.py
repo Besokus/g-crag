@@ -71,14 +71,26 @@ def insert_chunks(collection_name, vectors, texts, doc_ids, doc_names, chunk_idx
     return len(vectors)
 
 
-def search(collection_name, query_vec, topk: int = 10, ef: int | None = None) -> list[dict]:
-    _connect()
-    col = _get_col(collection_name)
-    res = col.search(
+def _do_search(col, query_vec, topk, ef):
+    return col.search(
         [query_vec], "embedding",
         param={"metric_type": "COSINE", "params": {"ef": ef or 64}},
         limit=topk, output_fields=["text", "doc_id", "doc_name", "chunk_idx"],
     )
+
+
+def search(collection_name, query_vec, topk: int = 10, ef: int | None = None) -> list[dict]:
+    _connect()
+    col = _get_col(collection_name)
+    try:
+        res = _do_search(col, query_vec, topk, ef)
+    except Exception as e:
+        # Milvus 可能 release 缓存的 collection（compaction/内存/重启）→ 清缓存 re-load + retry
+        if "not loaded" not in str(e).lower():
+            raise
+        _col_cache.pop(collection_name, None)
+        col = _get_col(collection_name)
+        res = _do_search(col, query_vec, topk, ef)
     out = []
     for hit in res[0]:
         e = hit.entity

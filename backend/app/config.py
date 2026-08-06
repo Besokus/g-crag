@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     LLM_CIRCUIT_COOLDOWN: int = 60                     # 熔断冷却秒数
     LLM_PROBE_INTERVAL: int = 30                       # 健康探活周期秒
     LLM_TIER_ENABLE: bool = False                      # L2 query 特征分档(turbo/plus) opt-in 默认关
+    RERANK_TIMEOUT: float = 2.0                        # rerank 单次超时（超时降级用 RRF 原序稳 p99；云 API 偶发 891ms+）
 
     # --- DeepSeek ---
     DEEPSEEK_API_KEY: str = ""

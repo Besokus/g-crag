@@ -395,10 +395,12 @@ async def mixed_search(
         with _retr_span("rerank"):
             try:
                 docs = [h.get("text", "") for h in pool]
-                ranked = await rerank_service.get_reranker().rerank(q, docs, top_n=min(_pool_cap, len(pool)))
+                ranked = await asyncio.wait_for(
+                    rerank_service.get_reranker().rerank(q, docs, top_n=min(_pool_cap, len(pool))),
+                    timeout=getattr(settings, "RERANK_TIMEOUT", 2.0))
                 pool = [{**pool[idx], "score": float(score)} for idx, score in ranked]
             except Exception as e:
-                degraded("rerank", e)
+                degraded("rerank", e, "超时/失败 → 用 RRF 原序兜底（稳 p99）")
                 # pool 保持原样，不改变
     # pool 已经就绪（sparse/dense 单路直接使用，hybrid 已 RRF 融合）
 

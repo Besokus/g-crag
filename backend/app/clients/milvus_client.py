@@ -16,6 +16,7 @@ from pymilvus import (
 from app.config import settings
 
 _connected = False
+_col_cache: dict = {}   # Collection 复用 + load 一次（避免每次 search 重复 LoadCollection RPC，实测偶发拖到 1.7s）
 
 
 def _connect():
@@ -23,6 +24,16 @@ def _connect():
     if not _connected:
         connections.connect(alias="default", host=settings.MILVUS_HOST, port=str(settings.MILVUS_PORT))
         _connected = True
+
+
+def _get_col(name: str):
+    """复用 Collection 对象（首次 load 一次）。search 直接用缓存的 col，不再重复 LoadCollection RPC。"""
+    col = _col_cache.get(name)
+    if col is None:
+        col = Collection(name)
+        col.load()
+        _col_cache[name] = col
+    return col
 
 
 def _ensure_one(name: str, dim: int) -> None:
@@ -62,8 +73,7 @@ def insert_chunks(collection_name, vectors, texts, doc_ids, doc_names, chunk_idx
 
 def search(collection_name, query_vec, topk: int = 10, ef: int | None = None) -> list[dict]:
     _connect()
-    col = Collection(collection_name)
-    col.load()
+    col = _get_col(collection_name)
     res = col.search(
         [query_vec], "embedding",
         param={"metric_type": "COSINE", "params": {"ef": ef or 64}},

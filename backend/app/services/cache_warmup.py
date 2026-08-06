@@ -103,6 +103,26 @@ async def warmup_from_file(filepath: str = "golden_qa.json") -> int:
     return warmed
 
 
+async def warmup_loop(interval: int = 21600) -> None:
+    """后台周期预热：每 interval 秒(默认 6h)刷新热点 + golden 到 Redis。
+
+    启动 warmup_hot_queries 只跑一次；运行中产生的新高频 query 靠此 loop 周期回写，
+    防 TTL 过期 + 持续覆盖新高频（C2 缓存命中率提升）。
+    """
+    from app.db.session import AsyncSessionLocal
+    await asyncio.sleep(120)  # 启动后等 2min，避开启动高峰
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                n = await warmup_hot_queries(db)
+                m = await warmup_from_file()
+                if n or m:
+                    print(f"[cache_warmup] 周期刷新：热点 {n} 条 + golden {m} 条")
+        except Exception as e:
+            degraded("cache_warmup_loop", e)
+        await asyncio.sleep(interval)
+
+
 # ---- CLI: python -m app.services.cache_warmup ----
 if __name__ == "__main__":
     async def _main():

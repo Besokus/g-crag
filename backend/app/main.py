@@ -119,6 +119,13 @@ async def lifespan(app: FastAPI):
         app.state.llm_health_task = asyncio.create_task(_refresh_llm_health_loop())
     except Exception as e:
         print(f"[llm] 健康探活后台任务启动跳过：{e}")
+    # C2 缓存预热周期刷新：每 6h 回写热点 + golden 到 Redis（防 TTL 过期 + 覆盖新高频）
+    try:
+        from app.services.cache_warmup import warmup_loop
+        app.state.cache_warmup_task = asyncio.create_task(warmup_loop())
+        print("[cache] 预热 loop 已挂载（每 6h 刷新热点+golden）")
+    except Exception as e:
+        print(f"[cache] 预热 loop 启动跳过：{e}")
     # 缓存持久化：后台清理 + 指标刷新（Phase 2-3）
     if getattr(settings, "CACHE_PERSIST_ENABLE", False):
         try:
@@ -205,6 +212,9 @@ async def lifespan(app: FastAPI):
     _llm_health = getattr(app.state, "llm_health_task", None)
     if _llm_health:
         _llm_health.cancel()
+    _cache_warmup = getattr(app.state, "cache_warmup_task", None)
+    if _cache_warmup:
+        _cache_warmup.cancel()
     _cache_cleanup = getattr(app.state, "cache_cleanup_task", None)
     if _cache_cleanup:
         _cache_cleanup.cancel()

@@ -10,7 +10,8 @@ _DEFAULT_MILVUS = {"indexType": "HNSW", "param": {"M": 16, "efConstruction": 200
 _DEFAULT_MODEL = {"modelType": "default", "param": {"temperature": 0.2, "max_tokens": 2048}}
 
 # 内存热读缓存（启动 load_runtime 填充；update_* 同步刷新）——热路径不碰 Redis
-_RUNTIME = {"ef": 64, "temperature": 0.2, "max_tokens": 2048, "system_prompt": None}
+_RUNTIME = {"ef": 64, "temperature": 0.2, "max_tokens": 2048, "system_prompt": None,
+            "llm_fallback_chain": None, "tier_models": None}
 
 
 async def load_runtime() -> None:
@@ -39,6 +40,16 @@ async def load_runtime() -> None:
                 _RUNTIME["crag_high"] = float(cv["high"])
             if "low" in cv:
                 _RUNTIME["crag_low"] = float(cv["low"])
+    except Exception:
+        pass
+    try:
+        lr = await redis_client.cache_get_json("config:llm_router")
+        if lr:
+            if isinstance(lr.get("fallbackChain"), list):
+                _RUNTIME["llm_fallback_chain"] = [p for p in lr["fallbackChain"]
+                                                  if isinstance(p, str) and p.strip()]
+            if isinstance(lr.get("tierModels"), dict):
+                _RUNTIME["tier_models"] = lr["tierModels"]
     except Exception:
         pass
 
@@ -118,3 +129,34 @@ async def update_prompt_config(system_prompt: str) -> dict:
 def rt_system_prompt() -> str | None:
     """热路径 sync 读：system prompt 覆盖（None=用 code 默认）。"""
     return _RUNTIME.get("system_prompt")
+
+
+# ===== LLM 路由（L0 fallback 链 + L2 档位 model 映射）热配置 =====
+
+def rt_llm_fallback_chain() -> list[str]:
+    """fallback 链（热读；None → 回落 settings.LLM_FALLBACK_CHAIN）。"""
+    chain = _RUNTIME.get("llm_fallback_chain")
+    if chain:
+        return chain
+    from app.config import settings
+    return [s.strip() for s in settings.LLM_FALLBACK_CHAIN.split(",") if s.strip()]
+
+
+def rt_tier_models() -> dict:
+    """档位→model 映射（热读；形如 {"qwen": {"turbo": "qwen-turbo", "plus": "qwen-plus"}}）。"""
+    return _RUNTIME.get("tier_models") or {}
+
+
+async def get_llm_router_config() -> dict:
+    v = await redis_client.cache_get_json("config:llm_router")
+    return v or {"fallbackChain": [], "tierModels": {}}
+
+
+async def update_llm_router_config(fallback_chain: list[str], tier_models: dict) -> dict:
+    """保存 LLM 路由配置，即改即生效（下次 resolve 即用新链/档位）。"""
+    data = {"fallbackChain": fallback_chain or [], "tierModels": tier_models or {}}
+    await redis_client.cache_set_json_persistent("config:llm_router", data)
+    _RUNTIME["llm_fallback_chain"] = [p for p in (fallback_chain or [])
+                                      if isinstance(p, str) and p.strip()]
+    _RUNTIME["tier_models"] = tier_models or {}
+    return data

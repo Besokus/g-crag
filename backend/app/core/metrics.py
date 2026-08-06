@@ -25,6 +25,20 @@ LLM_LATENCY = Histogram(
     # 用适合 LLM 分布的桶（0.5s 快速/缓存命中 → 30s 慢调用，2-10s 粒度细）。
     buckets=(0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0),
 )
+# 模型路由（L0-L3）：fallback 切备 / 熔断健康态 / 分档决策 / 路由延迟
+LLM_FALLBACK_TOTAL = Counter(
+    "grid_llm_fallback_total", "LLM 降级切备次数", ["from_provider", "to_provider", "reason"]
+)
+LLM_PROVIDER_HEALTH = Gauge(
+    "grid_llm_provider_health", "LLM provider 健康态(1=up/0=down)", ["provider"]
+)
+LLM_ROUTE_DECISION = Counter(
+    "grid_llm_route_decision_total", "LLM 分档路由决策次数", ["tier"]
+)
+LLM_ROUTE_LATENCY = Histogram(
+    "grid_llm_route_latency_seconds", "LLM 路由决策延迟(秒)", ["tier"],
+    buckets=(0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0),
+)
 EMBED_CALLS = Counter(
     "grid_embed_calls_total", "Embedding 调用次数", ["provider"]
 )
@@ -274,6 +288,16 @@ def init_metric_series() -> None:
         # AI 回流知识检索命中（doc_type 维度预注册）
         AI_RETRIEVAL_HIT.labels("ai_evolution").inc(0)
         AI_RETRIEVAL_HIT.labels("human").inc(0)
+        # LLM 路由（L0-L3）预注册 0：fallback/熔断/分档事件驱动，不预注册 → 面板 No data
+        for _prov in ("qwen", "deepseek", "doubao"):
+            LLM_PROVIDER_HEALTH.labels(_prov).set(0)
+        for _tier in ("turbo", "plus"):
+            LLM_ROUTE_DECISION.labels(_tier).inc(0)
+            LLM_ROUTE_LATENCY.labels(_tier).observe(0.0)
+        for _fb in (("qwen", "deepseek", "exception"), ("qwen", "deepseek", "empty"),
+                    ("deepseek", "qwen", "exception"), ("deepseek", "qwen", "empty"),
+                    ("qwen", "-", "empty_stream"), ("deepseek", "-", "stream_exception")):
+            LLM_FALLBACK_TOTAL.labels(*_fb).inc(0)
     except Exception:
         # 预注册失败不影响服务启动
         pass

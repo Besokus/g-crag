@@ -38,11 +38,10 @@ defineProps({ trace: { type: Object, default: () => ({}) } })
 
 function fmt(ms) {
   if (ms == null) return '-'
-  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's'
   return Math.round(ms) + 'ms'
 }
 function markLabel(k) {
-  return ({ cacheLayer: '缓存·', route: '路由·', confidence: '置信·' })[k] || (k + '·')
+  return ({ cacheLayer: '缓存·', route: '路由·', confidence: '置信·', provider_used: '模型·', llm_tier: '档位·', llm_route_reason: '路由·' })[k] || (k + '·')
 }
 </script>
 

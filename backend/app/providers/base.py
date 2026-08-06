@@ -8,29 +8,36 @@ class LLMProvider(ABC):
 
     N4：chat/chat_with_tools 内部包 otel_genai LLM span（gen_ai.* 语义约定）。
     子类在 chat 返回后调用 _record_llm_span 记录 token/模型属性（可选）。
+
+    model 参数：L2 分档(turbo/plus) 与 FallbackLLMProvider 透传实际模型名覆盖 self.model；
+    None 时子类用 self.model 默认。
     """
 
     @abstractmethod
     async def chat(self, messages: list[dict], temperature: float = 0.2,
-                   max_tokens: int = 2048, **kwargs) -> str: ...
+                   max_tokens: int = 2048, model: str | None = None, **kwargs) -> str: ...
 
     async def chat_with_usage(self, messages: list[dict], temperature: float = 0.2,
-                              max_tokens: int = 2048, **kwargs) -> tuple[str, dict | None]:
+                              max_tokens: int = 2048, model: str | None = None,
+                              **kwargs) -> tuple[str, dict | None]:
         """B4：副通道暴露真实 token usage（不改 chat 的 str 契约）。
 
         返回 (content, usage_dict | None)，usage_dict = {"input": int, "output": int}。
         默认实现回退到 self.chat，usage=None（老 provider 或非 openai 协议时降级）。
         子类用 openai SDK 时直接 r.usage 透传，避免估算 len(str(messages))//2 误差。
         """
-        content = await self.chat(messages, temperature=temperature, max_tokens=max_tokens, **kwargs)
+        content = await self.chat(messages, temperature=temperature, max_tokens=max_tokens,
+                                  model=model, **kwargs)
         return content, None
 
-    async def stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
+    async def stream(self, messages: list[dict], temperature: float = 0.2,
+                     max_tokens: int = 2048, model: str | None = None,
+                     **kwargs) -> AsyncIterator[str]:
         raise NotImplementedError
 
     async def chat_with_tools(self, messages: list[dict], tools: list[dict],
                               tool_choice: str = "auto", temperature: float = 0.2,
-                              max_tokens: int = 2048, **kwargs) -> dict:
+                              max_tokens: int = 2048, model: str | None = None, **kwargs) -> dict:
         """function-calling：返回 {"content": str|None, "tool_calls": [{id,name,arguments:dict}]|None}。
         子类用 openai SDK 透传 tools=。"""
         raise NotImplementedError

@@ -803,17 +803,29 @@ async def answer(
     messages = prompt_templates.build_messages_with_history(
         nq, contexts, history, graph, confidence, structured=_structured,
     )
+    try:
+        from app.providers.llm_router import classify_llm
+        _tier, _tier_reason = classify_llm(nq)
+    except Exception:
+        _tier, _tier_reason = "plus", "skip"
+    _tc0 = _get_trace()
+    if _tc0:
+        _tc0.mark("llm_tier", _tier); _tc0.mark("llm_route_reason", _tier_reason)
     _llm0 = time.time()
+    _llm_prov = get_llm_provider(model_type, tier=_tier)
     # B4：真实 token usage（opt-in，默认关 → 走原 chat str 路径，估算 token）
     _llm_usage: dict | None = None
     if getattr(settings, "LLM_USAGE_TRACK_ENABLE", False):
-        raw, _llm_usage = await get_llm_provider(model_type).chat_with_usage(
+        raw, _llm_usage = await _llm_prov.chat_with_usage(
             messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS,
         )
     else:
-        raw = await get_llm_provider(model_type).chat(
+        raw = await _llm_prov.chat(
             messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS)
-    _tc = _get_trace(); _tc and _tc.record("llm", time.time() - _llm0)
+    _tc = _get_trace()
+    if _tc:
+        _tc.record("llm", time.time() - _llm0)
+        _tc.mark("provider_used", getattr(_llm_prov, "last_used_name", model_type or "default"))
     raw = safety.safe_answer(raw)  # 答案脱敏（PII_MASK_ENABLE 开启时，D4）
     # STRUCTURED_OUTPUT：LLM 输出 JSON → parse 取 answer_text + 结构化 citation_map(每 ref 一项不重复)
     # 跳过 auto_cite(结构化已有 cmap)；否则走 auto_cite 补标(现状)。
@@ -1389,9 +1401,18 @@ async def stream_answer(
     }
 
     # 2) 逐 token 流式（打字机）+ LLM 调用埋点
+    try:
+        from app.providers.llm_router import classify_llm
+        _tier, _tier_reason = classify_llm(query)
+    except Exception:
+        _tier, _tier_reason = "plus", "skip"
+    _tc0 = _get_trace()
+    if _tc0:
+        _tc0.mark("llm_tier", _tier); _tc0.mark("llm_route_reason", _tier_reason)
     parts: list[str] = []
     _llm0 = time.time()
-    async for token in get_llm_provider(model_type).stream(
+    _llm_prov = get_llm_provider(model_type, tier=_tier)
+    async for token in _llm_prov.stream(
         messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
         parts.append(token)
         yield {"type": "token", "content": token}
@@ -1401,7 +1422,10 @@ async def stream_answer(
         metrics.LLM_LATENCY.labels(_p).observe(time.time() - _llm0)
     except Exception:
         pass
-    _tc = _get_trace(); _tc and _tc.record("llm", time.time() - _llm0)   # 流式 LLM 总耗时(首token→末token)
+    _tc = _get_trace()
+    if _tc:
+        _tc.record("llm", time.time() - _llm0)   # 流式 LLM 总耗时(首token→末token)
+        _tc.mark("provider_used", getattr(_llm_prov, "last_used_name", model_type or "default"))
 
     # 3) 持久化完整答案
     full = "".join(parts)

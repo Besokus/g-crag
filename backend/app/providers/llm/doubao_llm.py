@@ -13,14 +13,15 @@ class DoubaoLLM(LLMProvider):
         )
         self.model = settings.DOUBAO_LLM_ENDPOINT_ID  # ep-xxxx，非模型名
 
-    async def chat_with_usage(self, messages, temperature=0.2, max_tokens=2048, **kw) -> tuple[str, dict | None]:
+    async def chat_with_usage(self, messages, temperature=0.2, max_tokens=2048, model=None, **kw) -> tuple[str, dict | None]:
         from app.core.otel_genai import trace_span, record_exception
         from opentelemetry.trace import SpanKind
+        _model = model or self.model
         try:
             with trace_span("llm.generate", kind=SpanKind.CLIENT,
                             attributes={"gen_ai.operation.name": "chat"}):
                 r = await self.client.chat.completions.create(
-                    model=self.model, messages=messages,
+                    model=_model, messages=messages,
                     temperature=temperature, max_tokens=max_tokens, **kw,
                 )
                 content = r.choices[0].message.content
@@ -30,30 +31,33 @@ class DoubaoLLM(LLMProvider):
                         "input": r.usage.prompt_tokens or 0,
                         "output": r.usage.completion_tokens or 0,
                     }
-                self._record_llm_span(self.model, messages, content, temperature, max_tokens)
+                self._record_llm_span(_model, messages, content, temperature, max_tokens)
                 return content, usage
         except Exception as exc:
             record_exception(exc)
             raise
 
-    async def chat(self, messages, temperature=0.2, max_tokens=2048, **kw) -> str:
+    async def chat(self, messages, temperature=0.2, max_tokens=2048, model=None, **kw) -> str:
         # B4：chat 仍返回 str（向后兼容）；真实 usage 走副通道 chat_with_usage
-        content, _ = await self.chat_with_usage(messages, temperature=temperature, max_tokens=max_tokens, **kw)
+        content, _ = await self.chat_with_usage(
+            messages, temperature=temperature, max_tokens=max_tokens, model=model, **kw)
         return content
 
-    async def stream(self, messages, temperature=0.2, max_tokens=2048, **kw):
+    async def stream(self, messages, temperature=0.2, max_tokens=2048, model=None, **kw):
+        _model = model or self.model
         r = await self.client.chat.completions.create(
-            model=self.model, messages=messages,
+            model=_model, messages=messages,
             temperature=temperature, max_tokens=max_tokens, stream=True, **kw,
         )
         async for chunk in r:
             if chunk.choices and chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
-    async def chat_with_tools(self, messages, tools, tool_choice="auto", temperature=0.2, max_tokens=2048, **kw):
+    async def chat_with_tools(self, messages, tools, tool_choice="auto", temperature=0.2, max_tokens=2048, model=None, **kw):
         import json as _json
+        _model = model or self.model
         r = await self.client.chat.completions.create(
-            model=self.model, messages=messages, tools=tools, tool_choice=tool_choice,
+            model=_model, messages=messages, tools=tools, tool_choice=tool_choice,
             temperature=temperature, max_tokens=max_tokens, **kw,
         )
         msg = r.choices[0].message

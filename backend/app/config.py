@@ -64,6 +64,16 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 768          # 单次生成上限（运维问答无需 2048 长篇）
     LLM_TIMEOUT: float = 30.0          # 单次请求超时（SDK 默认 600s 过大）
     LLM_MAX_RETRIES: int = 1           # 失败重试次数（默认 2 次指数退避，缩到 1 防尾部放大）
+    # 模型路由（L0 fallback + L1 熔断 + L2 分档）：deepseek-v4-flash 实测返空 answer，
+    # 原实现无 fallback 直接返空给用户。fallback 链按序切备；后台探活熔断故障 provider；
+    # L2 分档 opt-in（运维问答多数规程查询，收益待 A/B 验证）。
+    LLM_FALLBACK_CHAIN: str = "qwen,deepseek,doubao"   # fallback 链（逗号分隔，首选在前；用户手选仍优先）
+    LLM_FALLBACK_ON_EMPTY: bool = True                 # 空 answer(如 deepseek 0字)也触发 fallback
+    LLM_HEALTH_PROBE_ENABLE: bool = True               # 后台周期探活 provider（熔断底座）
+    LLM_CIRCUIT_FAIL_N: int = 3                        # 连续失败 N 次 → 熔断冷却
+    LLM_CIRCUIT_COOLDOWN: int = 60                     # 熔断冷却秒数
+    LLM_PROBE_INTERVAL: int = 30                       # 健康探活周期秒
+    LLM_TIER_ENABLE: bool = False                      # L2 query 特征分档(turbo/plus) opt-in 默认关
 
     # --- DeepSeek ---
     DEEPSEEK_API_KEY: str = ""

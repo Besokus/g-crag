@@ -113,6 +113,12 @@ async def lifespan(app: FastAPI):
     app.state.component_health_task = asyncio.create_task(
         _refresh_component_health_loop()
     )
+    # LLM provider 健康度熔断（L1）：周期探活 chain 内各 provider → 写指标 + 熔断冷却
+    try:
+        from app.providers.llm_router import _refresh_llm_health_loop
+        app.state.llm_health_task = asyncio.create_task(_refresh_llm_health_loop())
+    except Exception as e:
+        print(f"[llm] 健康探活后台任务启动跳过：{e}")
     # 缓存持久化：后台清理 + 指标刷新（Phase 2-3）
     if getattr(settings, "CACHE_PERSIST_ENABLE", False):
         try:
@@ -196,6 +202,9 @@ async def lifespan(app: FastAPI):
     _task = getattr(app.state, "component_health_task", None)
     if _task:
         _task.cancel()
+    _llm_health = getattr(app.state, "llm_health_task", None)
+    if _llm_health:
+        _llm_health.cancel()
     _cache_cleanup = getattr(app.state, "cache_cleanup_task", None)
     if _cache_cleanup:
         _cache_cleanup.cancel()

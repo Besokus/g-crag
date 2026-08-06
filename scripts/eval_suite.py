@@ -30,10 +30,14 @@ DIMS = [
 
 def run_dim(name: str, script: str, args: str, timeout: int = 900) -> dict:
     """跑单个维度脚本，返回 {ok, dur, stdout_tail, stderr_tail}。"""
+    import os
     cmd = [sys.executable, script] + (args.split() if args else [])
+    # 强制子进程 utf-8 输出（Windows 默认 GBK 会致 emoji/中文解码崩）；errors=replace 兜底
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     t0 = time.time()
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="replace", env=env)
         ok = r.returncode == 0
         out, err = r.stdout or "", r.stderr or ""
     except subprocess.TimeoutExpired as e:
@@ -90,7 +94,7 @@ def main() -> int:
                 f.write(f"\nstderr 尾部：\n```\n{r['stderr_tail']}\n```\n")
             f.write("\n")
 
-    print(f"=== 套件完成：{'✅ 全过' if all_ok else '❌ 有 FAIL'} | 报告：{report} ===")
+    print(f"=== 套件完成：{'PASS-全过' if all_ok else 'FAIL-有维度未过'} | 报告：{report} ===")
     return 0 if all_ok else 1
 
 

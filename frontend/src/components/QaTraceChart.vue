@@ -96,7 +96,7 @@ function markLabel(k) {
 .bar-fill.neck { background: var(--danger, #ef4444); }
 .neck-mark {
   position: absolute;
-  right: -13px;
+  right: 2px;
   top: 0;
   color: var(--danger);
   font-size: 11px;

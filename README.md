@@ -1404,3 +1404,14 @@ A: 设 `HF_ENDPOINT=https://hf-mirror.com` 或 `HTTPS_PROXY`,或预下到 HF 缓
 - 所引用第三方库/模型(bge / rapidocr / Milvus 等)保留其各自原始许可证
 
 完整法律条款见 [creativecommons.org/licenses/by-nc/4.0](https://creativecommons.org/licenses/by-nc/4.0/legalcode)。如需商业授权,请联系作者。
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=zhyese%2Fgrid-qa&type=date&logscale=&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=zhyese/grid-qa&type=date&theme=dark&logscale&legend=bottom-right&sealed_token=BH1IdkFwGV_G7g92Y6y_xiwrAsEuYk0yJFRyhrCEaibgjKcJM0Y1BvslgG-ydVJiCuawDjhbnuMoaott5HHv06YiOmprKYBgWQN-93CEFWRT-ZvNfNhOxX7oyUuVybSzMQ8IVpxvtGyGmcn8VjVpQenD2ttHXBCePJPLQw_rZo0Fzn3LZahZpz59CPwL" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=zhyese/grid-qa&type=date&logscale&legend=bottom-right&sealed_token=BH1IdkFwGV_G7g92Y6y_xiwrAsEuYk0yJFRyhrCEaibgjKcJM0Y1BvslgG-ydVJiCuawDjhbnuMoaott5HHv06YiOmprKYBgWQN-93CEFWRT-ZvNfNhOxX7oyUuVybSzMQ8IVpxvtGyGmcn8VjVpQenD2ttHXBCePJPLQw_rZo0Fzn3LZahZpz59CPwL" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=zhyese/grid-qa&type=date&logscale&legend=bottom-right&sealed_token=BH1IdkFwGV_G7g92Y6y_xiwrAsEuYk0yJFRyhrCEaibgjKcJM0Y1BvslgG-ydVJiCuawDjhbnuMoaott5HHv06YiOmprKYBgWQN-93CEFWRT-ZvNfNhOxX7oyUuVybSzMQ8IVpxvtGyGmcn8VjVpQenD2ttHXBCePJPLQw_rZo0Fzn3LZahZpz59CPwL" />
+ </picture>
+</a>
+

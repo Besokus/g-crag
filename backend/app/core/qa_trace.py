@@ -104,8 +104,11 @@ class TraceCollector:
         """输出前端瀑布图数据。pct 基于 totalMs；bottleneck=dur 最大的节点。"""
         total_ms = round((time.time() - self.t0) * 1000, 1)
         spans = [dict(s) for s in self._spans]  # 浅拷贝，避免改到已落库对象
+        # pct 相对"已打点耗时之和"(sum=100%)，而非总响应时间：避免某阶段未打点时
+        # 其余节点占比被稀释（如 stream 路径 LLM 未打点 → 看不出瓶颈）。totalMs 仍单独返回供参考。
+        sum_dur = sum(s.get("dur", 0) for s in spans)
         for s in spans:
-            s["pct"] = round(s.get("dur", 0) / total_ms * 100, 1) if total_ms > 0 else 0.0
+            s["pct"] = round(s.get("dur", 0) / sum_dur * 100, 1) if sum_dur > 0 else 0.0
         bottleneck = max(spans, key=lambda x: x.get("dur", 0))["name"] if spans else ""
         return {
             "traceId": self.trace_id,

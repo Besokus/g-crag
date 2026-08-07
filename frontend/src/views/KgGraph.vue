@@ -33,9 +33,24 @@
         <button class="btn btn-primary" @click="doExtract" :disabled="!selDoc || extracting">{{ extracting ? '抽取中…(LLM 分块)' : '抽取三元组' }}</button>
       </div>
       <div ref="graphEl" class="graph" v-if="graph.nodes.length">
-        <button class="fs-btn" @click="toggleFullscreen" :title="isFs ? '退出全屏(Esc)' : '全屏'">{{ isFs ? '⤫' : '⛶' }}</button>
+        <div class="graph-tools">
+          <button class="fs-btn" @click="exportPng" title="导出 PNG">📷</button>
+          <button class="fs-btn" @click="exportSvg" title="导出 SVG">🖼️</button>
+          <button class="fs-btn" @click="toggleFullscreen" :title="isFs ? '退出全屏(Esc)' : '全屏'">{{ isFs ? '⤫' : '⛶' }}</button>
+        </div>
       </div>
       <div v-else class="empty">暂无图谱数据，请在上方选择文档并抽取三元组</div>
+      <!-- 节点详情面板 -->
+      <div class="card node-detail" v-if="selectedNode" style="margin-top:10px">
+        <div class="src-head">节点详情 <a class="ev-btn" style="float:right" @click="selectedNode = null">✕</a></div>
+        <div class="cause"><b>{{ selectedNode.name }}</b>
+          <div class="cause-line">出度 {{ selectedNode.outDegree || 0 }} · 邻接 {{ selectedNode.neighborCount || 0 }}</div>
+          <div v-if="selectedNode.rels && selectedNode.rels.length" class="rel-line">
+            <span class="rel-chip" v-for="(r, i) in selectedNode.rels.slice(0, 8)" :key="i">{{ r }}</span>
+          </div>
+          <div class="cause-line" v-if="selectedNode.neighborNames && selectedNode.neighborNames.length" style="color:var(--text-muted)">关联：{{ selectedNode.neighborNames.slice(0, 10).join(' · ') }}</div>
+        </div>
+      </div>
     </div>
 
     <!-- 多跳影响链 -->
@@ -113,6 +128,7 @@ import { hasPerm } from '../utils/perm'
 
 const auth = useAuthStore()
 const can = (p) => hasPerm(auth.role, p)   // RBAC：图谱抽取(kg:edit)对只读角色隐藏
+const selectedNode = ref(null)
 
 echarts.use([GraphChart, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -170,6 +186,44 @@ function render() {
       emphasis: { focus: 'adjacency', lineStyle: { width: 3 }, label: { show: true } },
       force: { repulsion: big ? 60 : 220, edgeLength: big ? [30, 120] : [60, 150], gravity: big ? 0.12 : 0.08 } }],
   })
+  // 点击节点：显示详情面板 + 高亮邻居
+  chart.on('click', (params) => {
+    if (params.dataType === 'node') {
+      const nodeId = params.data.id || params.data.name
+      const nodeData = graph.value.nodes.find(n => (n.id || n.name) === nodeId)
+      if (!nodeData) return
+      // 收集邻居信息
+      const nbrSet = new Set()
+      const rels = []
+      for (const l of graph.value.links) {
+        const src = typeof l.source === 'object' ? l.source.id : l.source
+        const tgt = typeof l.target === 'object' ? l.target.id : l.target
+        if (src === nodeId) { nbrSet.add(tgt); if (l.value) rels.push(`→ ${tgt} (${l.value})`) }
+        else if (tgt === nodeId) { nbrSet.add(src); if (l.value) rels.push(`← ${src} (${l.value})`) }
+      }
+      selectedNode.value = {
+        name: nodeData.name || nodeId,
+        outDegree: nodeData.outDegree || 0,
+        neighborCount: nbrSet.size,
+        neighborNames: [...nbrSet].slice(0, 10),
+        rels,
+      }
+    } else if (params.dataType === 'edge') {
+      // 点击边：显示关系信息
+      const src = typeof params.data.source === 'object' ? params.data.source.id : params.data.source
+      const tgt = typeof params.data.target === 'object' ? params.data.target.id : params.data.target
+      selectedNode.value = {
+        name: `${src} → ${tgt}`,
+        outDegree: 0,
+        neighborCount: 0,
+        neighborNames: [],
+        rels: [`${src} —${params.data.value}→ ${tgt}`],
+      }
+    } else {
+      // 点击空白：取消选中
+      selectedNode.value = null
+    }
+  })
   setTimeout(() => chart && chart.resize(), 100)
 }
 function searchGraph() { loadGraph(entity.value.trim()) }
@@ -188,6 +242,20 @@ async function doExtract() {
 }
 function onResize() { chart && chart.resize() }
 const isFs = ref(false)
+// 图谱导出
+function exportPng() {
+  if (!chart) return
+  const url = chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+  const a = document.createElement('a'); a.href = url; a.download = '知识图谱.png'; a.click()
+  show('已导出 PNG')
+}
+function exportSvg() {
+  if (!chart) return
+  // ECharts 需要 SVG 渲染器才能导出 SVG，当前用 Canvas 渲染器，降级导出 PNG
+  const url = chart.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#fff' })
+  const a = document.createElement('a'); a.href = url; a.download = '知识图谱.png'; a.click()
+  show('已导出 PNG（Canvas 渲染器，暂不支持 SVG）')
+}
 function toggleFullscreen() {
   const el = graphEl.value
   if (!el) return
@@ -211,8 +279,9 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); document
 .kg-page > .card { flex: 1; min-height: 0; margin-bottom: 0; display: flex; flex-direction: column; overflow: hidden; }
 .stat-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
 .graph { flex: 1; min-height: 320px; position: relative; }
-.graph > .fs-btn { position: absolute; top: 10px; right: 10px; z-index: 10; width: 34px; height: 34px; border-radius: var(--radius-sm); background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.25); cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
-.graph > .fs-btn:hover { background: rgba(0,0,0,.75); }
+.graph-tools { position: absolute; top: 10px; right: 10px; z-index: 10; display: flex; gap: 6px; }
+.graph-tools .fs-btn { width: 34px; height: 34px; border-radius: var(--radius-sm); background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.25); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+.graph-tools .fs-btn:hover { background: rgba(0,0,0,.75); }
 .path-list { display: flex; flex-direction: column; gap: 8px; max-height: 540px; overflow-y: auto; }
 .path-item { display: flex; align-items: center; gap: 10px; background: var(--surface-2); padding: 10px 12px; border-radius: var(--radius-sm); flex-wrap: wrap; }
 .path-chain { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 13px; }
@@ -228,5 +297,9 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); document
 .hub-bar { height: 100%; background: linear-gradient(90deg, var(--primary), var(--accent)); border-radius: 9px; transition: width .3s; }
 .hub-deg { width: 40px; text-align: right; font-weight: 700; color: var(--primary); }
 .fade-enter-active, .fade-leave-active { transition: opacity .25s; }
+/* 节点详情面板 */
+.node-detail { flex-shrink: 0; }
+.rel-line { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rel-chip { display: inline-block; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 2px 10px; font-size: 12px; color: var(--text-soft); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 900px) { .stat-grid.cols-4 { grid-template-columns: repeat(2, 1fr) } .graph { height: 420px } .hub-name { width: 90px } }
 </style>

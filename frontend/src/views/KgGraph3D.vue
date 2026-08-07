@@ -10,7 +10,10 @@
 
     <div class="graph-container" ref="containerRef">
       <canvas ref="canvasRef"></canvas>
-      <button class="fs-btn" @click="toggleFullscreen" :title="isFs ? '退出全屏(Esc)' : '全屏'">{{ isFs ? '⤫' : '⛶' }}</button>
+      <div class="graph-tools">
+        <button class="fs-btn" @click="export3DPng" title="导出 PNG">📷</button>
+        <button class="fs-btn" @click="toggleFullscreen" :title="isFs ? '退出全屏(Esc)' : '全屏'">{{ isFs ? '⤫' : '⛶' }}</button>
+      </div>
       <div v-if="!graph" class="graph-hint">搜索设备或点击「搜索」加载知识图谱</div>
       <div class="graph-info" v-if="graph">
         <span class="badge badge-neutral">{{ graph.nodes?.length || 0 }} 节点</span>
@@ -27,9 +30,17 @@
     </div>
 
     <div class="card" v-if="selected">
-      <div class="src-head">节点详情</div>
-      <div class="cause"><b>{{ selected.label || selected.name }}</b><div class="cause-line">类型：{{ selected.type }} · 出度 {{ selected.outDegree || 0 }}</div></div>
+      <div class="src-head">节点详情 <a class="ev-btn" style="float:right" @click="clearSel()">✕</a></div>
+      <div class="cause"><b>{{ selected.label || selected.name }}</b>
+        <div class="cause-line">类型：{{ typeName(selected.type) }} · 出度 {{ selected.outDegree || 0 }} · 邻接 {{ selected.neighborCount || 0 }}</div>
+        <div class="cause-line" v-if="selected.dimension">知识维度：{{ selected.dimension }}</div>
+        <div v-if="selected.rels && selected.rels.length" class="rel-line">
+          <span class="rel-chip" v-for="(r, i) in selected.rels.slice(0, 6)" :key="i">{{ r }}</span>
+        </div>
+        <div class="cause-line" v-if="selected.neighborNames && selected.neighborNames.length" style="color:var(--text-muted)">关联：{{ selected.neighborNames.slice(0, 8).join(' · ') }}</div>
+      </div>
     </div>
+    <div v-if="tooltip" class="graph-tip" :style="{ left: tooltip.x + 'px', top: tooltip.y + 'px' }">{{ tooltip.text }}</div>
   </div>
 </template>
 
@@ -51,6 +62,14 @@ let dragCleanup = null
 let currentRenderer = null
 let currentCamera = null
 const isFs = ref(false)
+const tooltip = ref(null)
+
+// 3D 节点交互（点击选中/邻接高亮）—— render3D 闭包内注册内部实现，此处暴露模板可调入口
+let _clearSel = null
+function clearSel() { _clearSel && _clearSel() }
+const _DIM_LABEL = { equipment: '设备', fault: '故障', action: '操作', rule: '规程', metric: '参数', component: '部件', default: '其他' }
+function typeName(t) { return ({ Equipment: '设备', Fault: '故障', Action: '操作' })[t] || t || '设备' }
+function dimName(k) { return _DIM_LABEL[k] || _DIM_LABEL.default }
 function toggleFullscreen() {
   const el = containerRef.value
   if (!el) return
@@ -62,6 +81,14 @@ function onFsChange() {
   const w = containerRef.value?.clientWidth || window.innerWidth
   const h = containerRef.value?.clientHeight || window.innerHeight
   if (currentRenderer) { currentRenderer.setSize(w, h); currentCamera.aspect = w / h; currentCamera.updateProjectionMatrix() }
+}
+// 3D 图谱导出 PNG
+function export3DPng() {
+  if (!currentRenderer) return
+  // 强制渲染一帧确保画布内容最新
+  currentRenderer.render(currentRenderer.domElement.__scene || new THREE.Scene(), currentCamera)
+  const url = canvasRef.value.toDataURL('image/png')
+  const a = document.createElement('a'); a.href = url; a.download = '3D知识图谱.png'; a.click()
 }
 
 async function loadGraph() {
@@ -121,10 +148,12 @@ function render3D() {
           labels[i]?.position.set(positions[i].x, positions[i].y + 1.0, positions[i].z)
         }
         while (lineGroup.children.length) lineGroup.remove(lineGroup.children[0])
+        lineMat.opacity = selectedIdx >= 0 ? 0.14 : 0.4
         for (const [si, ti] of linkPairs) {
+          const hot = selectedIdx >= 0 && (si === selectedIdx || ti === selectedIdx)
           const pts = [new THREE.Vector3(positions[si].x, positions[si].y, positions[si].z),
                        new THREE.Vector3(positions[ti].x, positions[ti].y, positions[ti].z)]
-          lineGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), lineMat))
+          lineGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), hot ? highlightLineMat : lineMat))
         }
       }
 
@@ -166,13 +195,14 @@ function render3D() {
 
       // 连线
       const lineMat = new THREE.LineBasicMaterial({ color: 0x555577, transparent: true, opacity: 0.4 })
+      const highlightLineMat = new THREE.LineBasicMaterial({ color: 0xffd76a, transparent: true, opacity: 0.95 })
       const lineGroup = new THREE.Group()
       const linkPairs = []
       for (const l of links || []) {
         const si = nodes.findIndex(n => n.id === l.source || n.id === l.source?.id)
         const ti = nodes.findIndex(n => n.id === l.target || n.id === l.target?.id)
         if (si >= 0 && ti >= 0) {
-          linkPairs.push([si, ti])
+          linkPairs.push([si, ti, l.value])
           const pts = [new THREE.Vector3(positions[si].x, positions[si].y, positions[si].z),
                        new THREE.Vector3(positions[ti].x, positions[ti].y, positions[ti].z)]
           const geo = new THREE.BufferGeometry().setFromPoints(pts)
@@ -258,7 +288,10 @@ function render3D() {
         ndcMouse.x = ((e.clientX - r.left) / r.width) * 2 - 1
         ndcMouse.y = -((e.clientY - r.top) / r.height) * 2 + 1
       }
+      // 点击 vs 拖动：按下记录位置，抬起时位移 < 5px 视为点击选中
+      let downAt = null
       const onDown = (e) => {
+        downAt = { x: e.clientX, y: e.clientY }
         setMouse(e)
         raycaster.setFromCamera(ndcMouse, camera)
         const hits = raycaster.intersectObjects(spheres)
@@ -283,31 +316,99 @@ function render3D() {
             syncRender()
           }
         } else {
+          // hover：命中节点 → 显示名称 tooltip + grab 光标
           raycaster.setFromCamera(ndcMouse, camera)
-          dom.style.cursor = raycaster.intersectObjects(spheres).length ? 'grab' : 'default'
+          const hovered = raycaster.intersectObjects(spheres)
+          dom.style.cursor = hovered.length ? 'grab' : 'default'
+          const rc = containerRef.value?.getBoundingClientRect()
+          if (hovered.length && rc) {
+            const hi = spheres.indexOf(hovered[0].object)
+            tooltip.value = { x: e.clientX - rc.left + 12, y: e.clientY - rc.top + 12, text: nodes[hi]?.name || '' }
+          } else {
+            tooltip.value = null
+          }
         }
       }
-      const onUp = () => { dragIdx = -1; dom.style.cursor = 'default' }
+      const onUp = (e) => {
+        if (downAt && Math.abs(e.clientX - downAt.x) + Math.abs(e.clientY - downAt.y) < 5) {
+          setMouse(e)
+          raycaster.setFromCamera(ndcMouse, camera)
+          const hits = raycaster.intersectObjects(spheres)
+          if (hits.length) selectNode(spheres.indexOf(hits[0].object))
+          else { selected.value = null; clearHighlight() }
+        }
+        downAt = null
+        dragIdx = -1
+        dom.style.cursor = 'default'
+      }
       dom.addEventListener('pointerdown', onDown)
       dom.addEventListener('pointermove', onMove)
       dom.addEventListener('pointerup', onUp)
       dragCleanup = () => { dom.removeEventListener('pointerdown', onDown); dom.removeEventListener('pointermove', onMove); dom.removeEventListener('pointerup', onUp) }
 
-      // 旋转动画：先左右逆时针 10 圈，再上下 10 圈，循环；拖动时暂停
+      // ===== 节点选中 / 邻接高亮 =====
+      let selectedIdx = -1
+      function selectNode(i) {
+        selectedIdx = i
+        const n = nodes[i] || {}
+        const nbrSet = new Set()
+        const rels = []
+        for (const [si, ti, rel] of linkPairs) {
+          if (si === i) { nbrSet.add(ti); if (rel) rels.push(`→ ${nodes[ti]?.name || ''} (${rel})`) }
+          else if (ti === i) { nbrSet.add(si); if (rel) rels.push(`← ${nodes[si]?.name || ''} (${rel})`) }
+        }
+        selected.value = {
+          name: n.name, label: n.name, type: n.type,
+          outDegree: n.outDegree || 0,
+          dimension: dimName(classify(n.name)),
+          neighborCount: nbrSet.size,
+          neighborNames: [...nbrSet].map(j => nodes[j]?.name).filter(Boolean),
+          rels,
+        }
+        applyHighlight(i, nbrSet)
+      }
+      function clearHighlight() { selectedIdx = -1; applyHighlight(-1, new Set()) }
+      function applyHighlight(sel, nbrSet) {
+        for (let i = 0; i < N; i++) {
+          const mat = spheres[i]?.material
+          if (!mat) continue
+          mat.transparent = true
+          if (sel >= 0 && i !== sel && !nbrSet.has(i)) {
+            mat.emissiveIntensity = 0.1; mat.opacity = 0.28
+          } else {
+            mat.emissiveIntensity = 0.45; mat.opacity = 1
+          }
+        }
+        syncRender()
+      }
+      _clearSel = () => { clearHighlight(); selected.value = null }
+
+      // 旋转动画：无选中→绕原点转；有选中→绕该节点转（平滑过渡）
       let phase = 1, phaseAngle = 0
       const RADIUS = 30, Y0 = 22, SPIN_SPEED = 0.0025
       const TEN_LOOPS = Math.PI * 20
+      let focusTarget = { x: 0, y: 0, z: 0 }   // 当前相机注视点（平滑过渡用）
       function animate() {
         if (dragIdx < 0) {
           phaseAngle += SPIN_SPEED
           if (phaseAngle >= TEN_LOOPS) { phaseAngle = 0; phase = phase === 1 ? 2 : 1 }
+          // 选中节点时，相机绕该节点旋转（半径按节点大小缩放）
+          const tx = selectedIdx >= 0 ? positions[selectedIdx].x : 0
+          const ty = selectedIdx >= 0 ? positions[selectedIdx].y : 0
+          const tz = selectedIdx >= 0 ? positions[selectedIdx].z : 0
+          // 平滑过渡注视点（lerp，避免跳变）
+          focusTarget.x += (tx - focusTarget.x) * 0.06
+          focusTarget.y += (ty - focusTarget.y) * 0.06
+          focusTarget.z += (tz - focusTarget.z) * 0.06
+          const r = selectedIdx >= 0 ? 10 : RADIUS
+          const y0 = selectedIdx >= 0 ? ty + 8 : Y0
           if (phase === 1) {
-            camera.position.set(RADIUS * Math.cos(phaseAngle), Y0, RADIUS * Math.sin(phaseAngle))
+            camera.position.set(focusTarget.x + r * Math.cos(phaseAngle), y0, focusTarget.z + r * Math.sin(phaseAngle))
           } else {
-            camera.position.set(0, RADIUS * Math.sin(phaseAngle), RADIUS * Math.cos(phaseAngle))
+            camera.position.set(focusTarget.x, focusTarget.y + r * Math.sin(phaseAngle), focusTarget.z + r * Math.cos(phaseAngle))
           }
         }
-        camera.lookAt(0, 0, 0)
+        camera.lookAt(focusTarget.x, focusTarget.y, focusTarget.z)
         renderer.render(scene, camera)
         animId = requestAnimationFrame(animate)
       }
@@ -331,9 +432,15 @@ onUnmounted(() => { cleanup(); document.removeEventListener('fullscreenchange', 
 .graph-container canvas { display: block; width: 100%; height: 100%; }
 .graph-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 14px; }
 .graph-info { position: absolute; top: 50px; right: 10px; display: flex; gap: 6px; }
-.fs-btn { position: absolute; top: 10px; right: 10px; z-index: 10; width: 34px; height: 34px; border-radius: var(--radius-sm); background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.25); cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
-.fs-btn:hover { background: rgba(0,0,0,.75); }
+.graph-tools { position: absolute; top: 10px; right: 10px; z-index: 10; display: flex; gap: 6px; }
+.graph-tools .fs-btn { width: 34px; height: 34px; border-radius: var(--radius-sm); background: rgba(0,0,0,.55); color: #fff; border: 1px solid rgba(255,255,255,.25); cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+.graph-tools .fs-btn:hover { background: rgba(0,0,0,.75); }
 .graph-legend { position: absolute; left: 10px; bottom: 10px; display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 8px 10px; background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.15); border-radius: var(--radius-sm); color: #e6e6e6; font-size: 12px; max-width: 60%; }
 .graph-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .graph-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; }
+/* 悬浮 tooltip（跟鼠标走） */
+.graph-tip { position: absolute; z-index: 20; background: rgba(0,0,0,.82); color: #fff; padding: 4px 10px; border-radius: 6px; font-size: 13px; pointer-events: none; white-space: nowrap; backdrop-filter: blur(4px); }
+/* 关系标签行 */
+.rel-line { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rel-chip { display: inline-block; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 2px 10px; font-size: 12px; color: var(--text-soft); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

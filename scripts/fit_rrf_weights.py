@@ -91,6 +91,29 @@ async def main() -> None:
     print(f"  RRF_SPARSE_WEIGHT={best[3]}")
     print(f"  RRF_K={best[4]}")
 
+    # 断点8：评测调参建议结构化产出（机器可读 JSON，供 admin/CI 查阅；不自动改参=保只建议模式）
+    try:
+        import time as _t
+        _out = _BACKEND / "data" / "tune_suggestions.json"
+        _suggestion = {
+            "runAt": _t.strftime("%Y-%m-%d %H:%M:%S"),
+            "script": "fit_rrf_weights",
+            "goldenSize": len(golden),
+            "topK": TOPK,
+            "best": {"recall": round(best[0], 4), "dcg": round(best[1], 4)},
+            "suggestedEnv": {
+                "RRF_DENSE_WEIGHT": best[2],
+                "RRF_SPARSE_WEIGHT": best[3],
+                "RRF_K": best[4],
+            },
+            "note": "只建议模式：人工确认后经 /api/system/config/* 落 rt_* 热配置，不自动覆盖",
+        }
+        _out.parent.mkdir(parents=True, exist_ok=True)
+        _out.write_text(json.dumps(_suggestion, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[fit_rrf] 结构化建议已写 {_out.name}（机器可读，补断点8：评测产出可查）")
+    except Exception as e:
+        print(f"[fit_rrf] 写结构化建议失败: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

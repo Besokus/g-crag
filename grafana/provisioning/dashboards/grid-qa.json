@@ -699,6 +699,41 @@
           }
         }
       }
+    },
+    {
+      "id": 23,
+      "title": "引用校验 drop(幻觉量化 contradict/low_sim)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(grid_citation_nli_drop_total) by (reason)",
+          "refId": "A"
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 83,
+        "w": 8,
+        "h": 7
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
     }
   ]
 }

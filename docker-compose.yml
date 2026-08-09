@@ -163,6 +163,7 @@ services:
       MINIO_ENDPOINT: minio:9000
       MILVUS_HOST: milvus
       NEO4J_URI: bolt://neo4j:7687
+      MCP_SERVERS: '[{"name":"mock_scada","url":"http://mock-scada:9100"}]'   # N2 启动发现 mock SCADA → 注册 query_telemetry 到 agent ToolRegistry
       # 容器直连外网：云API(dashscope/deepseek/doubao 国内可达) + bge 走 hf-mirror 国内镜像。
       # 注：宿主机代理 7897 仅监听 127.0.0.1（未开 Allow LAN），容器经 host.docker.internal 连不上，
       # 故不设 HTTPS_PROXY——否则 httpx/requests 把所有出站（含 hf-mirror、云API）都发往不可达代理。
@@ -176,6 +177,19 @@ services:
     volumes:
       - grid-backend-data:/app/data   # 持久化 data/（运行日志 + 数据备份 .sql），容器重建不丢
       - C:/Users/Administrator/.cache/huggingface/hub:/root/.cache/huggingface/hub:ro   # 宿主机 bge 缓存（离线加载，免下载）
+
+  # ---------- Mock SCADA MCP Server（N2 MCP 总线外部 SCADA 数据源，侧车）----------
+  # 复用 backend 镜像跑 mock_scada_server（真实 SCADA 接入时换连接器即可）。
+  # backend 经 MCP_SERVERS=http://mock-scada:9100 发现并注册 query_telemetry 等工具到 agent ToolRegistry。
+  mock-scada:
+    image: rag-backend:latest
+    build:
+      context: ./backend
+    container_name: grid-mock-scada
+    restart: unless-stopped
+    command: python -m app.mcp.mock_scada_server
+    ports:
+      - "9100:9100"
 
   # ---------- 前端（nginx）----------
   frontend:

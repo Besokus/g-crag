@@ -295,6 +295,7 @@ class Settings(BaseSettings):
     MEMORY_SOFT_DELETE_DAYS: int = 30      # 软删除审计保留天数（过期物理删除）
     MEMORY_EXTRACT_MIN_TURNS: int = 3      # 工具调用型长对话累积 ≥N 轮才触发抽取
     MEMORY_COLLECTION: str = "memory_collection"  # Milvus 记忆 collection 名
+    MEMORY_DECAY_CRON_HOURS: float = 24.0  # 记忆衰减+软删物理删除 周期(小时，<=0 关闭)；decay() 已实现但需 cron 触发
 
     # ---------- N2 MCP 工具总线 ----------
     MCP_SERVERS: str = ""                  # JSON 配置：[{"name":"mock_scada","url":"http://localhost:9100","token":"xxx"}]

@@ -11,6 +11,7 @@
 - ctx=None 时调用方应跳过 recall（由 agent_runtime 控制）
 - extract_facts 失败时降级跳过（不影响主流程）
 """
+import asyncio
 import datetime
 import json
 import uuid
@@ -444,3 +445,22 @@ class _AgentMemoryService:
 
 # 单例
 agent_memory = _AgentMemoryService()
+
+
+async def decay_loop(interval_hours: float = 24.0) -> None:
+    """后台周期：记忆时间衰减 + 软删超期物理删除。
+
+    lifespan 挂载；interval_hours<=0 关闭。启动后等 120s 避开 DB 就绪窗口。
+    decay() 完整实现(90d/180d 权重衰减 + MEMORY_SOFT_DELETE_DAYS 物理删除)，无此 loop 则永不执行。
+    """
+    if interval_hours <= 0:
+        return
+    await asyncio.sleep(120)
+    while True:
+        try:
+            n = await agent_memory.decay()
+            if n:
+                print(f"[memory] decay 完成：处理 {n} 条记忆（衰减权重+物理删除软删超期）")
+        except Exception as e:
+            degraded("memory_decay_loop", e)
+        await asyncio.sleep(interval_hours * 3600)

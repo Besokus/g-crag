@@ -213,18 +213,6 @@ async def cache_cleanup(db: AsyncSession) -> int:
     return total
 
 
-def _cache_invalidate_for_doc(doc_id: str) -> int:
-    """文档更新/删除后失效关联缓存（同步，供 document_service 调用）。
-
-    由于缓存 key 不直接关联 doc_id，这里通过 retrieval_sources JSON 字段
-    做模糊匹配来失效。MySQL 5.7+ 支持 JSON_SEARCH。
-    返回失效行数（软删标记 is_deleted=1）。
-    """
-    # 这是同步函数，因为 milvus_client 操作在同步线程池执行
-    # 实际执行需要通过 AsyncSessionLocal
-    return 0  # 占位：异步版本见 cache_invalidate_for_doc_async
-
-
 async def cache_invalidate_for_doc_async(doc_id: str) -> int:
     """文档更新后失效关联缓存（异步版）。
 

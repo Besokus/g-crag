@@ -296,6 +296,12 @@ async def parse_documents(db: AsyncSession, doc_ids: List[str]) -> list[dict]:
         # 设备台账自动打标（D5）：全文匹配标准设备术语
         doc.equipment_tags = _auto_equipment_tags("\n".join(s["text"] for s in structured))
         await db.commit()
+        # 重新解析→chunk 内容已变→失效关联 QA 缓存（防命中旧分块的脏答案）
+        try:
+            from app.services.cache_persist import cache_invalidate_for_doc_async
+            await cache_invalidate_for_doc_async(doc_id)
+        except Exception:
+            pass
         results.append({
             "docId": doc_id, "chunkCount": len(structured),
             "tableCount": sum(1 for c in structured if c["chunk_type"] == "table"),
@@ -348,6 +354,12 @@ async def vectorize_document(db: AsyncSession, doc_id: str) -> dict:
     try:
         from app.services import bm25_service
         bm25_service.mark_dirty()
+    except Exception:
+        pass
+    # 向量化→可检索内容变化（新 chunk 入索引）→失效关联 QA 缓存
+    try:
+        from app.services.cache_persist import cache_invalidate_for_doc_async
+        await cache_invalidate_for_doc_async(doc_id)
     except Exception:
         pass
     return {
@@ -476,9 +488,15 @@ async def update_chunk(db: AsyncSession, chunk_id: str, content: str) -> dict:
     chunk.char_count = len(content)
     await db.commit()
     try:
-        await vectorize_document(db, chunk.doc_id)   # 双 collection 清旧写新
+        await vectorize_document(db, chunk.doc_id)   # 双 collection 清旧写新（内部已失效缓存）
     except Exception as e:
         degraded("chunk_revectorize", e)
+    # chunk 内容已改→失效关联 QA 缓存（vectorize 失败时仍要失效，防脏答案）
+    try:
+        from app.services.cache_persist import cache_invalidate_for_doc_async
+        await cache_invalidate_for_doc_async(chunk.doc_id)
+    except Exception:
+        pass
     return {"chunkId": chunk.id, "docId": chunk.doc_id, "charCount": chunk.char_count}
 
 

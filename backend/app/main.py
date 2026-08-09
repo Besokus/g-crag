@@ -198,6 +198,17 @@ async def lifespan(app: FastAPI):
             print("[fix-rate] 坏case修复率定时聚合后台任务已启动")
     except Exception as e:
         print(f"[fix-rate] 修复率定时聚合启动跳过：{e}")
+    # N1 记忆衰减+软删物理删除 周期 loop（decay() 需 cron 触发；MEMORY_DECAY_CRON_HOURS<=0 关闭）
+    try:
+        from app.services.agent_memory_service import decay_loop
+        from app.config import settings as _settings
+        if float(getattr(_settings, "MEMORY_DECAY_CRON_HOURS", 24)) > 0:
+            app.state.memory_decay_task = asyncio.create_task(
+                decay_loop(float(_settings.MEMORY_DECAY_CRON_HOURS))
+            )
+            print(f"[memory] 记忆衰减后台任务已启动（每 {_settings.MEMORY_DECAY_CRON_HOURS}h）")
+    except Exception as e:
+        print(f"[memory] 记忆衰减 loop 启动跳过：{e}")
     # ---- 关闭 ----
     yield
     try:
@@ -237,6 +248,10 @@ async def lifespan(app: FastAPI):
     _fix_cron = getattr(app.state, "fix_rate_cron_task", None)
     if _fix_cron:
         _fix_cron.cancel()
+    # N1 记忆衰减 loop 也需 cancel
+    _memory_decay = getattr(app.state, "memory_decay_task", None)
+    if _memory_decay:
+        _memory_decay.cancel()
     try:
         from app.clients import neo4j_client
         await neo4j_client.close()

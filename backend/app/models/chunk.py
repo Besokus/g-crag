@@ -24,6 +24,7 @@ class Chunk(Base):
     bbox: Mapped[str | None] = mapped_column(String(128), nullable=True)  # JSON 串 [x0,y0,x1,y1]，前端 PDF 高亮
     section_path: Mapped[str] = mapped_column(String(512), default="")  # 层级章节路径 "3.1 免责 > 第2条"
     table_header: Mapped[str] = mapped_column(Text, default="")  # 表格类 chunk 绑定的表头（防数值丢上下文）
+    semantic_tags: Mapped[str] = mapped_column(Text, default="")  # 语义增强规则标签(JSON串, apply_rules 产出 {dim:[tags]}; BRD §4.1.3)
     metadata_complete: Mapped[bool] = mapped_column(Boolean, default=False)  # 元数据是否齐全（前端降级依据）
 
     __table_args__ = (
@@ -37,5 +38,6 @@ class Chunk(Base):
         # 旧调用方不传新字段时这里补齐 "" / False，保证读取属性时即得到向后兼容的语义默认。
         kwargs.setdefault("section_path", "")
         kwargs.setdefault("table_header", "")
+        kwargs.setdefault("semantic_tags", "")
         kwargs.setdefault("metadata_complete", False)
         super().__init__(**kwargs)

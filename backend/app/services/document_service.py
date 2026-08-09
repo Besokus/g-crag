@@ -1,5 +1,6 @@
 """文档服务：上传、列表、解析分块、向量化、删除。"""
 import asyncio
+import json
 import uuid
 from typing import List
 
@@ -282,12 +283,20 @@ async def parse_documents(db: AsyncSession, doc_ids: List[str]) -> list[dict]:
                     pass
                 continue
             page_num = c.get("page_num")
+            # 语义增强规则(BRD §4.1.3)：Admin 定义的「维度→关键词→标签」规则打到 chunk 内容
+            try:
+                from app.services import semantic_rule_service
+                _sem = semantic_rule_service.apply_rules(c["text"])
+                sem_tags = json.dumps(_sem, ensure_ascii=False) if _sem else ""
+            except Exception:
+                sem_tags = ""
             db.add(Chunk(
                 doc_id=doc_id, chunk_idx=i, content=c["text"], char_count=len(c["text"]),
                 chunk_type=c["chunk_type"], parent_idx=c["parent_idx"], section=c["section"],
                 section_path=c.get("section_path", "") or c.get("section", ""),
                 page_num=page_num, bbox=c.get("bbox"),
                 table_header=c.get("table_header", ""),
+                semantic_tags=sem_tags,
                 # 元数据齐全判定：有页码（PDF）或表格表头即视为可精确定位；纯文本无页码→False（前端降级仅文档名）
                 metadata_complete=bool(page_num is not None or c.get("table_header")),
             ))
@@ -504,7 +513,8 @@ async def list_chunks(db: AsyncSession, doc_id: str) -> list[dict]:
     """列出文档全部分块（供 chunk 编辑选择）。"""
     rows = (await db.execute(select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_idx))).scalars().all()
     return [{"id": r.id, "chunkIdx": r.chunk_idx, "content": r.content, "section": r.section,
-             "charCount": r.char_count} for r in rows]
+             "charCount": r.char_count,
+             "semanticTags": (json.loads(r.semantic_tags) if r.semantic_tags else {})} for r in rows]
 
 
 async def find_similar_docs(db: AsyncSession, text: str, topk: int = 5) -> list[dict]:

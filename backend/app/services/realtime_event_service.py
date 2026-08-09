@@ -36,6 +36,33 @@ TASK_TYPE = "proactive_ops.process"
 NORMALIZED_EVENT_TYPE = "realtime.event.normalized"
 PROPOSAL_EVENT_TYPE = "proactive_ops.proposed"
 
+
+async def _on_proposal_ws(payload: dict, _ctx) -> None:
+    """Bus A 域事件订阅：主动运维建议生成完成 → WS 实时推前端。
+
+    修断点1（events/registry 原 0 订阅者，worker dispatch 永远匹配空）+ 断点2（proposal 仅靠前端 10s 轮询）。
+    worker.dispatch_event_once 经 matching_subscriptions 匹配后 _invoke(payload, EventContext) 本 handler。
+    """
+    try:
+        from app.core import ws_manager
+        await ws_manager.broadcast({"type": "proactive_proposal", "proposal": payload})
+    except Exception as e:
+        degraded("proposal_ws_broadcast", e)
+
+
+def _register_domain_bus() -> None:
+    """注册 Bus A 域事件订阅（幂等：同 handler 重复注册 registry 不报错）。import 时调一次。"""
+    try:
+        from app.events import register_event_handler
+        register_event_handler(
+            "proactive_ops.proposed", "proactive_ops.ws_broadcast", _on_proposal_ws
+        )
+    except Exception:
+        pass
+
+
+_register_domain_bus()  # import 副作用注册（本模块被 lifespan/worker 加载即触发）
+
 TRIGGER_SEVERITIES = {"warning", "major", "critical"}
 PROACTIVE_READ_ONLY_TOOLS = {
     "search_regulation",

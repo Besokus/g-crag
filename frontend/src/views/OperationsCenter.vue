@@ -157,8 +157,20 @@ async function retryTask(t) { try { unwrapBiz(await retryPersistentTask(t.id)); 
 async function terminateTask(t) { if (!confirm('确认终止该任务并移入死信？')) return; try { unwrapBiz(await terminatePersistentTask(t.id)); toast('任务已终止'); await loadTasks() } catch { toast('终止失败') } }
 async function retryEvent(e) { try { unwrapBiz(await retryDomainEvent(e.id)); toast('事件已重新投递'); await loadTasks() } catch { toast('事件重新投递失败') } }
 
-onMounted(() => { refresh(); refreshTimer = setInterval(refresh, 10000) })
-onUnmounted(() => { clearInterval(refreshTimer); clearTimeout(toastTimer) })
+let propWs = null
+function connectProposalWs() {
+  // 断点2 收尾：监听主动运维建议 WS 推送（后端 proactive_ops.proposed→ws_manager.broadcast），
+  // 收到即刷新建议列表；10s 轮询保留作 WS 断连降级兜底。
+  try {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    propWs = new WebSocket(`${proto}://${location.host}/api/system/ws/alerts?token=${auth.token}`)
+    propWs.onmessage = (e) => {
+      try { const d = JSON.parse(e.data); if (d.type === 'proactive_proposal') { loadRuns(); toast('新运维建议已生成') } } catch (_) {}
+    }
+  } catch (_) {}
+}
+onMounted(() => { refresh(); refreshTimer = setInterval(refresh, 10000); connectProposalWs() })
+onUnmounted(() => { clearInterval(refreshTimer); clearTimeout(toastTimer); try { propWs && propWs.close() } catch (_) {} })
 </script>
 
 <style scoped>

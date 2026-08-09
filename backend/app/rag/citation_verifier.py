@@ -76,6 +76,11 @@ async def verify(
                 result.dropped_refs.append(it.ref_id)
                 result.items.append(VerifyItem(ref_id=it.ref_id, chunk_id=it.chunk_id, valid=False,
                                                nli_label="low_sim", action="drop"))
+                try:
+                    from app.core import metrics
+                    metrics.CITATION_NLI_DROP.labels("low_sim").inc()
+                except Exception:
+                    pass
         valid_items = [valid_items[i] for i in sorted(passed_idx)]
     except Exception as e:
         try:
@@ -103,6 +108,11 @@ async def verify(
                     result.dropped_refs.append(it.ref_id)
                     result.items.append(VerifyItem(ref_id=it.ref_id, chunk_id=it.chunk_id, valid=False,
                                                    nli_label="contradict", action="drop"))
+                    try:
+                        from app.core import metrics
+                        metrics.CITATION_NLI_DROP.labels("contradict").inc()
+                    except Exception:
+                        pass
                 else:
                     result.items.append(VerifyItem(ref_id=it.ref_id, chunk_id=it.chunk_id, valid=True,
                                                    nli_label=label, action="keep"))

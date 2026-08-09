@@ -136,6 +136,12 @@ QUALITY_EVENT_TOTAL = Counter(
     "质量事件总线吞吐与处理计数",
     ["source", "type"],
 )
+# 引用 NLI/相似度校验 drop 计数（幻觉量化代理：contradict=答案与证据矛盾, low_sim=引用与证据不相关）
+CITATION_NLI_DROP = Counter(
+    "grid_citation_nli_drop_total",
+    "引用校验drop次数(幻觉量化代理: contradict/low_sim)",
+    ["reason"],
+)
 FEEDBACK_FIX_RATE = Gauge("grid_feedback_fix_rate", "坏case修复率(dislike→补全→同query再like)")
 FAITHFULNESS_TREND = Gauge("grid_faithfulness_trend", "faithfulness 周环比")
 KB_FRESHNESS = Gauge("grid_kb_freshness", "active文档占比(治理覆盖率)")
@@ -227,6 +233,9 @@ def init_metric_series() -> None:
             CRAG_CONFIDENCE_LABEL.labels(_lbl).inc(0)
         for _rr in ("no_recall", "rewrite_exhausted", "out_of_domain", "evidence_contradict"):
             CRAG_REFUSED_REASON.labels(_rr).inc(0)
+        # 引用 NLI/相似度校验 drop（幻觉量化代理：启动前预置 0，消除面板 No data）
+        for _drop in ("contradict", "low_sim"):
+            CITATION_NLI_DROP.labels(_drop).inc(0)
         # 领域增强
         DOMAIN_CALLS.labels("diagnose").inc(0)
         DOMAIN_CALLS.labels("ticket").inc(0)

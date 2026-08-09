@@ -70,8 +70,8 @@ _COLUMN_MIGRATIONS = [
     ("chunks", "page_num", "INT NULL"),                                   # PDF 页码/幻灯片号（Word/txt 无→null）
     ("chunks", "bbox", "VARCHAR(128) NULL"),                              # JSON 串 [x0,y0,x1,y1]，前端 PDF 高亮
     ("chunks", "section_path", "VARCHAR(512) NOT NULL DEFAULT ''"),       # 层级章节路径 "3.1 免责 > 第2条"
-    ("chunks", "table_header", "TEXT NOT NULL DEFAULT ''"),               # 表格类 chunk 绑定的表头
-    ("chunks", "semantic_tags", "TEXT NOT NULL DEFAULT ''"),              # 语义增强规则标签 JSON(BRD §4.1.3 apply_rules)
+    ("chunks", "table_header", "TEXT NOT NULL"),                          # 表格类 chunk 绑定的表头（MySQL TEXT 不可 DEFAULT''，ORM default="" 在 INSERT 填值）
+    ("chunks", "semantic_tags", "TEXT NOT NULL"),                         # 语义增强规则标签 JSON(BRD §4.1.3 apply_rules)
     ("chunks", "metadata_complete", "TINYINT(1) NOT NULL DEFAULT 0"),     # 元数据是否齐全（前端降级依据）
 ]
 

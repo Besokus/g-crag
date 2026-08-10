@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sprint3a CIM 解析器验证用合成样本：单站 5 设备链（母线-开关-主变-开关-线路）。
+     真实 CIM/CIMD 导出结构一致（rdf:RDF + cim: 类），可直接替换此文件验证。 -->
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:cim="http://iec.ch/TC57/2013/CIM-schema-cim16#">
+
+  <cim:Substation rdf:ID="S1">
+    <cim:IdentifiedObject.name>110kV示范站</cim:IdentifiedObject.name>
+  </cim:Substation>
+
+  <!-- 设备 -->
+  <cim:BusbarSection rdf:ID="BUS1">
+    <cim:IdentifiedObject.name>10kV I段母线</cim:IdentifiedObject.name>
+  </cim:BusbarSection>
+  <cim:Breaker rdf:ID="BRK1">
+    <cim:IdentifiedObject.name>主变进线开关</cim:IdentifiedObject.name>
+  </cim:Breaker>
+  <cim:PowerTransformer rdf:ID="T1">
+    <cim:IdentifiedObject.name>1号主变压器</cim:IdentifiedObject.name>
+  </cim:PowerTransformer>
+  <cim:Breaker rdf:ID="BRK2">
+    <cim:IdentifiedObject.name>出线开关</cim:IdentifiedObject.name>
+  </cim:Breaker>
+  <cim:ACLineSegment rdf:ID="LINE1">
+    <cim:IdentifiedObject.name>110kV出线01</cim:IdentifiedObject.name>
+  </cim:ACLineSegment>
+
+  <!-- Terminal：设备 ↔ ConnectivityNode 连接（线性链：BUS1-BRK1-T1-BRK2-LINE1） -->
+  <cim:Terminal rdf:ID="T_BUS1_BRK1">
+    <cim:Terminal.ConductingEquipment rdf:resource="#BUS1"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN1"/>
+  </cim:Terminal>
+  <cim:Terminal rdf:ID="T_BRK1_BUS1">
+    <cim:Terminal.ConductingEquipment rdf:resource="#BRK1"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN1"/>
+  </cim:Terminal>
+
+  <cim:Terminal rdf:ID="T_BRK1_T1">
+    <cim:Terminal.ConductingEquipment rdf:resource="#BRK1"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN2"/>
+  </cim:Terminal>
+  <cim:Terminal rdf:ID="T_T1_BRK1">
+    <cim:Terminal.ConductingEquipment rdf:resource="#T1"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN2"/>
+  </cim:Terminal>
+
+  <cim:Terminal rdf:ID="T_T1_BRK2">
+    <cim:Terminal.ConductingEquipment rdf:resource="#T1"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN3"/>
+  </cim:Terminal>
+  <cim:Terminal rdf:ID="T_BRK2_T1">
+    <cim:Terminal.ConductingEquipment rdf:resource="#BRK2"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN3"/>
+  </cim:Terminal>
+
+  <cim:Terminal rdf:ID="T_BRK2_LINE1">
+    <cim:Terminal.ConductingEquipment rdf:resource="#BRK2"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN4"/>
+  </cim:Terminal>
+  <cim:Terminal rdf:ID="T_LINE1_BRK2">
+    <cim:Terminal.ConductingEquipment rdf:resource="#LINE1"/>
+    <cim:Terminal.ConnectivityNode rdf:resource="#CN4"/>
+  </cim:Terminal>
+
+</rdf:RDF>

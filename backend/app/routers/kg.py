@@ -149,3 +149,36 @@ async def delete_triple(
         degraded("kg_neo4j_delete", e)
     await write_log(db, user.username, "图谱修正", f"删除三元组 {triple_id}")
     return success({"id": triple_id, "deleted": True}, "已删除")
+
+
+# ===== Sprint3a：CIM(IEC61970) 拓扑导入（电气连通图入 KG）=====
+
+@router.post("/cim-import")
+async def cim_import(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_perm(KG_EDIT)),
+):
+    """导入 CIM RDF/XML → 解析电气连通图 → 存 KgTriple 三元组。
+
+    Body: {"xml": "<rdf:RDF>...</rdf:RDF>", "docId"?: "cim", "docName"?: "站点名"}
+    连通边 (设备A, 电气连接, 设备B) 进 KG 后，GraphRAG 多跳推理可用——
+    故障传播链从 kgEntity 模糊匹配升级为真实电气连通。真实 CIM 文件接入零改动（只换输入）。
+    """
+    from app.services.cim_service import import_cim
+
+    body = await request.json()
+    xml_text = body.get("xml", "")
+    if not xml_text.strip():
+        raise BizError("缺少 xml 字段", 400)
+    try:
+        data = await import_cim(
+            db, xml_text,
+            doc_id=body.get("docId") or "cim",
+            doc_name=body.get("docName", ""),
+        )
+    except ValueError as e:
+        raise BizError(str(e), 400)
+    await write_log(db, user.username, "CIM导入",
+                    f"{data['station']}: {data['equipmentCount']}设备/{data['edgeCount']}连通")
+    return success(data, "导入成功")

@@ -185,6 +185,26 @@ async def _hyde_or_cache(q: str, model_type: str | None = None) -> str | None:
         return None
 
 
+async def _dense_dual(dense_q: str, cand: int, ef: int) -> tuple[list[dict], list[dict]]:
+    """双路向量检索（云 grid_chunks + 本地 bge grid_chunks_bge），各自全程降级。
+
+    云路远端欠费/限流/断网 → 空命中不阻塞；bge 本地恒走。任一路崩都不杀检索
+    （对齐"降级而非崩溃"约定）。云挂时 bge 单独扛 dense 召回 + BM25 仍在。
+    返回 (cloud_hits, bge_hits)。
+    """
+    async def _path(provider: str, collection: str, tag: str) -> list[dict]:
+        try:
+            vec = await embedding_service.embed_query(dense_q, provider)
+            return await asyncio.to_thread(milvus_client.search, collection, vec, cand, ef)
+        except Exception as e:
+            degraded(f"dense_{tag}", e)
+            return []
+    return await asyncio.gather(
+        _path(settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"),
+        _path("bge", settings.MILVUS_COLLECTION_BGE, "bge"),
+    )
+
+
 async def _dense_and_sparse(
     db: AsyncSession, q: str, cand: int, model_type: str | None = None,
     route: str = "hybrid", query_type: str | None = None, route_aware: bool = False,
@@ -196,18 +216,10 @@ async def _dense_and_sparse(
     """
     dense_q = (await _hyde_or_cache(q, model_type)) or q
 
-    with _retr_span("embedding"):
-        qvec_cloud, qvec_bge = await asyncio.gather(
-            embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
-            embedding_service.embed_query(dense_q, "bge"),
-        )
     _base_ef = max(config_service.rt_ef(), cand)  # HNSW ef ≥ 召回窗口，保证精度
     _ef = _ef_for_route(route, query_type, _base_ef) if route_aware else _base_ef
     with _retr_span("dense_search"):
-        dense_cloud, dense_bge = await asyncio.gather(
-            asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, _ef),
-            asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, _ef),
-        )
+        dense_cloud, dense_bge = await _dense_dual(dense_q, cand, _ef)
     dense_hits = []
     for d in dense_cloud:
         dense_hits.append({**d, "key": (d.get("doc_id"), d.get("chunk_idx")), "srcs": ["dense_cloud"]})
@@ -328,18 +340,10 @@ async def mixed_search(
         # dense-only: 仅双路向量，跳过 BM25
         for qq in queries:
             dense_q = (await _hyde_or_cache(qq, model_type)) or qq
-            with _retr_span("embedding"):
-                qvec_cloud, qvec_bge = await asyncio.gather(
-                    embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
-                    embedding_service.embed_query(dense_q, "bge"),
-                )
             _base_ef = max(config_service.rt_ef(), cand)  # HNSW ef ≥ 召回窗口，保证精度
             _ef = _ef_for_route(route, _query_type, _base_ef) if _route_aware else _base_ef
             with _retr_span("dense_search"):
-                dense_cloud, dense_bge = await asyncio.gather(
-                    asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, _ef),
-                    asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, _ef),
-                )
+                dense_cloud, dense_bge = await _dense_dual(dense_q, cand, _ef)
             for src, results in (("dense_cloud", dense_cloud), ("dense_bge", dense_bge)):
                 for d in results:
                     all_dense.append({
@@ -620,14 +624,7 @@ async def debug_search(
                     dense_q = hyde_text
             except Exception as e:
                 degraded("hyde_dispatch", e)
-        qvec_cloud, qvec_bge = await asyncio.gather(
-            embedding_service.embed_query(dense_q, settings.EMB_PROVIDER),
-            embedding_service.embed_query(dense_q, "bge"),
-        )
-        dense_cloud, dense_bge = await asyncio.gather(
-            asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION, qvec_cloud, cand, config_service.rt_ef()),
-            asyncio.to_thread(milvus_client.search, settings.MILVUS_COLLECTION_BGE, qvec_bge, cand, config_service.rt_ef()),
-        )
+        dense_cloud, dense_bge = await _dense_dual(dense_q, cand, config_service.rt_ef())
         dense_hits = []
         for src, results in (("dense_cloud", dense_cloud), ("dense_bge", dense_bge)):
             for d in results:

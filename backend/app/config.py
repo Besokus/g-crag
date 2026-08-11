@@ -162,6 +162,9 @@ class Settings(BaseSettings):
     CRAG_PERDOC_ENABLE: bool = False  # CRAG v2：LLM 逐条评估证据相关性（非仅 top1，增延迟，默认关）
     CRAG_TIMEOUT: float = 5.0         # CRAG v2：LLM 评估单次超时限制（秒）
     CRAG_V3_ENABLE: bool = False  # confidence refinement 总开关: 连续置信度+归因+矩阵(关=现状3档,前端零改动)
+    # ----- QA 主链路增强：接通旁支能力（opt-in，默认关=现状零破坏）-----
+    DEBATE_ON_LOW_CONFIDENCE_ENABLE: bool = False  # 低置信(medium_low/low/refused)→debate_agent 三专家裁决共识注入答案+升置信
+    SUFFICIENCY_GATE_ENABLE: bool = False           # judge.answerability 判证据不足→置信降一档(接通旁支 answerability)
     CONFIDENCE_OVERCONFIDENT_ENABLE: bool = True  # 断点G/B6: dislike×历史high置信冲突检测+evidence_gap复核(默认开)
     OVERCONFIDENT_BASELINE_TTL_DAYS: int = 30  # B6: highbase key 独立 TTL(不依赖问答缓存存活)
 

@@ -276,6 +276,21 @@ async def _crag_correct(
                 metrics.CRAG_REWRITE_DELTA.observe(_rewrite_delta)
     except Exception:
         pass
+    # sufficiency gating：judge.answerability 判证据够不够答（opt-in，默认关=现状）
+    # judge 判不可答 → 置信降一档 + missing_info 入 extras；与 DEBATE 开关闭环（降档→更易触发辩论）
+    if getattr(settings, "SUFFICIENCY_GATE_ENABLE", False) and contexts:
+        try:
+            from app.rag.judge import judge_answerability
+            _chk = [c.get("chunk", c.get("text", "")) or "" for c in contexts[:5]]
+            _abl = await judge_answerability(nq, _chk, model_type)
+            extras["answerability"] = _abl
+            if not _abl.get("answerable", False):
+                extras["insufficient"] = _abl.get("missing_info", "")
+                _down = {"high": "medium_high", "medium_high": "medium_low",
+                         "medium_low": "low", "low": "low", "refused": "refused"}
+                confidence = _down.get(confidence, confidence)
+        except Exception as e:
+            degraded("sufficiency_gate", e)
     return contexts, confidence, action, grade, extras
 
 
@@ -304,6 +319,44 @@ async def _write_highbase(nq: str, answer: str, tenant: str = "default") -> None
         )
     except Exception as e:
         degraded("overconfident_baseline_write", e)
+
+
+async def _maybe_debate_augment(
+    db, nq: str, ans: str, confidence: str, crag_extras: dict, model_type: str | None,
+) -> tuple[str, str]:
+    """低置信 → debate_agent 三专家裁决，共识前置注入答案 + 升级置信（opt-in）。
+
+    接通旁支 debate_diagnose（原仅 /domain/diagnose-debate，不反哺 QA 主链）。
+    DEBATE_ON_LOW_CONFIDENCE_ENABLE 默认关=现状。debate 是诊断型（规程/图谱/案例三视角），
+    对故障/处置类低置信问题价值最大；与 SUFFICIENCY_GATE 形成闭环——证据不足→降档→触发辩论。
+    异常 degraded 不阻塞主链。返回 (ans, confidence) 供 caller 赋值。
+    """
+    if not getattr(settings, "DEBATE_ON_LOW_CONFIDENCE_ENABLE", False):
+        return ans, confidence
+    if confidence not in ("medium_low", "low", "refused"):
+        return ans, confidence
+    try:
+        from app.services.debate_agent_service import debate_diagnose
+        deb = await debate_diagnose(db, nq, model_type)
+        diag = deb.get("diagnosis") or {}
+        summary = (diag.get("summary") or "").strip()
+        causes = diag.get("causes") or []
+        disagreements = (deb.get("debate") or {}).get("disagreements") or []
+        if summary:
+            head = "【多专家联合裁决（规程 / 图谱 / 案例 三视角交叉验证）】\n" + summary
+            if causes:
+                head += "\n可能原因：" + "；".join(
+                    c.get("name", "") for c in causes[:5] if isinstance(c, dict) and c.get("name"))
+            if disagreements:
+                head += "\n⚠ 专家分歧点（请人工核对）：" + "；".join(str(d)[:80] for d in disagreements[:3])
+            ans = head + "\n\n" + (ans or "")
+            confidence = "medium_high"  # 多专家交叉验证后升级（不到 high，保留人审空间）
+            crag_extras["debateTriggered"] = True
+            crag_extras["debateConsensus"] = summary[:500]
+            crag_extras["debateDisagreements"] = len(disagreements)
+    except Exception as e:
+        degraded("debate_on_low_confidence", e)
+    return ans, confidence
 
 
 async def _maybe_collect_refused(
@@ -887,6 +940,8 @@ async def answer(
         except Exception as e:
             degraded("citation_rewrite联动", e)
     ans = final_ans   # 校验/联动可能改写答案（drop→警示替换；rewrite→二次生成答案）
+    # debate 低置信触发（opt-in）：共识前置注入答案 + 升级置信（接通旁支 debate_agent）
+    ans, confidence = await _maybe_debate_augment(db, nq, ans, confidence, crag_extras, model_type)
     # ===== /Task 10 =====
     try:
         from app.core import metrics
@@ -1502,6 +1557,8 @@ async def stream_answer(
         except Exception as e:
             degraded("qa_cache_set", e)
         # L1.5: 语义缓存索引（向量化入库，供后续相似查询命中）
+        # debate 低置信触发（opt-in）：annotated 置信低 → 三专家裁决共识注入 + 升级置信
+        annotated, confidence = await _maybe_debate_augment(db, nq, annotated, confidence, crag_extras, model_type)
         if getattr(settings, "SEMANTIC_CACHE_ENABLE", False):
             try:
                 from app.rag.semantic_cache import semantic_cache_set

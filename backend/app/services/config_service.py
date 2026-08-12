@@ -11,7 +11,7 @@ _DEFAULT_MODEL = {"modelType": "default", "param": {"temperature": 0.2, "max_tok
 
 # 内存热读缓存（启动 load_runtime 填充；update_* 同步刷新）——热路径不碰 Redis
 _RUNTIME = {"ef": 64, "temperature": 0.2, "max_tokens": 2048, "system_prompt": None,
-            "llm_fallback_chain": None, "tier_models": None}
+            "llm_fallback_chain": None, "tier_models": None, "ollama_enable": None}
 
 
 async def load_runtime() -> None:
@@ -50,6 +50,8 @@ async def load_runtime() -> None:
                                                   if isinstance(p, str) and p.strip()]
             if isinstance(lr.get("tierModels"), dict):
                 _RUNTIME["tier_models"] = lr["tierModels"]
+            if "ollamaEnable" in lr:
+                _RUNTIME["ollama_enable"] = bool(lr["ollamaEnable"])
     except Exception:
         pass
 
@@ -147,16 +149,28 @@ def rt_tier_models() -> dict:
     return _RUNTIME.get("tier_models") or {}
 
 
+def rt_ollama_enable() -> bool:
+    """本地 Ollama 兜底开关（热读；未设置时默认启用）。管理后台可不重启即时切换。"""
+    v = _RUNTIME.get("ollama_enable")
+    return True if v is None else bool(v)
+
+
 async def get_llm_router_config() -> dict:
     v = await redis_client.cache_get_json("config:llm_router")
-    return v or {"fallbackChain": [], "tierModels": {}}
+    if not v:
+        return {"fallbackChain": [], "tierModels": {}, "ollamaEnable": True}
+    v.setdefault("ollamaEnable", True)
+    return v
 
 
-async def update_llm_router_config(fallback_chain: list[str], tier_models: dict) -> dict:
-    """保存 LLM 路由配置，即改即生效（下次 resolve 即用新链/档位）。"""
-    data = {"fallbackChain": fallback_chain or [], "tierModels": tier_models or {}}
+async def update_llm_router_config(fallback_chain: list[str], tier_models: dict,
+                                    ollama_enable: bool = True) -> dict:
+    """保存 LLM 路由配置，即改即生效（下次 resolve 即用新链/档位/本地兜底开关）。"""
+    data = {"fallbackChain": fallback_chain or [], "tierModels": tier_models or {},
+            "ollamaEnable": bool(ollama_enable)}
     await redis_client.cache_set_json_persistent("config:llm_router", data)
     _RUNTIME["llm_fallback_chain"] = [p for p in (fallback_chain or [])
                                       if isinstance(p, str) and p.strip()]
     _RUNTIME["tier_models"] = tier_models or {}
+    _RUNTIME["ollama_enable"] = bool(ollama_enable)
     return data

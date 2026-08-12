@@ -39,6 +39,60 @@ def _cache_tenant(tenant: str | None) -> str:
     return (tenant or "default").strip() or "default"
 
 
+def _llm_degradation_fields(llm_prov, model_type: str | None) -> dict:
+    """从 FallbackLLMProvider 读取真实命中的 provider + 是否发生过降级切换。
+
+    modelType 用实际命中的 provider（而非请求参数/默认配置），修复前端
+    "🤖模型"徽章失真——旧代码 modelType 恒等于 model_type or settings.LLM_PROVIDER，
+    fallback 切备后前端完全看不出来。
+    """
+    actual = getattr(llm_prov, "last_used_name", model_type or settings.LLM_PROVIDER)
+    return {
+        "modelType": actual,
+        "llmDegraded": bool(getattr(llm_prov, "degraded", False)),
+        "llmDegradedReason": getattr(llm_prov, "degrade_reason", ""),
+    }
+
+
+def _cap_confidence_for_local_model(confidence: str, actual_provider: str) -> str:
+    """本地应急模型(ollama)作答质量明显低于云端，confidence 封顶 medium，
+    避免"高置信"徽章与"本地应急模型"警告语义打架（顺带效果：ollama 作答不会被当作
+    高置信答案写入长期缓存/highbase，符合"应急答案不该被当权威沉淀"的预期）。
+    """
+    if actual_provider == "ollama" and confidence == "high":
+        return "medium"
+    return confidence
+
+
+def _retrieval_degradation_fields() -> dict:
+    """读取本次请求的 trace mark，判断云端向量检索是否降级（bge 独扛，见 _dense_dual）。"""
+    tc = _get_trace()
+    is_degraded = bool(tc and tc.marks.get("dense_cloud_failed"))
+    return {
+        "retrievalDegraded": is_degraded,
+        "retrievalDegradedReason": ("云端向量检索不可用，已降级为本地embedding+关键词检索"
+                                     if is_degraded else ""),
+    }
+
+
+def _llm_all_down_response(nq: str, contexts: list[dict], t0: float,
+                            conversation_id: str | None) -> dict:
+    """LLM fallback 链（含本地 ollama 兜底）全部耗尽时的结构化拒答，替代裸抛异常导致的
+    非流式裸 500 / 流式 SSE 硬断（I2）。仍保留已检索到的证据，不让用户白等一场。"""
+    return {
+        "answer": "抱歉，当前所有 AI 模型（含本地应急模型）暂时不可用，请稍后重试。",
+        "retrievalSource": [{
+            "docId": c.get("docId", ""), "docName": c.get("docName", ""),
+            "docType": c.get("docType", ""), "chunkIdx": c.get("chunkIdx"),
+            "chunk": c.get("chunk", ""), "score": c.get("score", 0.0),
+            "sources": c.get("sources", []),
+        } for c in contexts],
+        "responseTime": round(time.time() - t0, 3), "hallucinationRate": 0.0,
+        "cached": False, "confidence": "refused", "cragAction": "llm_all_down",
+        "conversationId": conversation_id or "",
+    }
+
+
 def _cache_key(model_type: str | None, query: str, tenant: str | None = "default") -> str:
     from app.config import citation_cache_version
     return f"qa:{_cache_tenant(tenant)}:{model_type or 'default'}:{query}:{citation_cache_version()}"
@@ -868,17 +922,28 @@ async def answer(
     _llm_prov = get_llm_provider(model_type, tier=_tier)
     # B4：真实 token usage（opt-in，默认关 → 走原 chat str 路径，估算 token）
     _llm_usage: dict | None = None
-    if getattr(settings, "LLM_USAGE_TRACK_ENABLE", False):
-        raw, _llm_usage = await _llm_prov.chat_with_usage(
-            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS,
-        )
-    else:
-        raw = await _llm_prov.chat(
-            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS)
+    try:
+        if getattr(settings, "LLM_USAGE_TRACK_ENABLE", False):
+            raw, _llm_usage = await _llm_prov.chat_with_usage(
+                messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS,
+            )
+        else:
+            raw = await _llm_prov.chat(
+                messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS)
+    except Exception as e:
+        # 全部 provider（含本地 ollama 兜底）耗尽 → 优雅拒答，不裸抛 500（I2）
+        degraded("llm_all_exhausted", e)
+        try:
+            from app.services.evidence_gap_service import collect
+            await collect(nq, "", "refused", "", "", "auto_llm_down", tenant or "default")
+        except Exception:
+            pass
+        return _llm_all_down_response(nq, contexts, t0, conversation_id)
+    _llm_fields = _llm_degradation_fields(_llm_prov, model_type)
     _tc = _get_trace()
     if _tc:
         _tc.record("llm", time.time() - _llm0)
-        _tc.mark("provider_used", getattr(_llm_prov, "last_used_name", model_type or "default"))
+        _tc.mark("provider_used", _llm_fields["modelType"])
     raw = safety.safe_answer(raw)  # 答案脱敏（PII_MASK_ENABLE 开启时，D4）
     # STRUCTURED_OUTPUT：LLM 输出 JSON → parse 取 answer_text + 结构化 citation_map(每 ref 一项不重复)
     # 跳过 auto_cite(结构化已有 cmap)；否则走 auto_cite 补标(现状)。
@@ -942,6 +1007,7 @@ async def answer(
     ans = final_ans   # 校验/联动可能改写答案（drop→警示替换；rewrite→二次生成答案）
     # debate 低置信触发（opt-in）：共识前置注入答案 + 升级置信（接通旁支 debate_agent）
     ans, confidence = await _maybe_debate_augment(db, nq, ans, confidence, crag_extras, model_type)
+    confidence = _cap_confidence_for_local_model(confidence, _llm_fields["modelType"])
     # ===== /Task 10 =====
     try:
         from app.core import metrics
@@ -985,6 +1051,8 @@ async def answer(
         "route": routing.route if routing else "hybrid",
         "routeReason": routing.reason if routing else "",
         "conversationId": conversation_id,
+        **_llm_fields,
+        **_retrieval_degradation_fields(),
         **citation_extras,   # Task 10: 空 dict（开关关）时不新增字段，零破坏
         **crag_extras,       # T2: CRAG_V3 归因字段（关={}零破坏；随 result 进缓存自动同步）
     }
@@ -1467,10 +1535,25 @@ async def stream_answer(
     parts: list[str] = []
     _llm0 = time.time()
     _llm_prov = get_llm_provider(model_type, tier=_tier)
-    async for token in _llm_prov.stream(
-        messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
-        parts.append(token)
-        yield {"type": "token", "content": token}
+    try:
+        async for token in _llm_prov.stream(
+            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
+            parts.append(token)
+            yield {"type": "token", "content": token}
+    except Exception as e:
+        # 全部 provider（含本地 ollama 兜底）耗尽 → 优雅收尾，不让 SSE 硬断（I2）
+        degraded("llm_all_exhausted_stream", e)
+        if not parts:
+            yield {
+                "type": "error",
+                "content": "当前所有 AI 模型（含本地应急模型）暂时不可用，请稍后重试",
+                "confidence": "refused", "conversationId": conversation_id or "",
+                "responseTime": round(time.time() - t0, 3),
+            }
+            return
+        parts.append("\n（后续生成中断：服务异常）")
+    _llm_fields = _llm_degradation_fields(_llm_prov, model_type)
+    _p = _llm_fields["modelType"]  # 下游 metrics/modelType 统一用实际命中的 provider（修复失真）
     try:
         from app.core import metrics
         metrics.LLM_CALLS.labels(_p).inc()
@@ -1480,7 +1563,8 @@ async def stream_answer(
     _tc = _get_trace()
     if _tc:
         _tc.record("llm", time.time() - _llm0)   # 流式 LLM 总耗时(首token→末token)
-        _tc.mark("provider_used", getattr(_llm_prov, "last_used_name", model_type or "default"))
+        _tc.mark("provider_used", _p)
+    confidence = _cap_confidence_for_local_model(confidence, _p)
 
     # 3) 持久化完整答案
     full = "".join(parts)
@@ -1602,6 +1686,9 @@ async def stream_answer(
         "cacheLayer": "llm",
         "route": routing.route if routing else "hybrid",
         "routeReason": routing.reason if routing else "",
+        "llmDegraded": _llm_fields["llmDegraded"],
+        "llmDegradedReason": _llm_fields["llmDegradedReason"],
+        **_retrieval_degradation_fields(),
     }
     # C3：校验开时随 done 下发 citationVerified（关时不带此字段=现状，前端零改动）
     if _stream_citation_extras.get("citationVerified"):

@@ -34,3 +34,45 @@ def test_exception_returns_not_improved():
             r = await rewrite_evaluator.evaluate("orig", "rewritten", None)
         assert r["improved"] is False
     asyncio.run(go())
+
+
+def test_cloud_embed_failure_falls_back_to_bge():
+    """云端 embedding 异常 → 回退 bge embedding + bge collection（不能只切 embedding 不切 collection，
+    否则用 bge 向量查云端 collection，向量空间不匹配，分数没有意义）。"""
+    async def go():
+        calls = []
+
+        async def fake_embed_query(text, provider=None):
+            calls.append(provider)
+            if provider != "bge":
+                raise RuntimeError("DashScope 欠费")
+            return [0.1] * 8
+
+        def fake_search(collection, vec, cand):
+            assert collection == rewrite_evaluator.settings.MILVUS_COLLECTION_BGE
+            return [{"score": 0.5}] * 5
+
+        with patch.object(rewrite_evaluator.embedding_service, "embed_query",
+                          AsyncMock(side_effect=fake_embed_query)), \
+             patch.object(rewrite_evaluator.milvus_client, "search", fake_search):
+            hits = await rewrite_evaluator._light_dense("query", None)
+
+        assert hits == [{"score": 0.5}] * 5
+        assert "bge" in calls
+    asyncio.run(go())
+
+
+def test_cloud_embed_success_uses_cloud_collection():
+    """云端 embedding 正常 → 走云端 collection，不触发 bge 回退。"""
+    async def go():
+        def fake_search(collection, vec, cand):
+            assert collection == rewrite_evaluator.settings.MILVUS_COLLECTION
+            return [{"score": 0.7}] * 5
+
+        with patch.object(rewrite_evaluator.embedding_service, "embed_query",
+                          AsyncMock(return_value=[0.2] * 8)), \
+             patch.object(rewrite_evaluator.milvus_client, "search", fake_search):
+            hits = await rewrite_evaluator._light_dense("query", None)
+
+        assert hits == [{"score": 0.7}] * 5
+    asyncio.run(go())

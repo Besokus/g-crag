@@ -101,6 +101,8 @@
               <span v-if="m.graphCount" class="badge badge-info">🔗 图谱{{ m.graphCount }}</span>
               <span v-if="m.highRisk && m.highRisk.length" class="badge badge-danger" :title="'高风险：' + m.highRisk.join('、')">⚠ {{ m.highRisk.slice(0, 3).join('、') }}</span>
               <span v-if="m.modelType" class="badge badge-info">🤖 {{ modelLabel(m.modelType) }}</span>
+              <span v-if="m.llmDegraded" class="badge badge-warning" :title="m.llmDegradedReason">{{ m.modelType === 'ollama' ? '🖥️ 本地应急模型' : '⚠️ 备用模型' }}</span>
+              <span v-if="m.retrievalDegraded" class="badge badge-warning" :title="m.retrievalDegradedReason">⚠️ 检索降级</span>
               <span v-if="m.confidence" class="badge" :class="confBadge(m.confidence)" :title="confTitle(m.confidence)">{{ confLabel(m.confidence) }}</span>
               <span class="fb">
                 <a @click="like(m)" :class="{ on: m.fb === 'like' }">👍</a>
@@ -319,6 +321,10 @@ async function runStream(q, opts = {}) {
       if (ev.modelType) msg.modelType = ev.modelType
       if (ev.cached !== undefined) msg.cached = ev.cached
       if (ev.cacheLayer) msg.cacheLayer = ev.cacheLayer
+      if (ev.llmDegraded !== undefined) msg.llmDegraded = ev.llmDegraded
+      if (ev.llmDegradedReason) msg.llmDegradedReason = ev.llmDegradedReason
+      if (ev.retrievalDegraded !== undefined) msg.retrievalDegraded = ev.retrievalDegraded
+      if (ev.retrievalDegradedReason) msg.retrievalDegradedReason = ev.retrievalDegradedReason
       if (ev.trace) msg.trace = ev.trace
       msg.streaming = false
       loading.value = false
@@ -376,7 +382,7 @@ function confLabel(c) { return ({ high: '✓ 高置信', medium: '⚠ 证据有�
 function confTitle(c) { return ({ high: '检索证据充分，答案可信度高', medium: '检索相关性中等，部分内容建议人工核对', refused: '未找到强相关资料，答案已保守处理' })[c] || '' }
 function confBadge(c) { return ({ high: 'badge-success', medium: 'badge-warning', refused: 'badge-danger' })[c] || 'badge-neutral' }
 function routeLabel(r) { return ({ sparse: '🔤 纯 BM25 匹配(sparse)', dense: '🧠 向量语义检索(dense)', hybrid: '🔀 全链路(hybrid)', sparse_first: '🔤→🔀 关键词优先(sparse_first)' })[r] || r }
-function modelLabel(m) { return ({ deepseek: 'DeepSeek', qwen: '通义千问', doubao: '豆包' })[m] || m }
+function modelLabel(m) { return ({ deepseek: 'DeepSeek', qwen: '通义千问', doubao: '豆包', ollama: '本地应急模型' })[m] || m }
 function routeBadge(r) { return ({ sparse: 'badge-sparse', dense: 'badge-dense', hybrid: 'badge-neutral', sparse_first: 'badge-warning' })[r] || 'badge-neutral' }
 // 缓存层标识：redis(L1热点) / mysql(L2持久) / semantic_*(L1.5相似) 三态区分
 function cacheLabel(l) { return ({ redis: '高频问答·热点', mysql: '高频问答·历史' })[l] || (l && l.startsWith('semantic') ? '高频问答·相似' : '高频问答') }

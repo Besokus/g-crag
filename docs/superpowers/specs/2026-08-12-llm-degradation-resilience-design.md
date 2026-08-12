@@ -75,10 +75,12 @@
 ## 8. 旁路 embedding 也接 bge 兜底
 
 云端 embedding 调用点排查结果：
-- `semantic_cache.py`（2 处，语义缓存的 embed 调用）—— **本次纳入**，云端异常时回退调用 `bge` provider
-- `rewrite_evaluator.py`（1 处，多查询改写效果评估）—— **本次纳入**
+- `rewrite_evaluator.py`（1 处，多查询改写效果评估）—— **本次纳入**：embedding 和检索的 collection 天然配对切换（云端 embedding 配云端 collection、bge embedding 配 bge collection），回退时两者一起切，向量空间不会混，安全。
+- `semantic_cache.py`（2 处，语义缓存的 embed 调用）—— **不纳入**（评审时发现的正确性风险，见下）
 - HyDE（`_hyde_or_cache`）本身不直接调用 embedding，生成的假设文档文本走下游已双路兼底的 dense 检索，天然覆盖，不用改
 - `document_service.py`（文档入库向量化）、`agent_memory_service.py`（Agent 记忆检索）—— **不纳入本次范围**（见「非目标」）
+
+**`semantic_cache.py` 不加 bge 兜底的原因**：它的匹配逻辑是拿新 query 的 embedding 去跟 Redis 里存的**同一个索引**（`qa_semantic:tenant:{tenant}:index:v3`）中的历史 query embedding 做余弦相似度比较，索引不区分是哪个 embedding 模型生成的向量。云端挂时若用 bge 现算再跟这个索引比对，两种向量空间不同，余弦相似度没有意义（不是"降级返回不准的近似值"，而是可能返回错误的匹配/不匹配）；若同时把 bge 向量写入索引，会把两种向量空间永久混进同一份数据（索引 TTL 3 天，不会自动清干净），云端恢复后污染依然存在。维持现状（云端异常直接当 cache miss 跳过，走正常 LLM 生成）：语义缓存本质是性能优化（减少重复 LLM 调用），不是"答案能不能生成"的必经路径，miss 了就正常走 LLM，不影响用户拿到答案。
 
 ## 9. LLM 全链路耗尽时的优雅降级
 

@@ -190,6 +190,8 @@ async def _dense_dual(dense_q: str, cand: int, ef: int) -> tuple[list[dict], lis
 
     云路远端欠费/限流/断网 → 空命中不阻塞；bge 本地恒走。任一路崩都不杀检索
     （对齐"降级而非崩溃"约定）。云挂时 bge 单独扛 dense 召回 + BM25 仍在。
+    云路失败额外打 trace mark（dense_cloud_failed），供 qa_service 透出
+    retrievalDegraded 给前端（bge 路挂不算"云端降级"，不打此 mark）。
     返回 (cloud_hits, bge_hits)。
     """
     async def _path(provider: str, collection: str, tag: str) -> list[dict]:
@@ -198,6 +200,10 @@ async def _dense_dual(dense_q: str, cand: int, ef: int) -> tuple[list[dict], lis
             return await asyncio.to_thread(milvus_client.search, collection, vec, cand, ef)
         except Exception as e:
             degraded(f"dense_{tag}", e)
+            if tag == "cloud":
+                tc = _get_trace()
+                if tc:
+                    tc.mark("dense_cloud_failed", True)
             return []
     return await asyncio.gather(
         _path(settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"),

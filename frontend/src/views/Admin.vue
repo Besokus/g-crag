@@ -269,6 +269,15 @@
           <div class="field"><label class="field-label">max_tokens</label><input class="input" v-model="model.max_tokens" /></div>
           <button class="btn btn-primary" @click="saveModel">保存</button>
         </div>
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">本地应急模型（Ollama）</h3><span v-if="configLoaded" class="badge badge-success">已读取线上值</span></div>
+          <label class="field-label" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" v-model="llmRouter.ollamaEnable" />
+            启用本地应急模型兜底
+          </label>
+          <p class="hint" style="margin-top:8px">云端 LLM（qwen/deepseek/doubao）全部不可用时是否切到本地 Ollama 模型应急作答。关闭后云端全部不可用时将直接拒答，不使用本地模型（适合内存不足以运行本地模型的部署环境）。</p>
+          <button class="btn btn-primary" @click="saveLlmRouter">保存</button>
+        </div>
       </div>
 
       <!-- BM25 重建 -->
@@ -398,7 +407,7 @@
               <option value="expired">已过保</option>
             </select>
             <span class="badge" :class="{pending:'badge-info',ai_drafted:'badge-warning',synced:'badge-success',ignored:'badge-neutral'}[g.status]">{{ {pending:'待处理',ai_drafted:'已续写',synced:'已同步',ignored:'已忽略'}[g.status] }}</span>
-            <span v-if="g.source" class="badge badge-neutral" :title="`来源: ${g.source}`">{{ {auto:'自动',auto_crag:'CRAG',auto_no_recall:'无结果',overconfident:'过自信',feedback_dislike:'点踩',manual:'人工'}[g.source] || g.source }}</span>
+            <span v-if="g.source" class="badge badge-neutral" :title="`来源: ${g.source}`">{{ {auto:'自动',auto_crag:'CRAG',auto_no_recall:'无结果',overconfident:'过自信',feedback_dislike:'点踩',manual:'人工',auto_llm_down:'服务不可用'}[g.source] || g.source }}</span>
             <strong class="opt-title" style="cursor:pointer" @click="g._expanded = !g._expanded" :title="'点击' + (g._expanded ? '收起' : '展开全部答案')">{{ g._expanded ? '▼' : '▶' }} {{ g.query }}</strong>
             <span v-if="g.operator === 'auto-deep-sync'" class="badge badge-success" style="margin-left:6px">✅ 自动深度补全</span>
           </div>
@@ -740,7 +749,7 @@ import * as echarts from 'echarts/core'
 import { PieChart, BarChart, ScatterChart, LineChart } from 'echarts/charts'
 import { TooltipComponent, LegendComponent, GridComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { getLogs, getAlerts, configMilvus, configModel, getMilvusConfig, getModelConfig, getProviderHealth, rebuildBm25, getFeedbacks, markFeedbackGolden, getFeedbackStats, alertDispose, getAlertDisposals, getPersonas, upsertPersona, deletePersona, agentRun, getUsers, updateUserRole, updateUserStatus, deleteUser, resetUserPassword, backupDB, listBackups, restoreDB, removeBackup, getLogArchiveStats, archiveLogs, getTerms, addTerm, deleteTerm, getPromptConfig, updatePromptConfig, getSemanticRules, addSemanticRule, deleteSemanticRule, getRetrievalTuneReport, runRetrievalTune, confirmDisposal, rejectDisposal, disposalToTicket, closeDisposal, backupAll, restoreAllBackup, listManifestBackups, deleteManifestBackup, getMemories, deleteMemory, getMemoryStats } from '../api'
+import { getLogs, getAlerts, configMilvus, configModel, getMilvusConfig, getModelConfig, getProviderHealth, rebuildBm25, getFeedbacks, markFeedbackGolden, getFeedbackStats, alertDispose, getAlertDisposals, getPersonas, upsertPersona, deletePersona, agentRun, getUsers, updateUserRole, updateUserStatus, deleteUser, resetUserPassword, backupDB, listBackups, restoreDB, removeBackup, getLogArchiveStats, archiveLogs, getTerms, addTerm, deleteTerm, getPromptConfig, updatePromptConfig, getLlmRouterConfig, updateLlmRouterConfig, getSemanticRules, addSemanticRule, deleteSemanticRule, getRetrievalTuneReport, runRetrievalTune, confirmDisposal, rejectDisposal, disposalToTicket, closeDisposal, backupAll, restoreAllBackup, listManifestBackups, deleteManifestBackup, getMemories, deleteMemory, getMemoryStats } from '../api'
 import request from '../api/request'
 
 echarts.use([PieChart, BarChart, ScatterChart, LineChart, TooltipComponent, LegendComponent, GridComponent, CanvasRenderer])
@@ -777,6 +786,7 @@ const fbStats = ref(null)
 const fbFilter = ref('dislike')
 const milvus = reactive({ indexType: 'HNSW', M: 16, efConstruction: 200, ef: 64 })
 const model = reactive({ modelType: 'deepseek', temperature: 0.2, max_tokens: 2048 })
+const llmRouter = reactive({ ollamaEnable: true, fallbackChain: [], tierModels: {} })
 const health = ref(null)
 const healthLoading = ref(false)
 const bm25Loading = ref(false)
@@ -938,10 +948,16 @@ async function loadFbStats() { try { fbStats.value = (await getFeedbackStats()).
 async function markGolden(f) { try { const r = (await markFeedbackGolden(f.id)).data; toast(r.added ? `已加入 golden 集（共 ${r.total} 条）` : `未加入：${r.reason || '已存在'}`) } catch (e) { toast('操作失败') } }
 async function saveMilvus() { await configMilvus(milvus.indexType, { M: Number(milvus.M), efConstruction: Number(milvus.efConstruction), ef: Number(milvus.ef) }); toast('Milvus 已保存（ef 即时生效）') }
 async function saveModel() { await configModel(model.modelType, { temperature: Number(model.temperature), max_tokens: Number(model.max_tokens) }); toast('模型参数已保存（temperature 即时生效）') }
+async function saveLlmRouter() {
+  // fallbackChain/tierModels 原样回传（本卡片只暴露 ollamaEnable 开关，避免用没编辑过的空值覆盖掉后端已有配置）
+  try { await updateLlmRouterConfig(llmRouter.fallbackChain, llmRouter.tierModels, llmRouter.ollamaEnable); toast('本地兜底配置已保存（立即生效，不影响进行中的会话）') }
+  catch (e) { toast('保存失败') }
+}
 async function loadConfig() {
   try {
     const mv = (await getMilvusConfig()).data || {}
     const md = (await getModelConfig()).data || {}
+    const lr = (await getLlmRouterConfig()).data || {}
     const mp = mv.param || {}
     milvus.indexType = mv.indexType || 'HNSW'
     milvus.M = mp.M ?? 16
@@ -951,6 +967,9 @@ async function loadConfig() {
     model.modelType = md.modelType || 'deepseek'
     model.temperature = pp.temperature ?? 0.2
     model.max_tokens = pp.max_tokens ?? 2048
+    llmRouter.ollamaEnable = lr.ollamaEnable ?? true
+    llmRouter.fallbackChain = lr.fallbackChain || []
+    llmRouter.tierModels = lr.tierModels || {}
     configLoaded.value = true
   } catch (e) { toast('读取线上配置失败') }
 }

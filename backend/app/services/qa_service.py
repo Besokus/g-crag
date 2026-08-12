@@ -1535,10 +1535,25 @@ async def stream_answer(
     parts: list[str] = []
     _llm0 = time.time()
     _llm_prov = get_llm_provider(model_type, tier=_tier)
-    async for token in _llm_prov.stream(
-        messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
-        parts.append(token)
-        yield {"type": "token", "content": token}
+    try:
+        async for token in _llm_prov.stream(
+            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
+            parts.append(token)
+            yield {"type": "token", "content": token}
+    except Exception as e:
+        # 全部 provider（含本地 ollama 兜底）耗尽 → 优雅收尾，不让 SSE 硬断（I2）
+        degraded("llm_all_exhausted_stream", e)
+        if not parts:
+            yield {
+                "type": "error",
+                "content": "当前所有 AI 模型（含本地应急模型）暂时不可用，请稍后重试",
+                "confidence": "refused", "conversationId": conversation_id or "",
+                "responseTime": round(time.time() - t0, 3),
+            }
+            return
+        parts.append("\n（后续生成中断：服务异常）")
+    _llm_fields = _llm_degradation_fields(_llm_prov, model_type)
+    _p = _llm_fields["modelType"]  # 下游 metrics/modelType 统一用实际命中的 provider（修复失真）
     try:
         from app.core import metrics
         metrics.LLM_CALLS.labels(_p).inc()
@@ -1548,7 +1563,8 @@ async def stream_answer(
     _tc = _get_trace()
     if _tc:
         _tc.record("llm", time.time() - _llm0)   # 流式 LLM 总耗时(首token→末token)
-        _tc.mark("provider_used", getattr(_llm_prov, "last_used_name", model_type or "default"))
+        _tc.mark("provider_used", _p)
+    confidence = _cap_confidence_for_local_model(confidence, _p)
 
     # 3) 持久化完整答案
     full = "".join(parts)
@@ -1670,6 +1686,9 @@ async def stream_answer(
         "cacheLayer": "llm",
         "route": routing.route if routing else "hybrid",
         "routeReason": routing.reason if routing else "",
+        "llmDegraded": _llm_fields["llmDegraded"],
+        "llmDegradedReason": _llm_fields["llmDegradedReason"],
+        **_retrieval_degradation_fields(),
     }
     # C3：校验开时随 done 下发 citationVerified（关时不带此字段=现状，前端零改动）
     if _stream_citation_extras.get("citationVerified"):

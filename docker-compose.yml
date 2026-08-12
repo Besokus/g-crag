@@ -126,6 +126,24 @@ services:
     volumes:
       - ./data/neo4j:/data
 
+  # ---------- Ollama：本地应急 LLM（云端 qwen/deepseek/doubao 全部不可用时的兜底，非强依赖）----------
+  # LLM_FALLBACK_CHAIN 末位新增 ollama；首次启动自动拉取模型（7B q4 量化，约 4.5GB，CPU 可推理）。
+  # mem_limit/cpus 防止真实触发兜底、开始推理时把 mysql/milvus/redis/neo4j 挤爆(OOM/CPU 饥饿)；
+  # 按部署机器实际配置调整数值。
+  ollama:
+    image: ollama/ollama:latest
+    container_name: grid-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-qwen2.5:7b-instruct-q4_K_M} && wait"
+    mem_limit: 10g
+    cpus: 4
+
   # ---------- Nacos：配置中心（可选，CONFIG_SOURCE=nacos 时启用；默认 env 不依赖）----------
   # 启动: docker compose up -d nacos ；管理台 http://localhost:8848/nacos (默认 nacos/nacos)
   nacos:
@@ -155,6 +173,7 @@ services:
       - milvus
       - redis
       - neo4j
+      - ollama
     env_file: .env
     environment:
       # 容器内用 service name + 内部端口连接（覆盖 .env 的 localhost）

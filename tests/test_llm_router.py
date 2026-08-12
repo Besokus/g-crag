@@ -146,3 +146,75 @@ def test_resolve_chain_default_falls_through():
     chain = resolve_chain("default")
     assert chain[0] != "default"
     assert len(chain) >= 1
+
+
+# ===== L0 degraded/degrade_reason 标记（云端全灭+本地兜底可见性）=====
+
+@pytest.mark.asyncio
+async def test_fallback_sets_degraded_flag_and_reason():
+    """切备成功后 degraded=True，degrade_reason 带原因。"""
+    p1 = FakeProv("deepseek", exc=RuntimeError("boom"))
+    p2 = FakeProv("qwen", chat_res="from qwen")
+    fb = FallbackLLMProvider([p1, p2], ["deepseek", "qwen"])
+    await fb.chat([{"role": "user", "content": "hi"}])
+    assert fb.degraded is True
+    assert "deepseek" in fb.degrade_reason
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_not_degraded():
+    """首选 provider 直接成功 → degraded=False，degrade_reason 空。"""
+    p1 = FakeProv("deepseek", chat_res="ok")
+    fb = FallbackLLMProvider([p1], ["deepseek"])
+    await fb.chat([{"role": "user", "content": "hi"}])
+    assert fb.degraded is False
+    assert fb.degrade_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_ollama_fallback_has_fixed_reason():
+    """最终命中本地 ollama → 固定文案标注，而不是拼接原始异常信息。"""
+    p1 = FakeProv("deepseek", exc=RuntimeError("boom"))
+    p2 = FakeProv("ollama", chat_res="本地应急回答")
+    fb = FallbackLLMProvider([p1, p2], ["deepseek", "ollama"])
+    await fb.chat([{"role": "user", "content": "hi"}])
+    assert fb.last_used_name == "ollama"
+    assert fb.degrade_reason == "云端模型全部不可用，已使用本地应急模型"
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_sets_degraded():
+    """流式切备后同样置位 degraded（首 token 前异常触发切备场景）。"""
+    class MidFail:
+        async def stream(self, messages, **kw):
+            raise RuntimeError("connect fail")
+            yield
+        async def chat(self, *a, **kw):
+            return ""
+    fb = FallbackLLMProvider([MidFail(), FakeProv("qwen", stream_tokens=["a"])], ["deepseek", "qwen"])
+    toks = [t async for t in fb.stream([{"role": "user", "content": "hi"}])]
+    assert toks == ["a"]
+    assert fb.degraded is True
+
+
+@pytest.mark.asyncio
+async def test_stream_no_fallback_not_degraded():
+    """流式首选直接成功 → degraded=False。"""
+    fb = FallbackLLMProvider([FakeProv("qwen", stream_tokens=["a", "b"])], ["qwen"])
+    toks = [t async for t in fb.stream([{"role": "user", "content": "hi"}])]
+    assert toks == ["a", "b"]
+    assert fb.degraded is False
+
+
+# ===== L1 本地模型不参与主动探活 =====
+
+def test_should_actively_probe_excludes_ollama():
+    from app.providers.llm_router import _should_actively_probe
+    assert _should_actively_probe("ollama") is False
+
+
+def test_should_actively_probe_includes_cloud_providers():
+    from app.providers.llm_router import _should_actively_probe
+    assert _should_actively_probe("qwen") is True
+    assert _should_actively_probe("deepseek") is True
+    assert _should_actively_probe("doubao") is True

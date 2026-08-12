@@ -111,6 +111,8 @@ class FallbackLLMProvider:
         self._names = names
         self._tier = tier
         self.last_used_name = names[0] if names else "unknown"  # 实际命中的 provider（切备后更新，供 trace mark）
+        self.degraded = False       # 是否没用上第一顺位 provider（前端据此展示"备用模型"提示）
+        self.degrade_reason = ""    # 切换前最后一次失败原因（前端 badge title）
 
     def _tier_model(self, idx: int) -> str | None:
         """档位 → 该 provider 的 model override（None=用 provider 默认）。"""
@@ -141,9 +143,11 @@ class FallbackLLMProvider:
             pass
 
     async def _try_providers(self, method: str, check_empty: bool, **kw):
-        """非流式：按链试，异常/空输出→切备。"""
+        """非流式：按链试，异常/空输出→切备。切备成功后置 degraded/degrade_reason，
+        供上层（qa_service）透出"本次答案由备用/本地模型生成"提示给前端。"""
         last_exc: Exception | None = None
         last_res = None
+        last_reason = ""
         for i, prov in enumerate(self._providers):
             name = self._names[i]
             nxt = self._names[i + 1] if i + 1 < len(self._names) else "-"
@@ -160,15 +164,22 @@ class FallbackLLMProvider:
                     self._fb_metric(name, nxt, "empty")
                     degraded("llm_fallback", Exception(f"{name} 空输出"), f"{method} 切备 {nxt}")
                     last_res = res
+                    last_reason = f"{name} 返回空输出，已切换至 {nxt}"
                     continue
                 record_ok(name)
                 self.last_used_name = name
+                self.degraded = i > 0
+                self.degrade_reason = (
+                    "云端模型全部不可用，已使用本地应急模型" if (self.degraded and name == "ollama")
+                    else (last_reason if self.degraded else "")
+                )
                 return res
             except Exception as e:
                 last_exc = e
                 record_fail(name)
                 self._fb_metric(name, nxt, "exception")
                 degraded("llm_fallback", e, f"{name} {method} 异常切备 {nxt}")
+                last_reason = f"{name} 不可用({type(e).__name__})，已切换至 {nxt}"
         if last_exc is not None:
             raise last_exc
         return last_res  # 全空：返回最后空结果（上层走兜底）
@@ -188,8 +199,10 @@ class FallbackLLMProvider:
                                          max_tokens=max_tokens, **kw)
 
     async def stream(self, messages, temperature=0.2, max_tokens=2048, model=None, **kw):
-        """流式：首 token 前切备（启动异常/空流→切下家）；首 token 后不切（避免重复吐字）。"""
+        """流式：首 token 前切备（启动异常/空流→切下家）；首 token 后不切（避免重复吐字）。
+        首 token 出现时置 degraded/degrade_reason（同 _try_providers 语义）。"""
         last_exc: Exception | None = None
+        last_reason = ""
         for i, prov in enumerate(self._providers):
             name = self._names[i]
             nxt = self._names[i + 1] if i + 1 < len(self._names) else "-"
@@ -199,9 +212,15 @@ class FallbackLLMProvider:
                 gen = prov.stream(messages, temperature=temperature, max_tokens=max_tokens,
                                   model=tier_model, **kw)
                 async for tok in gen:
+                    if not yielded:
+                        record_ok(name)
+                        self.last_used_name = name
+                        self.degraded = i > 0
+                        self.degrade_reason = (
+                            "云端模型全部不可用，已使用本地应急模型" if (self.degraded and name == "ollama")
+                            else (last_reason if self.degraded else "")
+                        )
                     yielded = True
-                    record_ok(name)
-                    self.last_used_name = name
                     yield tok
                 if yielded:
                     return  # 正常结束
@@ -210,6 +229,7 @@ class FallbackLLMProvider:
                     record_fail(name)
                     self._fb_metric(name, nxt, "empty_stream")
                     degraded("llm_fallback_stream", Exception(f"{name} 空流"), f"切备 {nxt}")
+                    last_reason = f"{name} 空流，已切换至 {nxt}"
                     continue
                 return
             except Exception as e:
@@ -219,8 +239,15 @@ class FallbackLLMProvider:
                 record_fail(name)
                 self._fb_metric(name, nxt, "stream_exception")
                 degraded("llm_fallback_stream", e, f"{name} 流启动失败切备 {nxt}")
+                last_reason = f"{name} 不可用({type(e).__name__})，已切换至 {nxt}"
         if last_exc is not None:
             raise last_exc
+
+
+def _should_actively_probe(name: str) -> bool:
+    """本地应急模型(ollama)不参与周期主动探活——避免平时空闲时每个探活周期都被迫做一次
+    CPU 推理。它的健康状态完全靠真实调用失败时的被动熔断(record_fail/record_ok)判定。"""
+    return name != "ollama"
 
 
 # ===== L1 后台探活 loop（克隆 main._refresh_component_health_loop 范式）=====
@@ -237,6 +264,8 @@ async def _refresh_llm_health_loop() -> None:
             from app.providers.factory import check_llm_health
             from app.core import metrics
             for p in _fallback_chain():
+                if not _should_actively_probe(p):
+                    continue
                 try:
                     res = await check_llm_health(p)
                     ok = res.get("status") == "ok"

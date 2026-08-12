@@ -14,10 +14,18 @@ from app.services import embedding_service
 
 
 async def _light_dense(query: str, model_type: str | None) -> list[dict]:
-    """单路 dense_cloud 轻量检索，返回 [{score, ...}, ...]。"""
-    qvec = await embedding_service.embed_query(query, settings.EMB_PROVIDER)
+    """单路轻量检索：优先云端 embedding+云端 collection；云端 embedding 异常时配对回退
+    bge embedding+bge collection（两者必须一起切，向量空间不同，不能用 bge 向量查云端 collection）。
+    外层 evaluate() 的 try/except 仍是最终安全网（bge 也失败时兜底 not improved）。"""
+    try:
+        qvec = await embedding_service.embed_query(query, settings.EMB_PROVIDER)
+        collection = settings.MILVUS_COLLECTION
+    except Exception as e:
+        degraded("rewrite_eval_embed_cloud", e)
+        qvec = await embedding_service.embed_query(query, "bge")
+        collection = settings.MILVUS_COLLECTION_BGE
     return await asyncio.to_thread(
-        milvus_client.search, settings.MILVUS_COLLECTION, qvec, settings.REWRITE_EVAL_CAND,
+        milvus_client.search, collection, qvec, settings.REWRITE_EVAL_CAND,
     )
 
 

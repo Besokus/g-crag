@@ -61,3 +61,9 @@ class AgentRunRequest(BaseModel):
     persona: str                         # 通用 agent 入口：persona 名（diagnose/qa/alert/自定义）
     query: str
     modelType: Optional[str] = None
+
+
+class LlmRouterConfigRequest(BaseModel):
+    fallbackChain: list[str] = []
+    tierModels: dict = {}
+    ollamaEnable: bool = True

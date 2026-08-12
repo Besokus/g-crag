@@ -71,12 +71,13 @@ def classify_llm(query: str) -> tuple[str, str]:
 
 # ===== 链解析 =====
 def _fallback_chain() -> list[str]:
-    """读取 fallback 链（热配置优先，回落 settings）。"""
+    """读取 fallback 链（热配置优先，回落 settings）；ollama 禁用时从链中剔除（管理员热开关）。"""
     try:
-        from app.services.config_service import rt_llm_fallback_chain
+        from app.services.config_service import rt_llm_fallback_chain, rt_ollama_enable
         chain = rt_llm_fallback_chain()
-        if chain:
-            return [p for p in chain if isinstance(p, str) and p.strip()]
+        if not rt_ollama_enable():
+            chain = [p for p in chain if p != "ollama"]
+        return chain
     except Exception:
         pass
     return [s.strip() for s in settings.LLM_FALLBACK_CHAIN.split(",") if s.strip()]

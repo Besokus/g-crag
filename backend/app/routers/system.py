@@ -12,7 +12,7 @@ from app.db.session import get_db
 from app.dependencies import get_current_user, require_admin, require_perm
 from app.models.user import User
 from app.schemas.auth import ChangePasswordRequest, LoginRequest, ProfileUpdateRequest, RegisterRequest, ResetPasswordRequest, UpdateRoleRequest, UserStatusRequest
-from app.schemas.system import AlertDisposeRequest, AgentRunRequest, AiDraftUpdateRequest, ConfidenceUpdateRequest, PersonaConfigRequest, MilvusConfigRequest, ModelConfigRequest
+from app.schemas.system import AlertDisposeRequest, AgentRunRequest, AiDraftUpdateRequest, ConfidenceUpdateRequest, PersonaConfigRequest, MilvusConfigRequest, ModelConfigRequest, LlmRouterConfigRequest
 from app.services import config_service, log_service
 from app.services.alert_disposal_service import list_disposals, trigger_disposal
 from app.services.persona_store import delete_config, list_configs, upsert_config
@@ -172,6 +172,24 @@ async def get_milvus_config_route(admin: User = Depends(require_admin)):
 @router.get("/config/model")
 async def get_model_config_route(admin: User = Depends(require_admin)):
     return success(await config_service.get_model_config(), "查询成功")
+
+
+@router.get("/config/llm-router")
+async def get_llm_router_config_route(admin: User = Depends(require_admin)):
+    return success(await config_service.get_llm_router_config(), "查询成功")
+
+
+@router.put("/config/llm-router")
+async def update_llm_router_config_route(
+    body: LlmRouterConfigRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """保存 LLM 路由配置（fallback 链 / 分档 / 本地兜底开关），即改即生效，不影响进行中的会话。"""
+    data = await config_service.update_llm_router_config(
+        body.fallbackChain, body.tierModels, body.ollamaEnable)
+    await write_log(db, admin.username, "LLM路由配置", f"ollamaEnable={data['ollamaEnable']}")
+    return success(data, "已保存（下次问答生效）")
 
 
 @router.get("/config/prompt")

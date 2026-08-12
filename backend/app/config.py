@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # 模型路由（L0 fallback + L1 熔断 + L2 分档）：deepseek-v4-flash 实测返空 answer，
     # 原实现无 fallback 直接返空给用户。fallback 链按序切备；后台探活熔断故障 provider；
     # L2 分档 opt-in（运维问答多数规程查询，收益待 A/B 验证）。
-    LLM_FALLBACK_CHAIN: str = "qwen,deepseek,doubao"   # fallback 链（逗号分隔，首选在前；用户手选仍优先）
+    LLM_FALLBACK_CHAIN: str = "qwen,deepseek,doubao,ollama"   # fallback 链末位追加本地应急模型
     LLM_FALLBACK_ON_EMPTY: bool = True                 # 空 answer(如 deepseek 0字)也触发 fallback
     LLM_HEALTH_PROBE_ENABLE: bool = True               # 后台周期探活 provider（熔断底座）
     LLM_CIRCUIT_FAIL_N: int = 3                        # 连续失败 N 次 → 熔断冷却
@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     LLM_PROBE_INTERVAL: int = 30                       # 健康探活周期秒
     LLM_TIER_ENABLE: bool = False                      # L2 query 特征分档(turbo/plus) opt-in 默认关
     RERANK_TIMEOUT: float = 2.0                        # rerank 单次超时（超时降级用 RRF 原序稳 p99；云 API 偶发 891ms+）
+    LLM_LOCAL_TIMEOUT: float = 60.0                    # 本地 Ollama 兜底超时（CPU 推理慢于云端 API）
 
     # --- DeepSeek ---
     DEEPSEEK_API_KEY: str = ""
@@ -92,6 +93,10 @@ class Settings(BaseSettings):
     ARK_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
     DOUBAO_LLM_ENDPOINT_ID: str = ""
     DOUBAO_EMB_MODEL: str = "doubao-embedding-text-240815"
+
+    # --- 本地 Ollama（云端 LLM 全部不可用时的应急兜底，L0 fallback 链末位）---
+    OLLAMA_BASE_URL: str = "http://ollama:11434"
+    OLLAMA_MODEL: str = "qwen2.5:7b-instruct-q4_K_M"
 
     # ---------- Milvus ----------
     MILVUS_HOST: str = "localhost"

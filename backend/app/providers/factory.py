@@ -31,7 +31,10 @@ def _get_raw_provider(p: str) -> LLMProvider:
     if p == "doubao":
         from app.providers.llm.doubao_llm import DoubaoLLM
         return DoubaoLLM()
-    raise ValueError(f"未知 LLM_PROVIDER: {p}（支持: deepseek | qwen | doubao）")
+    if p == "ollama":
+        from app.providers.llm.ollama_llm import OllamaLLM
+        return OllamaLLM()
+    raise ValueError(f"未知 LLM_PROVIDER: {p}（支持: deepseek | qwen | doubao | ollama）")
 
 
 def get_llm_provider(provider: str | None = None, tier: str = "plus") -> LLMProvider:

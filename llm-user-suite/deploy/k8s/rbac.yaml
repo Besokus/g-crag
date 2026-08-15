@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: llm-user-controller}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: llm-user-runner}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: llm-user-job-controller}
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: llm-user-job-controller}
+subjects: [{kind: ServiceAccount, name: llm-user-controller}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: llm-user-job-controller}

@@ -123,21 +123,9 @@ async def eval_quality(
 
 
 async def _judge_completeness(query: str, answer: str, model_type: str | None = None) -> float:
-    """LLM Judge 评估答案完整性。"""
-    from app.providers.factory import get_llm_provider
-    provider = get_llm_provider(model_type)
-    content = await provider.chat(
-        [{"role": "user", "content": (
-            f"评估以下答案对问题的完整性（0-1分，只输出数字）：\n"
-            f"问题：{query}\n答案：{answer[:500]}\n"
-            f"评分标准：1=完全覆盖, 0.7=主要部分覆盖, 0.4=部分覆盖, 0=完全不相关"
-        )}],
-        temperature=0, max_tokens=10,
-    )
-    try:
-        return max(0.0, min(1.0, float(content.strip())))
-    except (ValueError, TypeError):
-        return 0.5
+    """Compatibility entry point backed by the shared provider-neutral eval core."""
+    from app.rag.judge import judge_completeness
+    return await judge_completeness(query, answer, model_type)
 
 
 async def get_quality_trends(db: AsyncSession, days: int = 7) -> dict:

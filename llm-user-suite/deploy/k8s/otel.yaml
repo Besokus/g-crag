@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: llm-user-otel-buffer}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: cephfs-sas
+  resources: {requests: {storage: 2Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-user-otel}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llm-user-otel}}
+  template:
+    metadata: {labels: {app: llm-user-otel}}
+    spec:
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.132.0
+          args: [--config=/etc/otel/collector.yaml]
+          env:
+            - name: GRID_QA_METRICS_TARGET
+              valueFrom: {configMapKeyRef: {name: llm-user-suite-config, key: GRID_QA_METRICS_TARGET}}
+          ports: [{name: grpc, containerPort: 4317}, {name: http, containerPort: 4318}, {name: health, containerPort: 13133}]
+          readinessProbe: {httpGet: {path: /, port: health}, initialDelaySeconds: 3, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /, port: health}, periodSeconds: 15, failureThreshold: 3}
+          volumeMounts: [{name: config, mountPath: /etc/otel}, {name: buffer, mountPath: /var/lib/otel}]
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: "1", memory: 512Mi}}
+      volumes: [{name: config, configMap: {name: llm-user-otel-config}}, {name: buffer, persistentVolumeClaim: {claimName: llm-user-otel-buffer}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-user-otel}
+spec:
+  selector: {app: llm-user-otel}
+  ports: [{name: grpc, port: 4317, targetPort: grpc}, {name: http, port: 4318, targetPort: http}]

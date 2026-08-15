@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-user-api}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-user-api}}
+  template:
+    metadata: {labels: {app: llm-user-api}}
+    spec:
+      serviceAccountName: llm-user-controller
+      containers:
+        - name: api
+          image: grid-qa-llm-user:dev
+          envFrom: [{configMapRef: {name: llm-user-suite-config}}, {secretRef: {name: llm-user-suite-env}}]
+          env:
+            - {name: LLM_USER_ROLE, value: api}
+          ports: [{name: http, containerPort: 8080}]
+          startupProbe: {httpGet: {path: /health, port: http}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {httpGet: {path: /health, port: http}, initialDelaySeconds: 3, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 15, failureThreshold: 3}
+          resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-user-api}
+spec: {selector: {app: llm-user-api}, ports: [{name: http, port: 8080, targetPort: http}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-user-worker}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-user-worker}}
+  template:
+    metadata: {labels: {app: llm-user-worker}}
+    spec:
+      containers:
+        - name: worker
+          image: grid-qa-llm-user:dev
+          envFrom: [{configMapRef: {name: llm-user-suite-config}}, {secretRef: {name: llm-user-suite-env}}]
+          env: [{name: LLM_USER_ROLE, value: worker}]
+          startupProbe: {httpGet: {path: /health, port: 8080}, failureThreshold: 30, periodSeconds: 2}
+          livenessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 15, failureThreshold: 3}
+          resources: {requests: {cpu: 500m, memory: 512Mi}, limits: {cpu: "2", memory: 2Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-user-scheduler}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-user-scheduler}}
+  template:
+    metadata: {labels: {app: llm-user-scheduler}}
+    spec:
+      serviceAccountName: llm-user-controller
+      containers:
+        - name: scheduler
+          image: grid-qa-llm-user:dev
+          envFrom: [{configMapRef: {name: llm-user-suite-config}}, {secretRef: {name: llm-user-suite-env}}]
+          env: [{name: LLM_USER_ROLE, value: scheduler}]
+          startupProbe: {httpGet: {path: /health, port: 8080}, failureThreshold: 30, periodSeconds: 2}
+          livenessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 15, failureThreshold: 3}
+          resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-user-console}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: llm-user-console}}
+  template:
+    metadata: {labels: {app: llm-user-console}}
+    spec:
+      containers:
+        - name: console
+          image: grid-qa-llm-user-console:dev
+          ports: [{name: http, containerPort: 8080}]
+          startupProbe: {httpGet: {path: /, port: http}, failureThreshold: 30, periodSeconds: 2}
+          readinessProbe: {httpGet: {path: /, port: http}, initialDelaySeconds: 3, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /, port: http}, periodSeconds: 15, failureThreshold: 3}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 250m, memory: 256Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-user-console}
+spec: {selector: {app: llm-user-console}, ports: [{name: http, port: 8080, targetPort: http}]}

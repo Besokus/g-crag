@@ -429,10 +429,18 @@ async def health():
         "llm": {"provider": settings.LLM_PROVIDER, "keyConfigured": _key_ok("llm")},
         "embedding": {"provider": settings.EMB_PROVIDER, "keyConfigured": _key_ok("emb")},
     }
+    observer_configured = bool(
+        settings.LLM_USER_OBSERVER_ENABLED
+        and settings.LLM_USER_OBSERVER_USER_HASH_SECRET
+        and (settings.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or settings.OTEL_EXPORTER_OTLP_ENDPOINT)
+    )
     all_ok = all(v == "ok" for v in checks.values())
     return success(
         data={"status": "healthy" if all_ok else "degraded", "checks": checks,
-              "providers": providers, "version": settings.APP_VERSION}
+              "providers": providers,
+              "llmUserObserver": {"enabled": settings.LLM_USER_OBSERVER_ENABLED,
+                                  "configured": observer_configured},
+              "version": settings.APP_VERSION}
     )
 
 
@@ -443,6 +451,7 @@ from app.routers import (  # noqa: E402
     kg,
     knowledge_governance,
     knowledge_evolution,
+    integrations,
     memory,
     qa,
     realtime_event,
@@ -467,6 +476,7 @@ app.include_router(task_center.router, prefix=settings.API_PREFIX)
 app.include_router(realtime_event.router, prefix=settings.API_PREFIX)
 app.include_router(knowledge_governance.router, prefix=settings.API_PREFIX)
 app.include_router(knowledge_evolution.router, prefix=settings.API_PREFIX)
+app.include_router(integrations.router, prefix=settings.API_PREFIX)
 app.include_router(mcp_router, prefix=settings.API_PREFIX)
 
 
@@ -494,7 +504,24 @@ from app.core import metrics  # noqa: E402
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     start = time.time()
-    response = await call_next(request)
+    from app.core.llm_user_observer import finish_http, http_server_span
+
+    response = None
+    with http_server_span(request) as observer_span:
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            finish_http(
+                observer_span, status_code=500,
+                duration_ms=(time.time() - start) * 1000, error=exc,
+            )
+            raise
+        trace_id = finish_http(
+            observer_span, status_code=response.status_code,
+            duration_ms=(time.time() - start) * 1000,
+        )
+        if trace_id:
+            response.headers["X-Trace-ID"] = trace_id
     try:
         metrics.REQUESTS.labels(request.method, request.url.path, str(response.status_code)).inc()
         metrics.LATENCY.labels(request.url.path).observe(time.time() - start)

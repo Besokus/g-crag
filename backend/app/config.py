@@ -302,6 +302,17 @@ class Settings(BaseSettings):
     OTEL_SAMPLE_RATE: float = 1.0          # 采样率：开发期 1.0(100%)，上线后 0.1(10%) + 异常必采
     OTEL_ENDPOINT: str = "http://localhost:3001/api/public/otel"  # Langfuse OTLP HTTP 端点
     OTEL_SERVICE_NAME: str = "grid-qa-backend"  # OTel service.name 标识
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""  # 标准 OTLP collector 基地址；LLM User 探针优先使用
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: str = ""  # 显式 traces 接口，例 http://collector:4318/v1/traces
+    LLM_USER_OBSERVER_ENABLED: bool = False
+    LLM_USER_OBSERVER_USER_HASH_SECRET: str = ""
+    LLM_USER_OBSERVER_QUEUE_SIZE: int = 2048
+    LLM_USER_OBSERVER_BATCH_SIZE: int = 256
+    LLM_USER_OBSERVER_CAPTURE_TEXT: bool = False  # 显式开启后也只采集规则脱敏摘要
+    LLM_USER_CALLBACK_SECRET: str = ""          # 评测服务回调 HMAC 密钥，未配置时拒绝入口
+    LLM_USER_CALLBACK_MAX_SKEW_SECONDS: int = 300
+    LLM_USER_SUITE_EVENT_URL: str = ""          # 测试实例草稿回流后通知评测套件复测
+    LLM_USER_SUITE_EVENT_SECRET: str = ""       # 与套件 LLM_USER_GRID_EVENT_SECRET 对应
     # ---------- 链路 trace 可视化（per-request 瀑布图，定位"卡在哪个节点"） ----------
     QA_TRACE_ENABLE: bool = True           # 总开关：采集各阶段耗时随响应返回前端 + 落库
     QA_TRACE_SAMPLE_RATE: float = 1.0      # 落库采样率（响应体 trace 不采样，实时展示必带）

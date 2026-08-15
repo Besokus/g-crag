@@ -150,6 +150,40 @@ async def _generate_draft(db, cluster_obj, evidence, tenant, model_type):
     }
 
 
+async def _llm_user_links(db, tenant, queries):
+    """Correlate evidence-gap fuel with durable LLM-user evaluation DomainEvents."""
+    from app.models.domain_event import DomainEvent
+
+    normalized = {str(query).strip() for query in queries if str(query).strip()}
+    if not normalized:
+        return []
+    cutoff = utcnow() - timedelta(days=30)
+    rows = (await db.execute(select(DomainEvent).where(
+        DomainEvent.tenant_id == tenant,
+        DomainEvent.event_type == "llm_user.eval.completed",
+        DomainEvent.occurred_at >= cutoff,
+    ).order_by(DomainEvent.occurred_at.desc()).limit(1000))).scalars().all()
+    links = []
+    seen = set()
+    for event in rows:
+        payload = event.payload or {}
+        if str(payload.get("query", "")).strip() not in normalized:
+            continue
+        run_id = str(payload.get("runId", ""))
+        scenario_version_id = str(payload.get("scenarioVersionId", ""))
+        key = (run_id, scenario_version_id)
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        links.append({
+            "runId": run_id,
+            "scenarioVersionId": scenario_version_id,
+            "eventId": event.id,
+            "score": (payload.get("scores") or {}).get("outcome"),
+        })
+    return links[:20]
+
+
 # ===== T6: run_scan 编排 + 入队 =====
 async def _embed(queries):
     from app.services import embedding_service
@@ -245,6 +279,9 @@ async def run_scan(db, tenant, *, since_hours=168, model_type=None):
         if evi is None:
             continue
         d = await _generate_draft(db, c, evi, tenant, model_type)
+        links = await _llm_user_links(db, tenant, [m["query"] for m in c["members"]])
+        if links:
+            evi["llm_user_links"] = links
         db.add(KnowledgeEvolutionDraft(
             id=uuid.uuid4().hex, tenant_id=tenant, cluster_id=c["cluster_id"],
             representative_query=c["representative_query"],
@@ -344,9 +381,37 @@ async def _persist_chunk_to_kb(db, draft):
     )
 
 
+async def _publish_llm_user_retests(draft):
+    evidence = json.loads(draft.gap_evidence_json or "{}")
+    from app.events.registry import publish_event
+
+    for link in evidence.get("llm_user_links", [])[:20]:
+        await publish_event(
+            "knowledge_evolution.draft.indexed",
+            {
+                "draftId": draft.id,
+                "runId": link.get("runId", ""),
+                "scenarioVersionId": link.get("scenarioVersionId", ""),
+                "tenantId": draft.tenant_id,
+                "indexedAt": draft.indexed_at.isoformat() if draft.indexed_at else None,
+            },
+            source="knowledge-evolution",
+            aggregate_type="knowledge_evolution_draft",
+            aggregate_id=draft.id,
+            tenant_id=draft.tenant_id,
+            idempotency_key=f"llm-user-retest:{draft.id}:{link.get('runId', '')}",
+            correlation_id=str(link.get("runId", "")),
+        )
+
+
 async def reflow_to_kb(db, draft):
     """approved → 回流(indexed)。幂等：已 indexed 直接返回 chunk_id，不重复写。"""
     if draft.status == "indexed":
+        try:
+            await _publish_llm_user_retests(draft)
+        except Exception as exc:
+            degraded("llm_user_evolution_event", exc, f"draft={draft.id}")
+            raise
         return draft.chunk_id
     if draft.status != "approved":
         raise ValueError("仅 approved 可回流")
@@ -362,6 +427,11 @@ async def reflow_to_kb(db, draft):
     draft.status = "indexed"
     draft.indexed_at = utcnow()
     await db.commit()
+    try:
+        await _publish_llm_user_retests(draft)
+    except Exception as exc:
+        degraded("llm_user_evolution_event", exc, f"draft={draft.id}")
+        raise
     return chunk_id
 
 

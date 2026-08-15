@@ -1,5 +1,6 @@
 """知识库自进化闭环 API。复刻 knowledge_governance 的 scan 入队 + review 范式。"""
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import DOC_MANAGE, DOC_READ
@@ -7,6 +8,7 @@ from app.core.response import BizError, success
 from app.db.session import get_db
 from app.dependencies import require_perm
 from app.models.user import User
+from app.models.knowledge_evolution import KnowledgeEvolutionDraft
 from app.schemas.knowledge_evolution import EvolutionScanRequest, DraftReviewRequest, DraftWithdrawRequest
 from app.services import knowledge_evolution_service as ev
 from app.services import task_queue_service
@@ -68,6 +70,22 @@ async def draft_withdraw(draft_id: str, body: DraftWithdrawRequest, db: AsyncSes
     except ValueError as e:
         raise BizError(str(e), 400)
     return success(data, "已撤回")
+
+
+@router.post("/drafts/{draft_id}/reflow")
+async def draft_reflow(draft_id: str, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(require_perm(DOC_MANAGE))):
+    row = (await db.execute(select(KnowledgeEvolutionDraft).where(
+        KnowledgeEvolutionDraft.id == draft_id,
+        KnowledgeEvolutionDraft.tenant_id == user.tenant_id,
+    ))).scalar_one_or_none()
+    if not row:
+        raise BizError("草稿不存在", 404)
+    try:
+        chunk_id = await ev.reflow_to_kb(db, row)
+    except ValueError as e:
+        raise BizError(str(e), 400)
+    return success({"draftId": row.id, "status": row.status, "chunkId": chunk_id}, "已回流并触发关联复测")
 
 
 @router.get("/stats")

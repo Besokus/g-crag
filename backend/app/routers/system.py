@@ -25,8 +25,19 @@ router = APIRouter(prefix="/system", tags=["系统-用户/权限/配置"])
 
 @router.post("/login")
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
-    data = await authenticate(db, body.username, body.password)
+    from app.core.llm_user_observer import emit
+    try:
+        data = await authenticate(db, body.username, body.password)
+    except Exception:
+        emit("auth.login.failed", {"reason": "invalid_credentials"}, username=body.username)
+        raise
     await write_log(db, body.username, "登录", f"用户 {body.username} 登录系统")
+    logged_in_user = (await db.execute(select(User).where(User.username == body.username))).scalar_one_or_none()
+    emit(
+        "auth.login.succeeded", {"role": data.get("role", "")},
+        username=body.username,
+        tenant=logged_in_user.tenant_id if logged_in_user else "default",
+    )
     return success(data, "登录成功")
 
 

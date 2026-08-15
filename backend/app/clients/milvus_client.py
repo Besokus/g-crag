@@ -19,6 +19,27 @@ _connected = False
 _col_cache: dict = {}   # Collection 复用 + load 一次（避免每次 search 重复 LoadCollection RPC，实测偶发拖到 1.7s）
 
 
+def document_collections() -> tuple[tuple[str, int], ...]:
+    """返回当前部署实际使用的文档 collection 及维度。
+
+    纯 BGE 模式只创建、加载和维护 BGE collection，避免本地演示环境
+    访问历史 1024 维云向量空间。
+    """
+    if settings.EMB_PROVIDER == "bge":
+        return ((settings.MILVUS_COLLECTION_BGE, settings.BGE_DIM),)
+    return (
+        (settings.MILVUS_COLLECTION, settings.EMBEDDING_DIM),
+        (settings.MILVUS_COLLECTION_BGE, settings.BGE_DIM),
+    )
+
+
+def primary_document_collection() -> str:
+    """返回与当前主 embedding provider 匹配的文档 collection。"""
+    if settings.EMB_PROVIDER == "bge":
+        return settings.MILVUS_COLLECTION_BGE
+    return settings.MILVUS_COLLECTION
+
+
 def _connect():
     global _connected
     if not _connected:
@@ -56,10 +77,10 @@ def _ensure_one(name: str, dim: int) -> None:
 
 
 def ensure_collections() -> None:
-    """确保 云 + bge 双 collection 存在。"""
+    """确保当前部署所需的文档 collection 存在。"""
     _connect()
-    _ensure_one(settings.MILVUS_COLLECTION, settings.EMBEDDING_DIM)
-    _ensure_one(settings.MILVUS_COLLECTION_BGE, settings.BGE_DIM)
+    for name, dim in document_collections():
+        _ensure_one(name, dim)
 
 
 def insert_chunks(collection_name, vectors, texts, doc_ids, doc_names, chunk_idxs) -> int:
@@ -103,16 +124,16 @@ def search(collection_name, query_vec, topk: int = 10, ef: int | None = None) ->
 
 
 def delete_by_doc(doc_id: str) -> None:
-    """联动删除云 + bge 两个 collection。"""
+    """从当前部署使用的文档 collection 联动删除。"""
     _connect()
-    for name in (settings.MILVUS_COLLECTION, settings.MILVUS_COLLECTION_BGE):
+    for name, _dim in document_collections():
         if utility.has_collection(name):
             Collection(name).delete(f'doc_id == "{doc_id}"')
 
 
 def num_entities(collection_name: str | None = None) -> int:
     _connect()
-    return Collection(collection_name or settings.MILVUS_COLLECTION).num_entities
+    return Collection(collection_name or primary_document_collection()).num_entities
 
 
 # ===== N1 Agent 记忆 collection =====

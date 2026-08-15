@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     BACKEND_PORT: int = 8001   # 本机 8000 被 Manager.exe 占用，固定 8001
     API_PREFIX: str = "/api"
     DEBUG: bool = True
+    STARTUP_DEPENDENCY_RETRIES: int = 0   # >0 时启动前等待 MySQL（单 Pod 演示模式）
+    STARTUP_DEPENDENCY_INTERVAL: float = 2.0
+    STARTUP_COMPONENT_RETRIES: int = 1    # >1 时 MinIO/Milvus 初始化失败会在启动期重试
 
     # ---------- MySQL ----------
     DATABASE_URL: str = (
@@ -111,6 +114,10 @@ class Settings(BaseSettings):
     # ---------- MySQL 二级缓存（Redis LRU 淘汰持久化）----------
     CACHE_PERSIST_ENABLE: bool = True     # Write-Through 双写 MySQL
     CACHE_PERSIST_CLEANUP_HOURS: int = 6  # 应用层清理周期（小时），兜底 MySQL Event Scheduler
+    CACHE_WARMUP_ENABLE: bool = True       # 启动和周期预热开关（本地演示可关闭）
+    LOG_ARCHIVE_ENABLE: bool = True        # 操作日志自动归档开关
+    BACKUP_CRON_HOURS: float = 3.0         # <=0 关闭定时全量备份
+    TASK_WORKERS_ENABLE: bool = True       # 持久化任务/事件后台 worker 开关
     CACHE_TIERED_TTL_ENABLE: bool = True  # 分层 TTL：手册 7d / 案例 3d / 实时 5min
     # ---------- B2/B3 缓存命中滑动续期（默认关，opt-in）----------
     CACHE_SLIDE_TTL_ENABLE: bool = False        # B2：L1 命中时 EXPIRE 续期，热 query 保活防 evict
@@ -127,6 +134,7 @@ class Settings(BaseSettings):
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = "neo4j123456"
     KG_RAG_ENABLE: bool = True   # 问答时融合知识图谱结构化上下文(GraphRAG)
+    KG_AUTO_EXTRACT_ENABLE: bool = True  # 文档向量化后是否后台调用 LLM 自动抽取三元组
     KG_TOKENIZE_CACHE_ENABLE: bool = False  # B5：jieba 分词结果 Redis 缓存（默认关，opt-in）
 
     # ---------- 重排 ----------
@@ -257,6 +265,9 @@ class Settings(BaseSettings):
     # ---------- 知识自进化草稿回流回测（B5）----------
     EVOLUTION_RETEST_ENABLE: bool = True   # 回测开关：run_scan 入口对 indexed 草稿重跑 member_queries 算 lift
     EVOLUTION_RETEST_AFTER_DAYS: int = 7   # 回测触发阈值：仅 indexed_at 早于 N 天的草稿参与回测（给回流留生效窗口）
+    KNOWLEDGE_EVOLUTION_CRON_HOURS: float = 24.0  # <=0 关闭自动扫描
+    EVIDENCE_GAP_DEEP_INTERVAL: float = 180.0     # <=0 关闭自动深度补全
+    EVIDENCE_GAP_DEEP_BATCH: int = 5
 
     # ---------- judge 聚合差评文档 → 治理 issue（B3 路径3，不动在线权重）----------
     DOC_QUALITY_ISSUE_ENABLE: bool = True        # 开关：governance scan 末尾聚合差评文档生成 quality_low issue
@@ -303,6 +314,7 @@ class Settings(BaseSettings):
     MEMORY_SOFT_DELETE_DAYS: int = 30      # 软删除审计保留天数（过期物理删除）
     MEMORY_EXTRACT_MIN_TURNS: int = 3      # 工具调用型长对话累积 ≥N 轮才触发抽取
     MEMORY_COLLECTION: str = "memory_collection"  # Milvus 记忆 collection 名
+    MEMORY_ENABLE: bool = True              # Agent 长期记忆 collection/检索总开关
     MEMORY_DECAY_CRON_HOURS: float = 24.0  # 记忆衰减+软删物理删除 周期(小时，<=0 关闭)；decay() 已实现但需 cron 触发
 
     # ---------- N2 MCP 工具总线 ----------

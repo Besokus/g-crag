@@ -147,4 +147,5 @@ async def init_db() -> None:
                 )
             )
             await db.commit()
-            print(f"[init_db] 已创建默认管理员：{settings.ADMIN_USERNAME} / {settings.ADMIN_PASSWORD}")
+            # 密码可能来自 Kubernetes Secret，绝不能写入容器日志。
+            print(f"[init_db] 已创建默认管理员：{settings.ADMIN_USERNAME}")

@@ -159,7 +159,7 @@ def _dump_milvus_sync() -> dict:
     from app.clients import milvus_client
     milvus_client.ensure_collections()  # 连接(default alias) + load 两 collection，复用项目连接
     out: dict = {}
-    for cname in [settings.MILVUS_COLLECTION, settings.MILVUS_COLLECTION_BGE]:
+    for cname, _dim in milvus_client.document_collections():
         col = Collection(cname)
         fields = [f.name for f in col.schema.fields]
         ents: list = []
@@ -245,7 +245,7 @@ async def restore_milvus(filename: str) -> dict:
     def _drop():
         from app.clients import milvus_client
         milvus_client._connect()  # 确保 default 连接（utility.has_collection/drop 需要）
-        for cname in [settings.MILVUS_COLLECTION, settings.MILVUS_COLLECTION_BGE]:
+        for cname, _dim in milvus_client.document_collections():
             try:
                 if utility.has_collection(cname):
                     utility.drop_collection(cname)

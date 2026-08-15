@@ -1,0 +1,665 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: term-extractor-test
+  namespace: nmt-llm
+  labels:
+    app.kubernetes.io/name: grid-qa
+    app.kubernetes.io/instance: term-extractor-test
+    workload.user.cattle.io/workloadselector: apps.deployment-nmt-llm-term-extractor-test
+spec:
+  progressDeadlineSeconds: 1800
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      workload.user.cattle.io/workloadselector: apps.deployment-nmt-llm-term-extractor-test
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grid-qa
+        app.kubernetes.io/instance: term-extractor-test
+        workload.user.cattle.io/workloadselector: apps.deployment-nmt-llm-term-extractor-test
+    spec:
+      imagePullSecrets:
+        - name: harbor-youdao
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: init-data-dirs
+          image: ${BACKEND_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - >-
+              for d in mysql redis minio-docs minio-milvus etcd milvus neo4j ollama backend hf-cache;
+              do mkdir -p "/data/$d"; done;
+              cp -a /opt/huggingface/. /data/hf-cache/;
+              chmod -R 0777 /data;
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /data
+      containers:
+        - name: frontend
+          image: ${FRONTEND_IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 18500
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            failureThreshold: 6
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            failureThreshold: 6
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        - name: backend
+          image: ${BACKEND_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CONFIG_SOURCE
+              value: env
+            - name: DEBUG
+              value: "false"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: DATABASE_URL
+            - name: MYSQL_HOST
+              value: 127.0.0.1
+            - name: MYSQL_PORT
+              value: "3306"
+            - name: MYSQL_DATABASE
+              value: grid_qa
+            - name: MYSQL_USER
+              value: grid
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MYSQL_PASSWORD
+            - name: MINIO_ENDPOINT
+              value: 127.0.0.1:9000
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MINIO_DOCS_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MINIO_DOCS_SECRET_KEY
+            - name: REDIS_URL
+              value: redis://127.0.0.1:6379/0
+            - name: MILVUS_HOST
+              value: 127.0.0.1
+            - name: MILVUS_PORT
+              value: "19530"
+            - name: NEO4J_URI
+              value: bolt://127.0.0.1:7687
+            - name: NEO4J_USER
+              value: neo4j
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: NEO4J_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: JWT_SECRET
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: ADMIN_USERNAME
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: ADMIN_PASSWORD
+            - name: LLM_PROVIDER
+              value: ollama
+            - name: LLM_FALLBACK_CHAIN
+              value: ollama
+            - name: LLM_HEALTH_PROBE_ENABLE
+              value: "false"
+            - name: LLM_LOCAL_TIMEOUT
+              value: "300"
+            - name: LLM_MAX_TOKENS
+              value: "512"
+            - name: OLLAMA_BASE_URL
+              value: http://127.0.0.1:11434
+            - name: OLLAMA_MODEL
+              value: qwen2.5:1.5b-instruct-q4_K_M
+            - name: EMB_PROVIDER
+              value: bge
+            - name: EMBEDDING_DIM
+              value: "512"
+            - name: BGE_DIM
+              value: "512"
+            - name: BGE_MODEL
+              value: BAAI/bge-small-zh-v1.5
+            - name: HF_HOME
+              value: /root/.cache/huggingface
+            - name: HF_HUB_CACHE
+              value: /root/.cache/huggingface/hub
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: KG_AUTO_EXTRACT_ENABLE
+              value: "false"
+            - name: KG_RAG_ENABLE
+              value: "false"
+            - name: RERANK_ENABLE
+              value: "false"
+            - name: ONLINE_FAITHFULNESS_ENABLE
+              value: "false"
+            - name: EVAL_EMIT_ENABLE
+              value: "false"
+            - name: QUERY_REWRITE_ENABLE
+              value: "false"
+            - name: REWRITE_EVAL_ENABLE
+              value: "false"
+            - name: STANDALONE_REWRITE_ENABLE
+              value: "false"
+            - name: EVIDENCE_GAP_AUTO_COLLECT
+              value: "false"
+            - name: CRAG_REFUSED_TO_GAP_ENABLE
+              value: "false"
+            - name: CRAG_ENABLE
+              value: "false"
+            - name: CONFIDENCE_OVERCONFIDENT_ENABLE
+              value: "false"
+            - name: STARTUP_DEPENDENCY_RETRIES
+              value: "180"
+            - name: STARTUP_DEPENDENCY_INTERVAL
+              value: "2"
+            - name: STARTUP_COMPONENT_RETRIES
+              value: "180"
+            - name: KNOWLEDGE_EVOLUTION_CRON_HOURS
+              value: "0"
+            - name: EVIDENCE_GAP_DEEP_INTERVAL
+              value: "0"
+            - name: FIX_RATE_ENABLE
+              value: "false"
+            - name: MEMORY_DECAY_CRON_HOURS
+              value: "0"
+            - name: MEMORY_ENABLE
+              value: "false"
+            - name: CACHE_WARMUP_ENABLE
+              value: "false"
+            - name: CACHE_PERSIST_ENABLE
+              value: "false"
+            - name: LOG_ARCHIVE_ENABLE
+              value: "false"
+            - name: BACKUP_CRON_HOURS
+              value: "0"
+            - name: TASK_WORKERS_ENABLE
+              value: "false"
+            - name: OTEL_SAMPLE_RATE
+              value: "0"
+            - name: VLM_ENABLE
+              value: "false"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: OMP_NUM_THREADS
+              value: "4"
+            - name: MKL_NUM_THREADS
+              value: "4"
+          ports:
+            - name: backend
+              containerPort: 8001
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: backend
+            failureThreshold: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - >-
+                  test "$(curl -fsS http://127.0.0.1:8001/health | python -c
+                  'import json,sys; print(json.load(sys.stdin)["data"]["status"])')" = healthy
+            failureThreshold: 12
+            periodSeconds: 10
+            timeoutSeconds: 8
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: backend
+            failureThreshold: 6
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /app/data
+              subPath: backend
+            - name: grid-data
+              mountPath: /root/.cache/huggingface
+              subPath: hf-cache
+        - name: mysql
+          image: ${MYSQL_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_unicode_ci
+            - --default-authentication-plugin=mysql_native_password
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              value: grid_qa
+            - name: MYSQL_USER
+              value: grid
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MYSQL_PASSWORD
+            - name: TZ
+              value: Asia/Shanghai
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+            failureThreshold: 60
+            periodSeconds: 5
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+            failureThreshold: 6
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+            failureThreshold: 6
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 5Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /var/lib/mysql
+              subPath: mysql
+        - name: redis
+          image: ${REDIS_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command:
+            - redis-server
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - 512mb
+            - --maxmemory-policy
+            - allkeys-lru
+          startupProbe:
+            exec:
+              command: [sh, -ec, redis-cli ping | grep -q PONG]
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command: [sh, -ec, redis-cli ping | grep -q PONG]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [sh, -ec, redis-cli ping | grep -q PONG]
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /data
+              subPath: redis
+        - name: minio-docs
+          image: ${MINIO_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MINIO_DOCS_ACCESS_KEY
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MINIO_DOCS_SECRET_KEY
+          startupProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /data
+              subPath: minio-docs
+        - name: etcd
+          image: ${ETCD_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: [etcd]
+          args:
+            - --advertise-client-urls=http://127.0.0.1:2379
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --data-dir=/etcd
+            - --auto-compaction-mode=revision
+            - --auto-compaction-retention=1000
+            - --quota-backend-bytes=4294967296
+          startupProbe:
+            exec:
+              command: [etcdctl, endpoint, health]
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command: [etcdctl, endpoint, health]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [etcdctl, endpoint, health]
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /etcd
+              subPath: etcd
+        - name: minio-milvus
+          image: ${MINIO_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args: ["server", "/data", "--address", ":19000", "--console-address", ":19001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MILVUS_MINIO_ACCESS_KEY
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MILVUS_MINIO_SECRET_KEY
+          startupProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 19000
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 19000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 19000
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /data
+              subPath: minio-milvus
+        - name: milvus
+          image: ${MILVUS_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: [milvus, run, standalone]
+          env:
+            - name: ETCD_ENDPOINTS
+              value: 127.0.0.1:2379
+            - name: MINIO_ADDRESS
+              value: 127.0.0.1
+            - name: MINIO_PORT
+              value: "19000"
+            - name: MINIO_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MILVUS_MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: MILVUS_MINIO_SECRET_KEY
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            failureThreshold: 120
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            failureThreshold: 12
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9091
+            failureThreshold: 6
+            periodSeconds: 30
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              cpu: "3"
+              memory: 7Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /var/lib/milvus
+              subPath: milvus
+        - name: neo4j
+          image: ${NEO4J_IMAGE}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            - name: NEO4J_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: NEO4J_AUTH
+            - name: NEO4J_server_memory_heap_initial__size
+              value: 512m
+            - name: NEO4J_server_memory_heap_max__size
+              value: 1g
+            - name: NEO4J_server_memory_pagecache_size
+              value: 512m
+          startupProbe:
+            tcpSocket:
+              port: 7687
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 7687
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 7687
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /data
+              subPath: neo4j
+        - name: ollama
+          image: ${OLLAMA_IMAGE}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OLLAMA_HOST
+              value: 0.0.0.0:11434
+            # 部分生产节点会把宿主机 GPU 设备全局暴露给普通容器；显式禁用，
+            # 保证该演示环境即使调度到 GPU 节点也只使用 CPU。
+            - name: CUDA_VISIBLE_DEVICES
+              value: "-1"
+            - name: GGML_VK_VISIBLE_DEVICES
+              value: "-1"
+            - name: OLLAMA_KEEP_ALIVE
+              value: 30m
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+          command: [sh, -ec]
+          args:
+            - >-
+              ollama serve & server_pid=$!;
+              until ollama list >/dev/null 2>&1; do sleep 2; done;
+              ollama show qwen2.5:1.5b-instruct-q4_K_M >/dev/null 2>&1 ||
+              ollama pull qwen2.5:1.5b-instruct-q4_K_M;
+              wait
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - ollama list >/dev/null
+            failureThreshold: 120
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - ollama show qwen2.5:1.5b-instruct-q4_K_M >/dev/null
+            failureThreshold: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -ec
+                - ollama list >/dev/null
+            failureThreshold: 6
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 2Gi
+            limits:
+              cpu: "5"
+              memory: 6Gi
+          volumeMounts:
+            - name: grid-data
+              mountPath: /root/.ollama
+              subPath: ollama
+      volumes:
+        - name: grid-data
+          persistentVolumeClaim:
+            claimName: term-extractor-test-grid-data

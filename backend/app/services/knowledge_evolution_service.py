@@ -369,8 +369,8 @@ async def _delete_chunk_from_milvus(chunk):
     """按 pk 删 Milvus 单条（AI 草稿共享 doc_id，不能用 delete_by_doc）。"""
     try:
         from pymilvus import Collection
-        from app.config import settings
-        col = Collection(settings.MILVUS_COLLECTION)
+        from app.clients import milvus_client
+        col = Collection(milvus_client.primary_document_collection())
         col.delete(f'pk == "{chunk.doc_id}_{chunk.chunk_idx}"')
         col.flush()
     except Exception as e:

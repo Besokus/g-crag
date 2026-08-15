@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: term-extractor-test-grid-seed
+  namespace: nmt-llm
+  labels:
+    app.kubernetes.io/name: grid-qa
+    app.kubernetes.io/component: seed
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: grid-qa
+        app.kubernetes.io/component: seed
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: harbor-youdao
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: seed
+          image: ${BACKEND_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: [python, /seed/seed_kb.py]
+          env:
+            - name: GRID_QA_BASE_URL
+              value: http://term-extractor-test:18500/api
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: ADMIN_USERNAME
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: ADMIN_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: seed-source
+              mountPath: /seed
+              readOnly: true
+      volumes:
+        - name: seed-source
+          configMap:
+            name: term-extractor-test-grid-seed
+            items:
+              - key: seed_kb.py
+                path: seed_kb.py
+              - key: doc01.txt
+                path: 故障案例-110kV_SF6断路器灭弧室气体泄漏.txt
+              - key: doc02.txt
+                path: 故障案例-GIS支撑绝缘子内部气泡局部放电.txt
+              - key: doc03.txt
+                path: 故障案例-特高压GIS_TA气室盆式绝缘子放电.txt
+              - key: doc04.txt
+                path: 安全规程-电力安全工作规程变电站两票与技术措施.txt
+              - key: doc05.txt
+                path: 操作规程-主变压器由运行转检修操作规程.txt
+              - key: doc06.txt
+                path: 操作规程-变电站倒闸操作规程与典型操作票.txt
+              - key: doc07.txt
+                path: 运维手册-SF6断路器检修维护规程.txt
+              - key: doc08.txt
+                path: 运维手册-继电保护装置运行维护规程.txt

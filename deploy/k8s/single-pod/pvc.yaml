@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: term-extractor-test-grid-data
+  namespace: nmt-llm
+  labels:
+    app.kubernetes.io/name: grid-qa
+    app.kubernetes.io/instance: term-extractor-test
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: cephfs-sas

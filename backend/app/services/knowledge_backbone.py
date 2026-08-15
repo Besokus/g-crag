@@ -174,7 +174,7 @@ async def persist_chunk(
 
     vec = (await get_embedding_provider(settings.EMB_PROVIDER).embed([content]))[0]
     await asyncio.to_thread(
-        milvus_client.insert_chunks, settings.MILVUS_COLLECTION, [vec], [content],
+        milvus_client.insert_chunks, milvus_client.primary_document_collection(), [vec], [content],
         [doc_id], [doc_name], [cnt],
     )
     return chunk_id

@@ -15,12 +15,59 @@ from app.core.obs import degraded
 from app.core.response import BizError, error, success
 
 
+async def _wait_for_startup_dependencies() -> None:
+    """在多容器同 Pod 启动时等待 MySQL；默认关闭以保持原启动行为。"""
+    retries = max(0, int(getattr(settings, "STARTUP_DEPENDENCY_RETRIES", 0)))
+    if retries <= 0:
+        return
+    interval = max(0.1, float(getattr(settings, "STARTUP_DEPENDENCY_INTERVAL", 2)))
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            from sqlalchemy import text
+            from app.db.session import engine
+
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            return
+        except Exception as e:
+            last_error = e
+            if attempt == retries:
+                break
+            await asyncio.sleep(interval)
+    raise RuntimeError(f"MySQL 启动等待超时（{retries} 次）: {last_error}")
+
+
+async def _retry_startup_component(name: str, fn, *, threaded: bool = False) -> None:
+    """可配置地重试同 Pod 组件初始化；默认 1 次保持原启动降级语义。"""
+    retries = max(1, int(getattr(settings, "STARTUP_COMPONENT_RETRIES", 1)))
+    interval = max(0.1, float(getattr(settings, "STARTUP_DEPENDENCY_INTERVAL", 2)))
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            if threaded:
+                await asyncio.to_thread(fn)
+            else:
+                result = fn()
+                if asyncio.iscoroutine(result):
+                    await result
+            return
+        except Exception as e:
+            last_error = e
+            if attempt == retries:
+                break
+            await asyncio.sleep(interval)
+    raise RuntimeError(f"{name} 启动等待超时（{retries} 次）: {last_error}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ---- 启动 ----
     from app.core.logging import setup_logging
 
     setup_logging()
+
+    await _wait_for_startup_dependencies()
 
     # Nacos 配置覆盖（若 CONFIG_SOURCE=nacos，在连接任何服务前拉取覆盖 .env）
     try:
@@ -38,24 +85,25 @@ async def lifespan(app: FastAPI):
     from app.clients.minio_client import init_bucket
 
     try:
-        await init_bucket()  # 确保 MinIO bucket
+        await _retry_startup_component("MinIO", init_bucket)  # 确保 MinIO bucket
     except Exception as e:
         degraded("minio_init_bucket", e, "MinIO 未启动？跳过 bucket 初始化")
 
     from app.clients.milvus_client import ensure_collections
 
     try:
-        ensure_collections()  # 确保 云 + bge 双 collection
+        await _retry_startup_component("Milvus", ensure_collections, threaded=True)
     except Exception as e:
         degraded("milvus_ensure_collections", e, "Milvus 未启动？跳过 collection 初始化")
 
     # N1：确保记忆 collection（memory_collection）存在
-    try:
-        from app.clients.milvus_client import ensure_memory_collection
-        ensure_memory_collection()
-        print("[memory] Milvus memory_collection 已就绪")
-    except Exception as e:
-        degraded("milvus_memory_collection", e, "记忆 collection 初始化跳过")
+    if getattr(settings, "MEMORY_ENABLE", True):
+        try:
+            from app.clients.milvus_client import ensure_memory_collection
+            await _retry_startup_component("Milvus memory", ensure_memory_collection, threaded=True)
+            print("[memory] Milvus memory_collection 已就绪")
+        except Exception as e:
+            degraded("milvus_memory_collection", e, "记忆 collection 初始化跳过")
 
     # 预热本地 bge 模型：首次加载需从 HF 下载(经代理 ~80s)，懒加载会让后端启动后
     # 首个问答触发该延迟(用户体感“同一问题偶尔 100s”)。提前在启动期加载进内存，
@@ -120,12 +168,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[llm] 健康探活后台任务启动跳过：{e}")
     # C2 缓存预热周期刷新：每 6h 回写热点 + golden 到 Redis（防 TTL 过期 + 覆盖新高频）
-    try:
-        from app.services.cache_warmup import warmup_loop
-        app.state.cache_warmup_task = asyncio.create_task(warmup_loop())
-        print("[cache] 预热 loop 已挂载（每 6h 刷新热点+golden）")
-    except Exception as e:
-        print(f"[cache] 预热 loop 启动跳过：{e}")
+    if getattr(settings, "CACHE_WARMUP_ENABLE", True):
+        try:
+            from app.services.cache_warmup import warmup_loop
+            app.state.cache_warmup_task = asyncio.create_task(warmup_loop())
+            print("[cache] 预热 loop 已挂载（每 6h 刷新热点+golden）")
+        except Exception as e:
+            print(f"[cache] 预热 loop 启动跳过：{e}")
     # 缓存持久化：后台清理 + 指标刷新（Phase 2-3）
     if getattr(settings, "CACHE_PERSIST_ENABLE", False):
         try:
@@ -138,41 +187,46 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[cache] 缓存持久化启动跳过：{e}")
     # 缓存预热：从 MySQL/golden_qa.json 预载高频问题到 Redis（Phase 3）
-    try:
-        from app.services.cache_warmup import warmup_hot_queries, warmup_from_file
-        from app.db.session import AsyncSessionLocal
-        async with AsyncSessionLocal() as _db:
-            n = await warmup_hot_queries(_db, topk=50)
-            if n:
-                print(f"[cache] 热点预热 {n} 条（来自 qa_cache hit_count Top-50）")
-            m = await warmup_from_file()
-            if m:
-                print(f"[cache] golden 预热 {m} 条")
-    except Exception as e:
-        print(f"[cache] 预热跳过：{e}")
+    if getattr(settings, "CACHE_WARMUP_ENABLE", True):
+        try:
+            from app.services.cache_warmup import warmup_hot_queries, warmup_from_file
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as _db:
+                n = await warmup_hot_queries(_db, topk=50)
+                if n:
+                    print(f"[cache] 热点预热 {n} 条（来自 qa_cache hit_count Top-50）")
+                m = await warmup_from_file()
+                if m:
+                    print(f"[cache] golden 预热 {m} 条")
+        except Exception as e:
+            print(f"[cache] 预热跳过：{e}")
     # 操作日志自动归档：每日把超保留期的日志导出 jsonl 再删（BRD §4.5.2）
-    try:
-        from app.services.log_archive_service import archive_loop
-        app.state.log_archive_task = asyncio.create_task(archive_loop())
-        print("[log-archive] 日志归档后台任务已启动")
-    except Exception as e:
-        print(f"[log-archive] 启动跳过：{e}")
+    if getattr(settings, "LOG_ARCHIVE_ENABLE", True):
+        try:
+            from app.services.log_archive_service import archive_loop
+            app.state.log_archive_task = asyncio.create_task(archive_loop())
+            print("[log-archive] 日志归档后台任务已启动")
+        except Exception as e:
+            print(f"[log-archive] 启动跳过：{e}")
     # 三合一全量定时备份：每 3h（MySQL+Redis+Milvus）
-    try:
-        from app.services.backup_service import backup_all_loop
-        app.state.backup_all_task = asyncio.create_task(backup_all_loop(3))
-        print("[backup] 定时全量备份后台任务已启动（每 3h）")
-    except Exception as e:
-        print(f"[backup] 定时备份启动跳过：{e}")
+    _backup_hours = float(getattr(settings, "BACKUP_CRON_HOURS", 3))
+    if _backup_hours > 0:
+        try:
+            from app.services.backup_service import backup_all_loop
+            app.state.backup_all_task = asyncio.create_task(backup_all_loop(_backup_hours))
+            print(f"[backup] 定时全量备份后台任务已启动（每 {_backup_hours}h）")
+        except Exception as e:
+            print(f"[backup] 定时备份启动跳过：{e}")
     # 所有 provider、MCP 工具和运行时配置就绪后再消费积压任务，避免启动窗口内
     # 的主动诊断拿到不完整工具集。任务/事件先落 MySQL，进程重启后可恢复。
-    try:
-        from app.tasks.lifecycle import start_background_workers
+    if getattr(settings, "TASK_WORKERS_ENABLE", True):
+        try:
+            from app.tasks.lifecycle import start_background_workers
 
-        await start_background_workers(app)
-        print("[task-center] realtime/default/low worker 与事件 dispatcher 已启动")
-    except Exception as e:
-        degraded("task_center_start", e, "持久化任务 worker 启动失败")
+            await start_background_workers(app)
+            print("[task-center] realtime/default/low worker 与事件 dispatcher 已启动")
+        except Exception as e:
+            degraded("task_center_start", e, "持久化任务 worker 启动失败")
     # 知识自进化定时扫描（周期 KNOWLEDGE_EVOLUTION_CRON_HOURS，<=0 关闭）
     try:
         from app.services.knowledge_evolution_service import evolution_cron_loop
@@ -185,8 +239,10 @@ async def lifespan(app: FastAPI):
     # 证据补全定时深度补全+落库（周期 EVIDENCE_GAP_DEEP_INTERVAL 秒，<=0 关闭）
     try:
         from app.services.evidence_gap_service import deep_cron_loop
-        app.state.evidence_gap_cron_task = asyncio.create_task(deep_cron_loop("default"))
-        print("[evidence-gap] 证据补全定时深度补全已启动")
+        from app.config import settings as _settings
+        if float(getattr(_settings, "EVIDENCE_GAP_DEEP_INTERVAL", 180)) > 0:
+            app.state.evidence_gap_cron_task = asyncio.create_task(deep_cron_loop("default"))
+            print("[evidence-gap] 证据补全定时深度补全已启动")
     except Exception as e:
         print(f"[evidence-gap] 定时补全启动跳过：{e}")
     # 坏case修复率定时聚合（周期 FIX_RATE_CRON_MINUTES，FIX_RATE_ENABLE=False 或<=0 关闭）
@@ -364,7 +420,8 @@ async def health():
         if role == "llm":
             return {"deepseek": bool(settings.DEEPSEEK_API_KEY),
                     "qwen": bool(settings.DASHSCOPE_API_KEY),
-                    "doubao": bool(settings.ARK_API_KEY)}.get(p, False)
+                    "doubao": bool(settings.ARK_API_KEY),
+                    "ollama": True}.get(p, False)
         return {"qwen": bool(settings.DASHSCOPE_API_KEY),
                 "doubao": bool(settings.ARK_API_KEY), "bge": True}.get(p, False)
 

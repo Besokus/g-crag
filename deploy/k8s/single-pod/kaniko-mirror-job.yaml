@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${MIRROR_JOB}
+  namespace: nmt-llm
+  labels:
+    app.kubernetes.io/name: grid-qa
+    app.kubernetes.io/component: image-mirror
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: harbor-youdao
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: mirror
+          image: gcr.io/kaniko-project/executor:v1.23.2-debug
+          args:
+            - --context=dir:///context
+            - --dockerfile=/context/Dockerfile
+            - --build-arg=SOURCE_IMAGE=${SOURCE_IMAGE}
+            - --destination=${DEST_IMAGE}
+            - --digest-file=/dev/termination-log
+            - --snapshot-mode=redo
+            - --cleanup
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: build-context
+              mountPath: /context
+              readOnly: true
+            - name: docker-config
+              mountPath: /kaniko/.docker
+              readOnly: true
+      volumes:
+        - name: build-context
+          configMap:
+            name: grid-qa-mirror-context
+        - name: docker-config
+          secret:
+            secretName: harbor-youdao
+            items:
+              - key: .dockerconfigjson
+                path: config.json

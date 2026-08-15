@@ -47,6 +47,10 @@ def init_otel(endpoint: str | None = None, sample_rate: float | None = None) -> 
         return
     if sample_rate is not None:
         _sample_rate = sample_rate
+    if _sample_rate <= 0:
+        # 本地演示环境不配置 OTLP 接收端；0 采样时不要创建 exporter/后台发送线程。
+        _initialized = True
+        return
     ep = endpoint or settings.OTEL_ENDPOINT
     resource = Resource.create({
         "service.name": settings.OTEL_SERVICE_NAME,

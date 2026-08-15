@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: term-extractor-test-grid-verify
+  namespace: nmt-llm
+  labels:
+    app.kubernetes.io/name: grid-qa
+    app.kubernetes.io/component: acceptance
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: harbor-youdao
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: verify
+          image: ${BACKEND_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: [python, /verify/verify.py]
+          env:
+            - name: GRID_QA_BASE_URL
+              value: http://term-extractor-test:18500
+            - name: ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: ADMIN_USERNAME
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: term-extractor-test-grid-env
+                  key: ADMIN_PASSWORD
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: verify-source
+              mountPath: /verify
+              readOnly: true
+      volumes:
+        - name: verify-source
+          configMap:
+            name: term-extractor-test-grid-verify

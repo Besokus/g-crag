@@ -1391,6 +1391,10 @@ A: 设 `HF_ENDPOINT=https://hf-mirror.com` 或 `HTTPS_PROXY`,或预下到 HF 缓
 
 **企业级**:RBAC+文档级ACL · 多租户 · 版本管理+回滚 · 双RAG热备 · 纯Python备份恢复 · 日志归档 · 故障预测 · 告警闭环 · WebSocket · 多模态VLM ✅
 
+### 可选 LLM as a User 旁路评测套件
+
+仓库内的 [`llm-user-suite/`](llm-user-suite/) 提供 OTel 脱敏行为采集、Dreaming 剧本生成、API Agent 渐进回放、共享 LLM Judge、自进化草稿联动和回流后 lift 复测。它独立部署且默认关闭，不增加 Grid-QA 长期 sidecar，也不改变业务流量路径。完整配置、K8s 接入和安全边界见 [`llm-user-suite/README.md`](llm-user-suite/README.md)。
+
 ---
 
 ## 📄 许可
@@ -1408,4 +1412,3 @@ A: 设 `HF_ENDPOINT=https://hf-mirror.com` 或 `HTTPS_PROXY`,或预下到 HF 缓
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/chart?repos=zhyese/grid-qa&type=date&logscale&legend=bottom-right&sealed_token=BH1IdkFwGV_G7g92Y6y_xiwrAsEuYk0yJFRyhrCEaibgjKcJM0Y1BvslgG-ydVJiCuawDjhbnuMoaott5HHv06YiOmprKYBgWQN-93CEFWRT-ZvNfNhOxX7oyUuVybSzMQ8IVpxvtGyGmcn8VjVpQenD2ttHXBCePJPLQw_rZo0Fzn3LZahZpz59CPwL)](https://www.star-history.com/?repos=zhyese%2Fgrid-qa&type=date&logscale=&legend=bottom-right)
-

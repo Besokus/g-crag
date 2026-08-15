@@ -44,8 +44,8 @@ _LABELS: dict[str, str] = {
 class TraceCollector:
     """单次问答的 trace 容器。请求入口 new_collector() 创建并绑 contextvar。"""
 
-    def __init__(self, query: str = ""):
-        self.trace_id: str = uuid.uuid4().hex
+    def __init__(self, query: str = "", trace_id: str = ""):
+        self.trace_id: str = trace_id or uuid.uuid4().hex
         self.query: str = (query or "")[:200]
         self.t0: float = time.time()
         self._spans: list[dict] = []
@@ -122,7 +122,13 @@ class TraceCollector:
 
 def new_collector(query: str = "") -> TraceCollector:
     """请求入口调用：创建 collector 并绑到当前 contextvar。"""
-    c = TraceCollector(query)
+    trace_id = ""
+    try:
+        from app.core.otel_genai import get_trace_id
+        trace_id = get_trace_id()
+    except Exception:
+        pass
+    c = TraceCollector(query, trace_id=trace_id)
     _current_collector.set(c)
     return c
 

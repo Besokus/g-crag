@@ -22,7 +22,8 @@ from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from app.config import settings
@@ -37,6 +38,34 @@ _sample_rate: float = settings.OTEL_SAMPLE_RATE
 _initialized: bool = False
 
 
+class _CountingExporter(SpanExporter):
+    def __init__(self, delegate: SpanExporter):
+        self._delegate = delegate
+
+    def export(self, spans):
+        try:
+            result = self._delegate.export(spans)
+            from app.core import metrics
+            metrics.LLM_USER_OBSERVER_EXPORT.labels(
+                "success" if result == SpanExportResult.SUCCESS else "failed"
+            ).inc()
+            return result
+        except Exception:
+            try:
+                from app.core import metrics
+                metrics.LLM_USER_OBSERVER_EXPORT.labels("failed").inc()
+            except Exception:
+                pass
+            return SpanExportResult.FAILURE
+
+    def shutdown(self):
+        return self._delegate.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000):
+        method = getattr(self._delegate, "force_flush", None)
+        return method(timeout_millis) if method else True
+
+
 def init_otel(endpoint: str | None = None, sample_rate: float | None = None) -> None:
     """初始化 OpenTelemetry TracerProvider + OTLP HTTP 导出器（发到 Langfuse）。
 
@@ -47,14 +76,39 @@ def init_otel(endpoint: str | None = None, sample_rate: float | None = None) -> 
         return
     if sample_rate is not None:
         _sample_rate = sample_rate
-    ep = endpoint or settings.OTEL_ENDPOINT
+    observer_enabled = bool(
+        getattr(settings, "LLM_USER_OBSERVER_ENABLED", False)
+        and getattr(settings, "LLM_USER_OBSERVER_USER_HASH_SECRET", "")
+    )
+    if _sample_rate <= 0 and not observer_enabled:
+        # 本地演示环境不配置 OTLP 接收端；0 采样时不要创建 exporter/后台发送线程。
+        _initialized = True
+        return
+    ep = (
+        endpoint
+        or getattr(settings, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+        or (getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/") + "/v1/traces"
+            if getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "") else "")
+        or settings.OTEL_ENDPOINT
+    )
     resource = Resource.create({
         "service.name": settings.OTEL_SERVICE_NAME,
         "service.version": settings.APP_VERSION,
     })
-    provider = TracerProvider(resource=resource)
-    exporter = OTLPSpanExporter(endpoint=ep)
-    provider.add_span_processor(BatchSpanProcessor(exporter))
+    effective_rate = 1.0 if observer_enabled else max(0.0, min(1.0, _sample_rate))
+    provider = TracerProvider(
+        resource=resource,
+        sampler=ParentBased(TraceIdRatioBased(effective_rate)),
+    )
+    exporter = _CountingExporter(OTLPSpanExporter(endpoint=ep))
+    provider.add_span_processor(BatchSpanProcessor(
+        exporter,
+        max_queue_size=max(256, int(getattr(settings, "LLM_USER_OBSERVER_QUEUE_SIZE", 2048))),
+        max_export_batch_size=max(1, min(
+            int(getattr(settings, "LLM_USER_OBSERVER_BATCH_SIZE", 256)),
+            int(getattr(settings, "LLM_USER_OBSERVER_QUEUE_SIZE", 2048)),
+        )),
+    ))
     trace.set_tracer_provider(provider)
     _initialized = True
 

@@ -1,0 +1,15 @@
+from prometheus_client import Counter, Gauge, Histogram
+
+EVENTS_INGESTED = Counter("llm_user_events_ingested_total", "Behavior events ingested", ["kind"])
+EVENTS_DROPPED = Counter("llm_user_events_dropped_total", "Behavior events rejected", ["reason"])
+SESSIONS = Gauge("llm_user_sessions", "Behavior sessions", ["status"])
+DREAM_RUNS = Counter("llm_user_dream_runs_total", "Dreaming runs", ["status"])
+SCENARIOS = Gauge("llm_user_scenarios", "Scenarios", ["status"])
+REPLAY_RUNS = Counter("llm_user_replay_runs_total", "Replay runs", ["verdict"])
+REPLAY_DURATION = Histogram("llm_user_replay_duration_seconds", "Replay run duration")
+JUDGE_SCORE = Histogram("llm_user_judge_score", "Judge score", ["dimension"], buckets=(0, .2, .4, .6, .7, .85, 1.0))
+CALLBACKS = Counter("llm_user_callbacks_total", "Grid-QA feedback callbacks", ["status"])
+METRIC_POINTS = Counter("llm_user_metric_points_total", "Metric points handled", ["result"])
+METRIC_SCRAPES = Counter("llm_user_metric_scrapes_total", "Prometheus scrapes", ["status"])
+RUNNER_JOBS = Counter("llm_user_runner_jobs_total", "Kubernetes runner job transitions", ["status"])
+RAW_ARTIFACTS = Counter("llm_user_raw_artifacts_total", "Encrypted raw artifacts", ["status"])

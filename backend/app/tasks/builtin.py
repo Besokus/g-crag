@@ -43,3 +43,4 @@ async def knowledge_evolution_scan(payload: dict, context: TaskContext) -> dict:
 # 避免管理进程与 worker 进程分别注册两个不同 wrapper。
 from app.services import realtime_event_service as _realtime_event_service  # noqa: E402,F401
 from app.services import alert_disposal_service as _alert_disposal_service  # noqa: E402,F401
+from app.services import llm_user_integration_service as _llm_user_integration_service  # noqa: E402,F401

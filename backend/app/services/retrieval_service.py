@@ -205,6 +205,9 @@ async def _dense_dual(dense_q: str, cand: int, ef: int) -> tuple[list[dict], lis
                 if tc:
                     tc.mark("dense_cloud_failed", True)
             return []
+    if settings.EMB_PROVIDER == "bge":
+        # 纯本地部署不访问云 collection，也不重复计算同一份 BGE query 向量。
+        return [], await _path("bge", settings.MILVUS_COLLECTION_BGE, "bge")
     return await asyncio.gather(
         _path(settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"),
         _path("bge", settings.MILVUS_COLLECTION_BGE, "bge"),
@@ -591,7 +594,7 @@ async def debug_search(
         "smallToBig": bool(getattr(settings, "SMALL_TO_BIG_ENABLE", False)),
         "embProvider": settings.EMB_PROVIDER,
         "rerankModel": getattr(settings, "RERANK_MODEL", "gte-rerank-v2"),
-        "milvusCollections": [settings.MILVUS_COLLECTION, settings.MILVUS_COLLECTION_BGE],
+        "milvusCollections": [name for name, _dim in milvus_client.document_collections()],
         "runtimeEf": config_service.rt_ef(),          # 运行时生效的 HNSW ef（/system/config/milvus 可调）
         "runtimeTemperature": config_service.rt_temperature(),  # 主答案 temperature（/system/config/model 可调）
     }

@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: REPLACE_GRID_QA_DEPLOYMENT
+  namespace: REPLACE_GRID_QA_NAMESPACE
+spec:
+  template:
+    spec:
+      containers:
+        - name: backend
+          env:
+            - {name: LLM_USER_OBSERVER_ENABLED, value: "true"}
+            # 开启后仅发送双重规则脱敏的 query/最终答案；需先完成内部数据授权。
+            - {name: LLM_USER_OBSERVER_CAPTURE_TEXT, value: "true"}
+            - {name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, value: "http://llm-user-otel.grid-qa-llm-user.svc:4318/v1/traces"}
+            - name: LLM_USER_OBSERVER_USER_HASH_SECRET
+              valueFrom: {secretKeyRef: {name: grid-qa-llm-user-integration, key: LLM_USER_OBSERVER_USER_HASH_SECRET}}
+            - name: LLM_USER_CALLBACK_SECRET
+              valueFrom: {secretKeyRef: {name: grid-qa-llm-user-integration, key: LLM_USER_CALLBACK_SECRET}}
+            - {name: LLM_USER_SUITE_EVENT_URL, value: "http://llm-user-api.grid-qa-llm-user.svc:8080/v1/integrations/grid-qa/evolution-events"}
+            - name: LLM_USER_SUITE_EVENT_SECRET
+              valueFrom: {secretKeyRef: {name: grid-qa-llm-user-integration, key: LLM_USER_SUITE_EVENT_SECRET}}

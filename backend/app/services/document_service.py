@@ -319,6 +319,15 @@ async def parse_documents(db: AsyncSession, doc_ids: List[str]) -> list[dict]:
     return results
 
 
+def _embedding_target(total_chars: int) -> tuple[str, str, str]:
+    """返回 (provider, collection, route)，保证本地模式不触碰云向量空间。"""
+    if settings.EMB_PROVIDER == "bge":
+        return "bge", settings.MILVUS_COLLECTION_BGE, "bge"
+    if total_chars > settings.DOC_SIZE_THRESHOLD:
+        return settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"
+    return "bge", settings.MILVUS_COLLECTION_BGE, "bge"
+
+
 async def vectorize_document(db: AsyncSession, doc_id: str) -> dict:
     """chunks → 向量 → Milvus。按文档大小路由：大→云, 小→本地 bge（向量空间独立分 collection）。"""
     from app.providers.factory import get_embedding_provider
@@ -332,11 +341,7 @@ async def vectorize_document(db: AsyncSession, doc_id: str) -> dict:
     texts = [r.content for r in rows]
     total_chars = sum(len(t) for t in texts)
 
-    # 路由：文档大走云 embedding，小走本地 bge
-    if total_chars > settings.DOC_SIZE_THRESHOLD:
-        provider, collection, route = settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"
-    else:
-        provider, collection, route = "bge", settings.MILVUS_COLLECTION_BGE, "bge"
+    provider, collection, route = _embedding_target(total_chars)
 
     vectors = await get_embedding_provider(provider).embed(texts)
     milvus_client.delete_by_doc(doc_id)  # 先清旧（双 collection）
@@ -353,12 +358,13 @@ async def vectorize_document(db: AsyncSession, doc_id: str) -> dict:
         pass
     # 数据链路闭环：向量化同时后台触发知识图谱三元组抽取（写 MySQL+Neo4j），不阻塞返回
     # 注：asyncio 用模块级 import（顶部已 import），函数内再 import 会遮蔽致 UnboundLocalError
-    try:
-        _t = asyncio.create_task(_kg_extract_bg(doc_id))
-        _bg_tasks.add(_t)
-        _t.add_done_callback(_bg_tasks.discard)
-    except Exception as e:
-        degraded("kg_extract_dispatch", e)
+    if settings.KG_AUTO_EXTRACT_ENABLE:
+        try:
+            _t = asyncio.create_task(_kg_extract_bg(doc_id))
+            _bg_tasks.add(_t)
+            _t.add_done_callback(_bg_tasks.discard)
+        except Exception as e:
+            degraded("kg_extract_dispatch", e)
     # BM25 增量钩子：新文档入向量库后标记脏，下次检索时重建
     try:
         from app.services import bm25_service
@@ -431,7 +437,7 @@ async def delete_document(db: AsyncSession, doc_id: str,
 
 
 async def get_stats(db: AsyncSession) -> dict:
-    """知识库统计：文档/分块/向量总数 + 状态/类型分布（双 collection 向量合计）。"""
+    """知识库统计：文档/分块/向量总数 + 状态/类型分布。"""
     from sqlalchemy import func
     rows = (await db.execute(select(Document.status, func.count()).group_by(Document.status))).all()
     by_status = {r[0]: r[1] for r in rows}
@@ -440,8 +446,10 @@ async def get_stats(db: AsyncSession) -> dict:
     chunk_total = (await db.execute(select(func.count()).select_from(Chunk))).scalar() or 0
     vector_total = 0
     try:
-        vector_total = milvus_client.num_entities(settings.MILVUS_COLLECTION) + \
-                       milvus_client.num_entities(settings.MILVUS_COLLECTION_BGE)
+        vector_total = sum(
+            milvus_client.num_entities(name)
+            for name, _dim in milvus_client.document_collections()
+        )
     except Exception as e:
         degraded("kb_vector_count", e)
         vector_total = 0
@@ -524,7 +532,9 @@ async def find_similar_docs(db: AsyncSession, text: str, topk: int = 5) -> list[
         return []
     from app.services import embedding_service
     vec = await embedding_service.embed_query(text)
-    hits = milvus_client.search(settings.MILVUS_COLLECTION, vec, topk=topk * 3)
+    hits = milvus_client.search(
+        milvus_client.primary_document_collection(), vec, topk=topk * 3,
+    )
     if not hits:
         return []
     best: dict[str, float] = {}

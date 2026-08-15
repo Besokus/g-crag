@@ -1,5 +1,15 @@
 FROM python:3.11-slim-bookworm
 
+ARG SOURCE_REVISION="unknown"
+ARG OVERLAY_SHA="unknown"
+ARG HF_ENDPOINT="https://hf-mirror.com"
+ARG SOURCE_URL="unknown"
+
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.version="${OVERLAY_SHA}" \
+      org.opencontainers.image.licenses="CC-BY-NC-4.0"
+
 WORKDIR /app
 
 # 系统依赖：OpenCV/rapidocr 运行所需 + gcc
@@ -14,6 +24,11 @@ RUN pip install --no-cache-dir torch==2.13.0 --index-url https://download.pytorc
     pip install --no-cache-dir -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com
 
 COPY . .
+
+# 演示镜像预下载本地 BGE，运行时可完全使用 PVC/镜像缓存，不依赖首次联网。
+RUN mkdir -p /opt/huggingface/hub && HF_HOME=/opt/huggingface HF_HUB_CACHE=/opt/huggingface/hub \
+    HF_ENDPOINT=${HF_ENDPOINT} python -c \
+    "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-zh-v1.5')"
 
 EXPOSE 8001
 # WORKDIR=/app，import app.main 即可；配置优先读环境变量（compose env_file 注入）

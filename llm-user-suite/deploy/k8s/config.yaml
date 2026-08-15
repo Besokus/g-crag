@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-user-suite-config
+data:
+  LLM_USER_EVENT_RETENTION_DAYS: "30"
+  LLM_USER_REPORT_RETENTION_DAYS: "180"
+  LLM_USER_SESSION_IDLE_SECONDS: "1800"
+  LLM_USER_DREAM_INTERVAL_SECONDS: "21600"
+  LLM_USER_DREAM_MIN_CLUSTER_SIZE: "3"
+  LLM_USER_FAITHFULNESS_GATE: "0.85"
+  LLM_USER_RUNNER_BACKEND: kubernetes
+  LLM_USER_RUNNER_IMAGE: harbor-registry.inner.youdao.com/ai/grid-qa-llm-user:dev
+  LLM_USER_RUNNER_NAMESPACE: grid-qa-llm-user
+  LLM_USER_RUNNER_SERVICE_ACCOUNT: llm-user-runner
+  LLM_USER_RUNNER_ENV_CONFIGMAP: llm-user-suite-config
+  LLM_USER_RUNNER_ENV_SECRET: llm-user-suite-env
+  LLM_USER_MAX_RUN_SECONDS: "900"
+  LLM_USER_MAX_API_CALLS: "30"
+  LLM_USER_RUN_CONCURRENCY: "2"
+  LLM_USER_RUNNER_RECONCILE_INTERVAL_SECONDS: "30"
+  LLM_USER_TASK_LOCK_TIMEOUT_SECONDS: "1800"
+  LLM_USER_AUTH_DISABLED: "false"
+  LLM_USER_REQUIRE_TARGET_ALLOWLIST: "true"
+  LLM_USER_RAW_CAPTURE_ENABLE: "false"
+  LLM_USER_RAW_CAPTURE_REQUIRE_KMS: "true"
+  LLM_USER_METRICS_SCRAPE_INTERVAL_SECONDS: "60"
+  LLM_USER_OTLP_MAX_REQUEST_BYTES: "16777216"
+  LLM_USER_METRIC_ALLOWLIST: grid_http_requests_total,grid_http_latency_seconds,grid_qa_total,grid_llm_calls_total,grid_llm_latency_seconds,grid_llm_fallback_total,grid_retrieval_latency_seconds,grid_feedback_total,grid_errors_total,grid_degraded_total,grid_faithfulness_trend
+  LLM_USER_METRIC_LABEL_ALLOWLIST: method,status,provider,feedback,reason,route,model,cached
+  LLM_USER_S3_ENDPOINT: llm-user-minio:9000
+  LLM_USER_S3_BUCKET: llm-user-artifacts
+  LLM_USER_S3_SECURE: "false"
+  GRID_QA_METRICS_TARGET: grid-qa-test.REPLACE_GRID_QA_NAMESPACE.svc:18500
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-user-otel-config
+data:
+  collector.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      file_storage:
+        directory: /var/lib/otel
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: grid-qa
+              scrape_interval: 60s
+              static_configs:
+                - targets: ["${env:GRID_QA_METRICS_TARGET}"]
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 384
+      batch:
+        timeout: 5s
+        send_batch_size: 256
+      tail_sampling:
+        decision_wait: 10s
+        policies:
+          - name: errors
+            type: status_code
+            status_code: {status_codes: [ERROR]}
+          - name: user-events
+            type: string_attribute
+            string_attribute: {key: grid.event.kind, values: [".*"], enabled_regex_matching: true}
+          - name: baseline
+            type: probabilistic
+            probabilistic: {sampling_percentage: 10}
+    exporters:
+      otlphttp/suite:
+        endpoint: http://llm-user-api:8080
+        sending_queue:
+          enabled: true
+          storage: file_storage
+          queue_size: 2048
+        retry_on_failure:
+          enabled: true
+    service:
+      extensions: [health_check, file_storage]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, tail_sampling, batch]
+          exporters: [otlphttp/suite]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/suite]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, batch]
+          exporters: [otlphttp/suite]

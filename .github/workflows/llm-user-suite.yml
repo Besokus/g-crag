@@ -1,0 +1,50 @@
+name: LLM User Suite
+
+on:
+  pull_request:
+    paths:
+      - "llm-user-suite/**"
+      - "backend/llm_eval_core/**"
+      - "backend/app/core/llm_user_observer.py"
+      - "backend/app/routers/integrations.py"
+      - "backend/app/services/llm_user_integration_service.py"
+      - "tests/test_llm_user_integration.py"
+  push:
+    branches: [main]
+    paths:
+      - "llm-user-suite/**"
+      - "backend/llm_eval_core/**"
+      - "backend/app/core/llm_user_observer.py"
+      - "backend/app/routers/integrations.py"
+      - "backend/app/services/llm_user_integration_service.py"
+      - "tests/test_llm_user_integration.py"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install focused dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r llm-user-suite/requirements.txt pytest pytest-asyncio python-dotenv loguru PyJWT bcrypt email-validator python-multipart slowapi redis opentelemetry-sdk opentelemetry-exporter-otlp
+      - name: Compile and test
+        env:
+          DATABASE_URL: sqlite+aiosqlite:////tmp/grid-qa-backend-tests.db
+        run: |
+          python -m compileall -q backend/app backend/llm_eval_core llm-user-suite/llm_user_suite
+          python -m pytest -q llm-user-suite/tests tests/test_llm_user_integration.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: llm-user-suite/frontend/package-lock.json
+      - name: Build console
+        working-directory: llm-user-suite/frontend
+        run: npm ci && npm run build
+      - uses: azure/setup-kubectl@v4
+      - name: Render Kubernetes resources
+        run: kubectl kustomize llm-user-suite/deploy/k8s >/tmp/llm-user-suite.yaml

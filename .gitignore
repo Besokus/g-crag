@@ -58,6 +58,7 @@ logs/
 .mimicode/
 .workbuddy/
 .worktrees/
+.deploy-state/
 *.stackdump
 ai-trends-2026.html
 

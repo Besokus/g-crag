@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: grid-qa-llm-user
+  labels:
+    app.kubernetes.io/part-of: grid-qa-llm-user

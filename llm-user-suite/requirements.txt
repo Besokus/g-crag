@@ -1,0 +1,15 @@
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.34,<0.35
+pydantic>=2.9,<3
+pydantic-settings>=2.5,<3
+SQLAlchemy[asyncio]>=2.0,<3
+asyncpg>=0.29,<1
+aiosqlite>=0.20,<1
+httpx>=0.27,<1
+openai>=2.0,<3
+prometheus-client>=0.20,<1
+opentelemetry-proto>=1.28,<2
+protobuf>=5,<7
+minio>=7.2,<8
+websockets>=13,<16
+cryptography>=43,<47

@@ -1,0 +1,103 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grid-qa-build-backend-${BUILD_ID}
+  namespace: nmt-llm
+  labels:
+    app.kubernetes.io/name: grid-qa
+    app.kubernetes.io/component: image-build
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: harbor-youdao
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      initContainers:
+        - name: prepare-overlay-context
+          image: gcr.io/kaniko-project/executor:v1.23.2-debug
+          command: [/busybox/sh, -ec]
+          args:
+            - cp -LR /context-ro/. /context/
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: build-context-raw
+              mountPath: /context-ro
+              readOnly: true
+            - name: build-context
+              mountPath: /context
+        - name: build-base
+          image: gcr.io/kaniko-project/executor:v1.23.2-debug
+          args:
+            - --context=${SOURCE_GIT_CONTEXT}#refs/heads/main#${SOURCE_REVISION}
+            - --context-sub-path=backend
+            - --dockerfile=Dockerfile
+            - --destination=${BACKEND_BASE_TAG}
+            - --registry-map=index.docker.io=docker.m.daocloud.io
+            - --snapshot-mode=redo
+            - --cache=true
+            - --cache-repo=harbor-registry.inner.youdao.com/ai/grid-qa-backend-cache
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "6"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-config
+              mountPath: /kaniko/.docker
+              readOnly: true
+      containers:
+        - name: build-and-push
+          image: gcr.io/kaniko-project/executor:v1.23.2-debug
+          args:
+            - --context=dir:///context
+            - --dockerfile=/context/Dockerfile
+            - --destination=${BACKEND_TAG}
+            - --digest-file=/dev/termination-log
+            - --build-arg=BASE_IMAGE=${BACKEND_BASE_TAG}
+            - --build-arg=SOURCE_REVISION=${SOURCE_REVISION}
+            - --build-arg=OVERLAY_SHA=${OVERLAY_SHA}
+            - --build-arg=SOURCE_URL=${SOURCE_URL}
+            - --snapshot-mode=redo
+            - --cache=true
+            - --cache-repo=harbor-registry.inner.youdao.com/ai/grid-qa-backend-cache
+            - --cleanup
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "6"
+              memory: 12Gi
+          volumeMounts:
+            - name: build-context
+              mountPath: /context
+              readOnly: true
+            - name: docker-config
+              mountPath: /kaniko/.docker
+              readOnly: true
+      volumes:
+        # ConfigMap projected files are symlinks into ..data. Copy with -L first,
+        # otherwise Kaniko preserves dangling links in the final image.
+        - name: build-context-raw
+          configMap:
+            name: grid-qa-backend-context-${BUILD_ID}
+        - name: build-context
+          emptyDir: {}
+        - name: docker-config
+          secret:
+            secretName: harbor-youdao
+            items:
+              - key: .dockerconfigjson
+                path: config.json

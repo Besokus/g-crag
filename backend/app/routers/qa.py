@@ -1,6 +1,7 @@
 """问答接口：智能问答(普通/流式/多轮) / 对话历史 / 反馈 / 术语归一化。"""
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -42,8 +43,26 @@ async def answer(
     from app.config import settings
     from app.services import plugin_registry
     from app.core.qa_trace import new_collector
+    from app.core.llm_user_observer import bind_identity, emit
     # 链路 trace：请求入口建 collector（绑 contextvar，下游 answer/mixed_search 自动打点）
     _trace_c = new_collector(body.query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
+    bind_identity(
+        username=user.username, tenant=user.tenant_id or "default",
+        conversation_id=body.conversationId or "",
+        qa_trace_id=_trace_c.trace_id if _trace_c else "",
+    )
+    if body.conversationId:
+        emit(
+            "conversation.continued", {"channel": "http"}, username=user.username,
+            tenant=user.tenant_id or "default", conversation_id=body.conversationId,
+            qa_trace_id=_trace_c.trace_id if _trace_c else "",
+        )
+    emit(
+        "qa.started",
+        {"query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "", "modelType": body.modelType or "", "agentMode": body.agentMode},
+        username=user.username, tenant=user.tenant_id or "default",
+        conversation_id=body.conversationId or "", qa_trace_id=_trace_c.trace_id if _trace_c else "",
+    )
     # 插件 · query 预处理（BRD §5.3.1 扩展点）
     q = plugin_registry.run_hook("query_preprocess", body.query, {"user": user.username})
     if getattr(settings, "DUAL_RAG_ENABLE", False):
@@ -79,6 +98,32 @@ async def answer(
             from app.core.obs import degraded
             degraded("qa_trace_attach", e)
     await write_log(db, user.username, "智能问答", f"提问：{body.query[:50]}")
+    if not body.conversationId and data.get("conversationId"):
+        emit(
+            "conversation.started", {"channel": "http"}, username=user.username,
+            tenant=user.tenant_id or "default", conversation_id=data.get("conversationId", ""),
+            qa_trace_id=_trace_c.trace_id if _trace_c else "",
+        )
+    emit(
+        "qa.completed",
+        {
+            "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+            "answer": data.get("answer", "") if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+            "modelType": data.get("modelType", body.modelType or ""),
+            "route": data.get("route", ""), "cached": bool(data.get("cached")),
+            "cacheLayer": data.get("cacheLayer", ""), "confidence": data.get("confidence", ""),
+            "degraded": bool(data.get("llmDegraded") or data.get("retrievalDegraded")),
+            "degradationReason": data.get("llmDegradedReason", data.get("retrievalDegradedReason", "")),
+            "faithfulness": 1 - data.get("hallucinationRate", 0) if isinstance(data.get("hallucinationRate"), (int, float)) else "",
+            "request": {
+                "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                "modelType": body.modelType, "conversationId": body.conversationId,
+            },
+        },
+        username=user.username, tenant=user.tenant_id or "default",
+        conversation_id=data.get("conversationId", body.conversationId or ""),
+        qa_trace_id=_trace_c.trace_id if _trace_c else "",
+    )
     return success(data, "问答成功")
 
 
@@ -91,30 +136,139 @@ async def answer_stream(
     user: User = Depends(require_perm(QA_ANSWER)),
     regen: bool = False,
 ):
+    from app.config import settings
+    from app.core.llm_user_observer import bind_identity, emit
+    from app.core.qa_trace import new_collector
+
+    _trace_c = new_collector(body.query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
+    bind_identity(
+        username=user.username, tenant=user.tenant_id or "default",
+        conversation_id=body.conversationId or "", qa_trace_id=_trace_c.trace_id if _trace_c else "",
+    )
+    if body.conversationId:
+        emit(
+            "conversation.continued", {"channel": "sse"}, username=user.username,
+            tenant=user.tenant_id or "default", conversation_id=body.conversationId,
+            qa_trace_id=_trace_c.trace_id if _trace_c else "",
+        )
+    emit(
+        "qa.stream.started",
+        {"query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "", "modelType": body.modelType or "", "agentMode": body.agentMode,
+         "request": {
+             "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+             "modelType": body.modelType, "conversationId": body.conversationId,
+         }},
+        username=user.username, tenant=user.tenant_id or "default",
+        conversation_id=body.conversationId or "", qa_trace_id=_trace_c.trace_id if _trace_c else "",
+    )
+
     async def gen():
-        from app.config import settings
-        from app.core.qa_trace import new_collector
-        _trace_c = new_collector(body.query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
-        async for item in qa_service.stream_answer(
-            db, body.query, body.modelType,
-            conversation_id=body.conversationId, username=user.username, tenant=user.tenant_id,
-            regen=regen, agent_mode=body.agentMode,
-            user_dept=user.dept, user_role=user.role,
-        ):
-            # done 事件统一注入 trace（stream_answer 内部已打点）+ 异步落库
-            if _trace_c is not None and isinstance(item, dict) and item.get("type") == "done":
-                try:
-                    item["trace"] = _trace_c.to_dict()
-                    from app.services.qa_trace_service import save_trace
-                    _bg_tasks.add(asyncio.create_task(save_trace(
-                        item["trace"], query=body.query, tenant=user.tenant_id or "default",
-                        username=user.username, cache_layer=item.get("cacheLayer", ""),
-                        confidence=item.get("confidence", ""))))
-                except Exception as e:
-                    from app.core.obs import degraded
-                    degraded("qa_trace_attach_stream", e)
-            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+        token_count = 0
+        answer_parts: list[str] = []
+        answer_chars = 0
+        first_token_ms = None
+        started_at = time.perf_counter()
+        completed = False
+        terminal_emitted = False
+        conversation_id = body.conversationId or ""
+        conversation_started_emitted = bool(body.conversationId)
+        try:
+            async for item in qa_service.stream_answer(
+                db, body.query, body.modelType,
+                conversation_id=body.conversationId, username=user.username, tenant=user.tenant_id,
+                regen=regen, agent_mode=body.agentMode,
+                user_dept=user.dept, user_role=user.role,
+            ):
+                if isinstance(item, dict):
+                    if item.get("type") == "token":
+                        token_count += 1
+                        if settings.LLM_USER_OBSERVER_CAPTURE_TEXT and answer_chars < 16000:
+                            content = str(item.get("content", ""))[:16000 - answer_chars]
+                            answer_parts.append(content)
+                            answer_chars += len(content)
+                        if first_token_ms is None:
+                            first_token_ms = round((time.perf_counter() - started_at) * 1000, 3)
+                            emit(
+                                "qa.stream.first_token", {"firstTokenMs": first_token_ms},
+                                username=user.username, tenant=user.tenant_id or "default",
+                                conversation_id=conversation_id,
+                                qa_trace_id=_trace_c.trace_id if _trace_c else "",
+                            )
+                    conversation_id = item.get("conversationId") or conversation_id
+                    if conversation_id and not conversation_started_emitted:
+                        emit(
+                            "conversation.started", {"channel": "sse"}, username=user.username,
+                            tenant=user.tenant_id or "default", conversation_id=conversation_id,
+                            qa_trace_id=_trace_c.trace_id if _trace_c else "",
+                        )
+                        conversation_started_emitted = True
+                    if item.get("type") == "error" and not terminal_emitted:
+                        emit(
+                            "qa.stream.error",
+                            {
+                                "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                                "errorType": str(item.get("errorType") or item.get("code") or "stream_error"),
+                                "tokenEvents": token_count,
+                            },
+                            username=user.username, tenant=user.tenant_id or "default",
+                            conversation_id=conversation_id,
+                            qa_trace_id=_trace_c.trace_id if _trace_c else "",
+                        )
+                        terminal_emitted = True
+                # done 事件统一注入 trace（stream_answer 内部已打点）+ 异步落库
+                if isinstance(item, dict) and item.get("type") == "done" and not terminal_emitted:
+                    if _trace_c is not None:
+                        try:
+                            item["trace"] = _trace_c.to_dict()
+                            from app.services.qa_trace_service import save_trace
+                            _bg_tasks.add(asyncio.create_task(save_trace(
+                                item["trace"], query=body.query, tenant=user.tenant_id or "default",
+                                username=user.username, cache_layer=item.get("cacheLayer", ""),
+                                confidence=item.get("confidence", ""))))
+                        except Exception as e:
+                            from app.core.obs import degraded
+                            degraded("qa_trace_attach_stream", e)
+                    completed = True
+                    emit(
+                        "qa.stream.completed",
+                        {
+                            "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                            "answer": (
+                                item.get("content") or item.get("annotatedAnswer") or "".join(answer_parts)
+                            ) if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                            "tokenEvents": token_count, "firstTokenMs": first_token_ms,
+                            "modelType": item.get("modelType", body.modelType or ""),
+                            "route": item.get("route", ""), "cached": bool(item.get("cached")),
+                            "cacheLayer": item.get("cacheLayer", ""), "confidence": item.get("confidence", ""),
+                            "degraded": bool(item.get("llmDegraded") or item.get("retrievalDegraded")),
+                            "degradationReason": item.get("llmDegradedReason", item.get("retrievalDegradedReason", "")),
+                            "faithfulness": 1 - item.get("hallucinationRate", 0) if isinstance(item.get("hallucinationRate"), (int, float)) else "",
+                        },
+                        username=user.username, tenant=user.tenant_id or "default",
+                        conversation_id=conversation_id, qa_trace_id=_trace_c.trace_id if _trace_c else "",
+                    )
+                    terminal_emitted = True
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        except asyncio.CancelledError:
+            if not terminal_emitted:
+                emit("qa.stream.aborted", {"query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "", "tokenEvents": token_count}, username=user.username,
+                     tenant=user.tenant_id or "default", conversation_id=conversation_id,
+                     qa_trace_id=_trace_c.trace_id if _trace_c else "")
+                terminal_emitted = True
+            raise
+        except Exception as exc:
+            if not terminal_emitted:
+                emit("qa.stream.error", {"query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "", "errorType": type(exc).__name__, "tokenEvents": token_count},
+                     username=user.username, tenant=user.tenant_id or "default", conversation_id=conversation_id,
+                     qa_trace_id=_trace_c.trace_id if _trace_c else "")
+                terminal_emitted = True
+            raise
+        finally:
+            if not completed and not terminal_emitted:
+                emit("qa.stream.aborted", {"query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "", "tokenEvents": token_count}, username=user.username,
+                     tenant=user.tenant_id or "default", conversation_id=conversation_id,
+                     qa_trace_id=_trace_c.trace_id if _trace_c else "")
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -250,6 +404,26 @@ async def feedback(
         reason=body.reason or "",
         retrieval_sources=body.retrievalSources or "",
     )
+    try:
+        from app.config import settings
+        from app.core.llm_user_observer import emit
+        emit(
+            "feedback.submitted",
+            {"feedback": body.feedback,
+             "reason": body.reason if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+             "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+             "answer": body.answer if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+             "request": {
+                         "query": body.query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                         "answer": body.answer if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                         "feedback": body.feedback,
+                         "conversationId": body.conversationId,
+                         "reason": body.reason if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else ""}},
+            username=user.username, tenant=user.tenant_id or "default",
+            conversation_id=body.conversationId or "",
+        )
+    except Exception:
+        pass
     # like 时写入高频问答对到 Redis（永不过期，后续流程可复用）
     if body.feedback == "like" and body.query:
         try:
@@ -411,6 +585,11 @@ async def answer_ws(ws: WebSocket):
         return
 
     await ws.accept()
+    observer_user = None
+    observer_query = ""
+    observer_conversation = ""
+    observer_trace = ""
+    terminal_emitted = False
     try:
         req = await ws.receive_json()
         query = (req.get("query") or "").strip()
@@ -426,26 +605,134 @@ async def answer_ws(ws: WebSocket):
                 return
             from app.config import settings
             from app.core.qa_trace import new_collector
+            from app.core.llm_user_observer import emit
             _trace_c = new_collector(query) if getattr(settings, "QA_TRACE_ENABLE", True) else None
+            observer_user = user
+            observer_query = query
+            observer_conversation = req.get("conversationId") or ""
+            observer_trace = _trace_c.trace_id if _trace_c else ""
+            emit(
+                "qa.websocket.started",
+                {
+                    "query": query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                    "modelType": req.get("modelType") or "",
+                    "method": "GET", "path": "/api/qa/ws",
+                    "request": {
+                        "query": query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                        "modelType": req.get("modelType"), "conversationId": req.get("conversationId"),
+                    },
+                },
+                username=user.username, tenant=user.tenant_id or "default",
+                conversation_id=observer_conversation, qa_trace_id=observer_trace,
+            )
+            if observer_conversation:
+                emit(
+                    "conversation.continued", {"channel": "websocket"},
+                    username=user.username, tenant=user.tenant_id or "default",
+                    conversation_id=observer_conversation, qa_trace_id=observer_trace,
+                )
+            token_count = 0
+            answer_parts: list[str] = []
+            answer_chars = 0
+            first_token_ms = None
+            stream_started_at = time.perf_counter()
+            conversation_started_emitted = bool(observer_conversation)
             async for item in qa_service.stream_answer(
                 db, query, req.get("modelType"),
                 conversation_id=req.get("conversationId"),
                 username=user.username, tenant=user.tenant_id,
             ):
-                if _trace_c is not None and isinstance(item, dict) and item.get("type") == "done":
-                    try:
-                        item["trace"] = _trace_c.to_dict()
-                    except Exception:
-                        pass
+                if isinstance(item, dict) and item.get("type") == "token":
+                    token_count += 1
+                    if settings.LLM_USER_OBSERVER_CAPTURE_TEXT and answer_chars < 16000:
+                        content = str(item.get("content", ""))[:16000 - answer_chars]
+                        answer_parts.append(content)
+                        answer_chars += len(content)
+                    if first_token_ms is None:
+                        first_token_ms = round((time.perf_counter() - stream_started_at) * 1000, 3)
+                        emit(
+                            "qa.websocket.first_token", {"firstTokenMs": first_token_ms},
+                            username=user.username, tenant=user.tenant_id or "default",
+                            conversation_id=observer_conversation, qa_trace_id=observer_trace,
+                        )
+                if isinstance(item, dict) and item.get("conversationId"):
+                    observer_conversation = item["conversationId"]
+                    if not conversation_started_emitted:
+                        emit(
+                            "conversation.started", {"channel": "websocket"},
+                            username=user.username, tenant=user.tenant_id or "default",
+                            conversation_id=observer_conversation, qa_trace_id=observer_trace,
+                        )
+                        conversation_started_emitted = True
+                if isinstance(item, dict) and item.get("type") == "error" and not terminal_emitted:
+                    emit(
+                        "qa.websocket.error",
+                        {
+                            "query": query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                            "errorType": str(item.get("errorType") or item.get("code") or "stream_error"),
+                            "tokenEvents": token_count,
+                        },
+                        username=user.username, tenant=user.tenant_id or "default",
+                        conversation_id=observer_conversation, qa_trace_id=observer_trace,
+                    )
+                    terminal_emitted = True
+                if isinstance(item, dict) and item.get("type") == "done" and not terminal_emitted:
+                    if _trace_c is not None:
+                        try:
+                            item["trace"] = _trace_c.to_dict()
+                        except Exception:
+                            pass
+                    emit(
+                        "qa.websocket.completed",
+                        {
+                            "query": query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                            "answer": (
+                                item.get("content") or item.get("annotatedAnswer") or "".join(answer_parts)
+                            ) if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "",
+                            "tokenEvents": token_count, "firstTokenMs": first_token_ms,
+                            "modelType": item.get("modelType", req.get("modelType") or ""),
+                            "route": item.get("route", ""), "confidence": item.get("confidence", ""),
+                            "degraded": bool(item.get("llmDegraded") or item.get("retrievalDegraded")),
+                            "degradationReason": item.get("llmDegradedReason", item.get("retrievalDegradedReason", "")),
+                        },
+                        username=user.username, tenant=user.tenant_id or "default",
+                        conversation_id=observer_conversation, qa_trace_id=observer_trace,
+                    )
+                    terminal_emitted = True
                 await ws.send_json(item)
     except WebSocketDisconnect:
+        if observer_user and not terminal_emitted:
+            from app.core.llm_user_observer import emit
+            emit(
+                "qa.websocket.aborted", {"query": observer_query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else ""},
+                username=observer_user.username, tenant=observer_user.tenant_id or "default",
+                conversation_id=observer_conversation, qa_trace_id=observer_trace,
+            )
+            terminal_emitted = True
         return
     except Exception as e:
+        if observer_user:
+            from app.core.llm_user_observer import emit
+            emit(
+                "qa.websocket.error", {"query": observer_query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else "", "errorType": type(e).__name__},
+                username=observer_user.username, tenant=observer_user.tenant_id or "default",
+                conversation_id=observer_conversation, qa_trace_id=observer_trace,
+            )
+            terminal_emitted = True
         try:
             await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}"[:200]})
         except Exception:
             pass
     finally:
+        if observer_user and not terminal_emitted:
+            from app.config import settings
+            from app.core.llm_user_observer import emit
+            emit(
+                "qa.websocket.aborted",
+                {"query": observer_query if settings.LLM_USER_OBSERVER_CAPTURE_TEXT else ""},
+                username=observer_user.username, tenant=observer_user.tenant_id or "default",
+                conversation_id=observer_conversation, qa_trace_id=observer_trace,
+            )
         try:
             await ws.close()
         except Exception:

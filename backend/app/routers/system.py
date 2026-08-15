@@ -25,8 +25,19 @@ router = APIRouter(prefix="/system", tags=["系统-用户/权限/配置"])
 
 @router.post("/login")
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
-    data = await authenticate(db, body.username, body.password)
+    from app.core.llm_user_observer import emit
+    try:
+        data = await authenticate(db, body.username, body.password)
+    except Exception:
+        emit("auth.login.failed", {"reason": "invalid_credentials"}, username=body.username)
+        raise
     await write_log(db, body.username, "登录", f"用户 {body.username} 登录系统")
+    logged_in_user = (await db.execute(select(User).where(User.username == body.username))).scalar_one_or_none()
+    emit(
+        "auth.login.succeeded", {"role": data.get("role", "")},
+        username=body.username,
+        tenant=logged_in_user.tenant_id if logged_in_user else "default",
+    )
     return success(data, "登录成功")
 
 
@@ -1017,7 +1028,8 @@ async def milvus_health(user: User = Depends(require_perm(METRIC_READ)), db: Asy
     from app.clients import milvus_client
     from app.config import settings
     collections = {}
-    for key, name in [("cloud", settings.MILVUS_COLLECTION), ("bge", settings.MILVUS_COLLECTION_BGE)]:
+    for name, _dim in milvus_client.document_collections():
+        key = "bge" if name == settings.MILVUS_COLLECTION_BGE else "cloud"
         try:
             n = await asyncio.to_thread(milvus_client.num_entities, name)
         except Exception as e:
@@ -1026,12 +1038,13 @@ async def milvus_health(user: User = Depends(require_perm(METRIC_READ)), db: Asy
             degraded("milvus_health", e)
         collections[key] = {"collection": name, "vectors": n}
     mysql_chunks = (await db.execute(select(_f.count()).select_from(Chunk))).scalar() or 0
-    cloud_vec = collections["cloud"]["vectors"]
+    primary_key = "bge" if settings.EMB_PROVIDER == "bge" else "cloud"
+    primary_vec = collections[primary_key]["vectors"]
     return success({
         "collections": collections,
         "mysqlChunks": mysql_chunks,
-        "consistent": cloud_vec >= 0 and abs(cloud_vec - mysql_chunks) <= max(5, mysql_chunks * 0.01),
-        "note": "cloud 向量数应 ≈ MySQL chunk 数（bge 为小文档副本，通常更少）",
+        "consistent": primary_vec >= 0 and abs(primary_vec - mysql_chunks) <= max(5, mysql_chunks * 0.01),
+        "note": f"主 collection({primary_key}) 向量数应约等于 MySQL chunk 数",
     }, "查询成功")
 
 

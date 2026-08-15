@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-user-postgres
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: cephfs-sas
+  resources: {requests: {storage: 10Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-user-postgres
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llm-user-postgres}}
+  template:
+    metadata: {labels: {app: llm-user-postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - {name: POSTGRES_USER, value: llm_user}
+            - {name: POSTGRES_DB, value: llm_user}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: llm-user-suite-env, key: POSTGRES_PASSWORD}}
+          ports: [{name: postgres, containerPort: 5432}]
+          readinessProbe: {exec: {command: [pg_isready, -U, llm_user]}, initialDelaySeconds: 5, periodSeconds: 5}
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+      volumes: [{name: data, persistentVolumeClaim: {claimName: llm-user-postgres}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-user-postgres}
+spec: {selector: {app: llm-user-postgres}, ports: [{name: postgres, port: 5432, targetPort: postgres}]}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-user-minio
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: cephfs-sas
+  resources: {requests: {storage: 20Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: llm-user-minio}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: llm-user-minio}}
+  template:
+    metadata: {labels: {app: llm-user-minio}}
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+          args: [server, /data, --console-address, ":9001"]
+          envFrom: [{secretRef: {name: llm-user-suite-env}}]
+          ports: [{name: api, containerPort: 9000}, {name: console, containerPort: 9001}]
+          readinessProbe: {httpGet: {path: /minio/health/ready, port: api}, initialDelaySeconds: 5, periodSeconds: 5}
+          volumeMounts: [{name: data, mountPath: /data}]
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: "1", memory: 1Gi}}
+      volumes: [{name: data, persistentVolumeClaim: {claimName: llm-user-minio}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: llm-user-minio}
+spec: {selector: {app: llm-user-minio}, ports: [{name: api, port: 9000, targetPort: api}, {name: console, port: 9001, targetPort: console}]}

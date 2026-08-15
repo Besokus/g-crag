@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: grid-qa-llm-user
+resources:
+  - namespace.yaml
+  - config.yaml
+  - storage.yaml
+  - rbac.yaml
+  - suite.yaml
+  - otel.yaml
+images:
+  - name: grid-qa-llm-user
+    newName: harbor-registry.inner.youdao.com/ai/grid-qa-llm-user
+    newTag: dev
+  - name: grid-qa-llm-user-console
+    newName: harbor-registry.inner.youdao.com/ai/grid-qa-llm-user-console
+    newTag: dev

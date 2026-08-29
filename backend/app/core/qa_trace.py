@@ -40,6 +40,62 @@ _LABELS: dict[str, str] = {
     "small_to_big": "父块召回", "raptor": "RAPTOR 摘要", "governance": "治理门禁",
 }
 
+# 单 span attrs 序列化后预算（字节），超限丢 prompt 留参数
+_ATTRS_BUDGET = 8 * 1024
+
+
+def _snap(text, limit):
+    """截断 + PII 脱敏（PII_MASK_ENABLE 开时）；非 str 安全。"""
+    if not isinstance(text, str) or not text:
+        return ""
+    try:
+        from app.core import safety
+        text = safety.mask_pii(text)
+    except Exception:
+        pass
+    return text[:limit]
+
+
+def llm_attrs(messages, temperature=None, max_tokens=None, usage=None,
+              model=None, output=None, output_chars=200) -> dict:
+    """LLM 调用详情 → span attrs dict（json 安全；QA_TRACE_DETAIL_ENABLE 由调用点判）。"""
+    from app.config import settings
+    limit = int(getattr(settings, "QA_TRACE_PROMPT_CHARS", 1200) or 1200)
+    a: dict = {}
+    msgs = messages if isinstance(messages, list) else []
+    a["nMessages"] = len(msgs)
+    for m in msgs:
+        role = (m or {}).get("role", "")
+        content = (m or {}).get("content", "")
+        if role == "system":
+            a["promptSystem"] = _snap(content, limit)
+            if len(content) > limit:
+                a["promptSystemTruncated"] = True
+        elif role == "user" and "promptUser" not in a:
+            a["promptUser"] = _snap(content, limit)
+            if len(content) > limit:
+                a["promptUserTruncated"] = True
+    if temperature is not None:
+        a["temperature"] = temperature
+    if max_tokens is not None:
+        a["maxTokens"] = max_tokens
+    if usage:
+        a["tokenUsage"] = {"input": usage.get("input"), "output": usage.get("output")}
+    if model:
+        a["model"] = model
+    if output:
+        a["output"] = _snap(output, output_chars)
+        if len(output) > output_chars:
+            a["outputTruncated"] = True
+    try:
+        import json as _json
+        if len(_json.dumps(a, ensure_ascii=False).encode()) > _ATTRS_BUDGET:
+            return {k: v for k, v in a.items() if not k.startswith(("prompt", "output"))} \
+                | {"promptOmitted": True}
+    except Exception:
+        pass
+    return a
+
 
 class TraceCollector:
     """单次问答的 trace 容器。请求入口 new_collector() 创建并绑 contextvar。"""
@@ -80,6 +136,21 @@ class TraceCollector:
         """无耗时的标记（cacheLayer / route / confidence 等），进 trace 顶层 marks。"""
         try:
             self.marks[key] = value
+        except Exception:
+            pass
+
+    def attach(self, name: str, **attrs) -> None:
+        """给最后一个同名 span 追加 attrs（span 内部产生的数据事后补挂）。
+
+        找不到同名 span 时静默忽略——trace 任何失败不影响主链路。
+        """
+        if not attrs:
+            return
+        try:
+            for s in reversed(self._spans):
+                if s.get("name") == name:
+                    s.setdefault("attrs", {}).update(attrs)
+                    return
         except Exception:
             pass
 

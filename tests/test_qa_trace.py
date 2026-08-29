@@ -100,3 +100,61 @@ def test_module_span_uses_current_collector():
         pass
     d = get_collector().to_dict()
     assert any(s["name"] == "normalize" for s in d["spans"])
+
+
+def test_attach_updates_last_matching_span():
+    c = TraceCollector("q")
+    with c.span("crag"):
+        pass
+    c.attach("crag", grade="correct", action="normal", extras={"es": 0.8})
+    s = c.to_dict()["spans"][0]
+    assert s["attrs"]["grade"] == "correct"
+    assert s["attrs"]["extras"]["es"] == 0.8
+
+
+def test_attach_missing_span_is_silent_noop():
+    c = TraceCollector("q")
+    c.attach("nonexistent", a=1)      # 不抛即过（铁律：trace 失败不影响主链路）
+    assert c.to_dict()["spans"] == []
+
+
+def test_llm_attrs_truncates_and_counts():
+    from app.core import qa_trace
+    long_sys = "sys" * 1000           # 3000 字符 > 1200
+    msgs = [{"role": "system", "content": long_sys},
+            {"role": "user", "content": "主变油温高怎么办"}]
+    a = qa_trace.llm_attrs(msgs, temperature=0.2, max_tokens=2048,
+                           usage={"input": 100, "output": 50}, model="deepseek",
+                           output="答案" * 200)
+    assert a["nMessages"] == 2
+    assert a["temperature"] == 0.2 and a["maxTokens"] == 2048
+    assert a["model"] == "deepseek"
+    assert a["tokenUsage"] == {"input": 100, "output": 50}
+    assert len(a["promptSystem"]) == 1200 and a["promptSystemTruncated"] is True
+    assert a["promptUser"] == "主变油温高怎么办"
+    assert a["outputTruncated"] is True and len(a["output"]) == 200
+
+
+def test_llm_attrs_minimal_and_none_usage():
+    from app.core import qa_trace
+    a = qa_trace.llm_attrs([{"role": "user", "content": "q"}])
+    assert a["nMessages"] == 1 and "tokenUsage" not in a and "model" not in a
+
+
+def test_llm_attrs_size_budget_drops_prompts():
+    """超预算：丢 prompt 只留参数，标记 promptOmitted。"""
+    import app.core.qa_trace as qt
+    orig = qt._ATTRS_BUDGET
+    qt._ATTRS_BUDGET = 500            # 测试用小预算
+    try:
+        a = qt.llm_attrs([{"role": "user", "content": "x" * 2000}], temperature=0.2)
+        assert a.get("promptOmitted") is True
+        assert "promptUser" not in a and a["temperature"] == 0.2
+    finally:
+        qt._ATTRS_BUDGET = orig
+
+
+def test_detail_flag_defaults_off():
+    from app.config import settings
+    assert settings.QA_TRACE_DETAIL_ENABLE is False
+    assert settings.QA_TRACE_PROMPT_CHARS == 1200

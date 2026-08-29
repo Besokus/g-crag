@@ -319,6 +319,8 @@ class Settings(BaseSettings):
     # ---------- 链路 trace 可视化（per-request 瀑布图，定位"卡在哪个节点"） ----------
     QA_TRACE_ENABLE: bool = True           # 总开关：采集各阶段耗时随响应返回前端 + 落库
     QA_TRACE_SAMPLE_RATE: float = 1.0      # 落库采样率（响应体 trace 不采样，实时展示必带）
+    QA_TRACE_DETAIL_ENABLE: bool = False   # 节点详情采集(参数/prompt attrs, 纯观测不进缓存版本; 关=现状只记耗时)
+    QA_TRACE_PROMPT_CHARS: int = 1200      # 单段 prompt/输出截断长度（attrs 大小预算的前置）
     # FAITHFULNESS_GATE 已在上方"可信度评测"区定义(0.85)，复用，不重复声明
 
     # ---------- N1 Agent 长期记忆层 ----------

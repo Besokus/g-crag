@@ -135,6 +135,21 @@ def _aggregate_srcs(dense_hits: list[dict], sparse_hits: list[dict]) -> dict:
     return {k: sorted(v) for k, v in src_map.items()}
 
 
+def _normalize_unbounded_scores(hits: list[dict]) -> None:
+    """BM25 原始分无上界（常见 >1），按 top 相对值压到 0-1 显示域（保序，就地修改）。
+
+    score 字段对外契约是 0-1 相关度（前端 ×100 显示%、CRAG es clamp、MMR λ 权衡）。
+    仅当最大分 >1（=未归一化 BM25）才缩放，dense 余弦 0-1 不受影响；
+    top1 → 1.0，与 CRAG 对原始大分 clamp 到 1.0 的既有行为一致（置信度零回归）。
+    """
+    if not hits:
+        return
+    mx = max(float(h.get("score", 0) or 0) for h in hits)
+    if mx > 1.0:
+        for h in hits:
+            h["score"] = round(float(h.get("score", 0) or 0) / mx, 6)
+
+
 async def _expand_parents(db: AsyncSession, pool: list[dict]) -> list[dict]:
     """small-to-big：命中小块 → 聚合同组父块全文给 LLM（完整上下文，解决跨块/表格被切）。
 
@@ -338,6 +353,8 @@ async def mixed_search(
                         "chunk_idx": c["chunk_idx"], "score": s.get("score", 0),
                         "srcs": ["bm25"],
                     })
+        # BM25 原始分 → 0-1 相关度域（score 会被前端 %显示/CRAG/MMR 当 0-1 消费）
+        _normalize_unbounded_scores(all_sparse)
         # 高置信 sparse 可跳过 rerank
         try:
             from app.routing.query_classifier import should_skip_rerank as _skip_rerank
@@ -476,8 +493,6 @@ async def mixed_search(
                 seen_keys = {(h.get("docId", ""), h.get("section", "")) for h in pool}
                 raptor_fresh = [h for h in raptor_hits
                                 if (h.get("docId", ""), h.get("section", "")) not in seen_keys]
-                # 给摘要一个中等 RRF 常数，不压过原文分
-                rrf_k = 30
                 all_items = []
                 for h in pool:
                     all_items.append({"key": id(h), "score": float(h.get("score", 0) or 0), "item": h})

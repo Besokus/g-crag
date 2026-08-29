@@ -38,3 +38,26 @@ def test_to_item_missing_fields_default_empty():
     assert item["docType"] == ""
     assert item["chunkIdx"] is None
     assert item["sources"] == []
+
+
+def test_normalize_unbounded_scores_scales_bm25_to_zero_one():
+    """BM25 原始分（>1）按 top 相对值归一化到 0-1，保序。"""
+    hits = [{"score": 56.58}, {"score": 30.0}, {"score": 10.0}]
+    retrieval_service._normalize_unbounded_scores(hits)
+    assert hits[0]["score"] == 1.0
+    assert abs(hits[1]["score"] - 0.5302) < 1e-4
+    assert abs(hits[2]["score"] - 0.1768) < 1e-4
+    assert hits[0]["score"] >= hits[1]["score"] >= hits[2]["score"]
+
+
+def test_normalize_keeps_dense_cosine_scale():
+    """0-1 域（dense 余弦/rerank 分）不动。"""
+    hits = [{"score": 0.9}, {"score": 0.5}]
+    retrieval_service._normalize_unbounded_scores(hits)
+    assert hits[0]["score"] == 0.9 and hits[1]["score"] == 0.5
+
+
+def test_normalize_empty_and_missing_score():
+    retrieval_service._normalize_unbounded_scores([])
+    hits = [{"text": "no score"}, {"score": None}]
+    retrieval_service._normalize_unbounded_scores(hits)  # 不抛即过

@@ -122,3 +122,32 @@ ALERT_PERSONA = Persona(
     fallback=_alert_fallback,
     config_source="code",
 )
+
+
+_OPS_PLANNER_SYSTEM = """你是电网检修计划专家。收到故障描述或检修任务后，通过调用工具自主收集证据（规程限值/设备因果链/历史案例/操作票草案），产出可直接执行的检修计划。
+规则：
+1) 每次可调用 0 个或多个工具；证据充分后停止调用工具，给出最终计划。
+2) 最终输出严格 JSON：{"task":"检修任务","device":"设备","steps":["步骤1","步骤2"],"safety":["安全措施"],"risks":["风险点"],"basis":["依据来源：规程/案例名"],"summary":"计划概述"}
+3) 只有用户明确要求"生成工单/创建工单/开票"时才调用 create_ticket，否则只输出计划；开票后按需 submit_ticket 提交审核。
+4) 高风险操作（停电/接地/倒闸）必须在 risks 标注；步骤需含"验电/挂接地线"等规程动作。"""
+
+
+async def _ops_planner_fallback(db, user_msg, model_type):
+    """降级：直接生成操作票草案文本（不落库）。"""
+    res = await domain_service.generate_ticket(db, user_msg, model_type, 5)
+    return res.get("ticket", {}) or {"summary": "检修计划生成失败，请人工编制"}
+
+
+OPS_PLANNER_PERSONA = Persona(
+    name="ops_planner",
+    system_prompt=_OPS_PLANNER_SYSTEM,
+    allowed_tools=["search_regulation", "query_equipment_graph",
+                   "search_similar_case", "draft_ticket",
+                   "create_ticket", "submit_ticket"],
+    max_iter=8,
+    temperature=0.2,
+    max_tokens=2000,
+    output_format="json",
+    fallback=_ops_planner_fallback,
+    config_source="code",
+)

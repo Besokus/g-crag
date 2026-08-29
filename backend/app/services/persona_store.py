@@ -5,17 +5,21 @@ get_persona(name)：DB enabled → 覆盖 code persona（prompt/工具/参数）
 import copy
 import json
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, select
 
+from app.config import settings
 from app.core.obs import degraded
 from app.db.session import AsyncSessionLocal
 from app.models.persona_config import PersonaConfig
-from app.services.agent_personas import ALERT_PERSONA, DIAGNOSE_PERSONA, EVIDENCE_PERSONA, QA_PERSONA
+from app.services.agent_personas import ALERT_PERSONA, DIAGNOSE_PERSONA, EVIDENCE_PERSONA, OPS_PLANNER_PERSONA, QA_PERSONA
 from app.services.agent_personas import _alert_fallback, _diagnose_fallback, _evidence_fallback, _qa_fallback
 from app.services.agent_runtime import Persona
 
-# code persona 注册表（fallback 的来源；DB 覆盖时保留这些 fallback）
+# code persona 注册表（fallback 的来源；DB 覆盖时保留这些 fallback）。
+# ops_planner 受行动闭环开关控制（关=不注册，LLM/persona 列表不可见）。
 _CODE_PERSONAS = {"diagnose": DIAGNOSE_PERSONA, "qa": QA_PERSONA, "alert": ALERT_PERSONA, "evidence_gap": EVIDENCE_PERSONA}
+if settings.TICKET_ACTION_LOOP_ENABLE:
+    _CODE_PERSONAS["ops_planner"] = OPS_PLANNER_PERSONA
 
 # fallback registry：纯 DB persona（code 无）按 fallback_key 映射到 code fallback 函数
 _FALLBACK_REGISTRY = {"qa": _qa_fallback, "diagnose": _diagnose_fallback, "alert": _alert_fallback, "evidence_gap": _evidence_fallback, "none": None}

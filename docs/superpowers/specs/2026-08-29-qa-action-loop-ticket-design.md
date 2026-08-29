@@ -134,4 +134,14 @@
 - 诊断页 `sourceRef=diag:{Date.now()}`（无现成 traceId）；`TicketCreateRequest` 补 `sourceRef` 透传。
 - 顺手清理所改文件内既有死导入（persona_store `func`、domain.py `get_current_user`/`TicketListRequest`）。
 
-**验证**：`pytest tests/ -q --ignore=tests/test_api.py -m "not integration"` → 661 passed，8 failed（经 fad0037 基线 worktree 比对均为既有问题：5 个测试间污染簇 + 2 个本地 `.env` 覆盖所致 + 1 个需特定触发顺序）；`npm run build` ✓；改动文件 ruff 全过。**容器化端到端手动验证（Task 6 Step 2：ops_planner 开票/多角色审批/Grafana 事件指标）未执行——Docker 守护进程未运行，待栈启动后按计划步骤补验。**
+**验证**：`pytest tests/ -q --ignore=tests/test_api.py -m "not integration"` → 661 passed，8 failed（经 fad0037 基线 worktree 比对均为既有问题：5 个测试间污染簇 + 2 个本地 `.env` 覆盖所致 + 1 个需特定触发顺序）；`npm run build` ✓；改动文件 ruff 全过。
+
+**Docker 端到端验证（2026-08-29，全通过）**：compose 重建后真实 LLM 全链路——
+1. admin 经 `/system/agent/run` 跑 `ops_planner`：6 轮迭代调用 search_regulation/query_equipment_graph/search_similar_case/draft_ticket/create_ticket/submit_ticket，落库工单并提交审核（审核引擎打分 55 → pending_review 等人工审）；
+2. operator：创建/提交工单放行（含 sourceRef 透传），review 被拒 `{"code":403,"message":"无权限：需要 ticket:manage"}`；
+3. editor：审批通过 → 签发 → 开始/完成执行，全状态机流转成功；
+4. `quality_events` 表落库 `ticket.issued` + `ticket.completed`；Prometheus `grid_quality_event_total{source="ticket-lifecycle"}` 两指标各=1；工具审计有 create/submit_ticket 记录（error=False）；
+5. UI（browser-use）：operator 看审批/归档按钮全部隐藏（仅删除），editor 看到通过/驳回按钮；诊断页跑真实诊断后「⚙ 生成工单」一键落库 `sourceRef=diag:{ts}`；
+6. 开关关=现状复验：env 置 false 重启 → `persona 'ops_planner' 不存在`（BizError 404 body），恢复 true 后功能正常。
+
+**验证期间发现并修复的既有 bug**（commit `2eb0e46`）：`/system/agent/run` 与 qa 流式 agent 的 ctx 漏传 `role`，导致 `tool_permissions` 角色检查恒按空串拒绝（admin 也调不了 draft_ticket/create_ticket）；已补传。compose backend 恢复被误删的 `env_file: .env`（API key/开关注入依赖它）并显式加 `TICKET_ACTION_LOOP_ENABLE`。

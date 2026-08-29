@@ -302,6 +302,9 @@ class Settings(BaseSettings):
     OTEL_SAMPLE_RATE: float = 1.0          # 采样率：开发期 1.0(100%)，上线后 0.1(10%) + 异常必采
     OTEL_ENDPOINT: str = "http://localhost:3001/api/public/otel"  # Langfuse OTLP HTTP 端点
     OTEL_SERVICE_NAME: str = "grid-qa-backend"  # OTel service.name 标识
+    # langfuse OTLP 鉴权（Basic Auth，双双非空才带头；scripts/langfuse_bootstrap.py 或 UI 创建）
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
     OTEL_EXPORTER_OTLP_ENDPOINT: str = ""  # 标准 OTLP collector 基地址；LLM User 探针优先使用
     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: str = ""  # 显式 traces 接口，例 http://collector:4318/v1/traces
     LLM_USER_OBSERVER_ENABLED: bool = False

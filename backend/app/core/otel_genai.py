@@ -13,6 +13,7 @@
 - 上线后 OTEL_SAMPLE_RATE=0.1（10% 随机采样）
 - 异常必采：span status=ERROR 或 faithfulness < FAITHFULNESS_GATE → 强制导出
 """
+import base64
 import contextvars
 import random
 from contextlib import contextmanager
@@ -100,7 +101,11 @@ def init_otel(endpoint: str | None = None, sample_rate: float | None = None) -> 
         resource=resource,
         sampler=ParentBased(TraceIdRatioBased(effective_rate)),
     )
-    exporter = _CountingExporter(OTLPSpanExporter(endpoint=ep))
+    # langfuse OTLP 鉴权：Basic Auth (public_key:secret_key)
+    _pk = getattr(settings, "LANGFUSE_PUBLIC_KEY", "")
+    _sk = getattr(settings, "LANGFUSE_SECRET_KEY", "")
+    headers = {"Authorization": "Basic " + base64.b64encode(f"{_pk}:{_sk}".encode()).decode()} if _pk and _sk else {}
+    exporter = _CountingExporter(OTLPSpanExporter(endpoint=ep, headers=headers))
     provider.add_span_processor(BatchSpanProcessor(
         exporter,
         max_queue_size=max(256, int(getattr(settings, "LLM_USER_OBSERVER_QUEUE_SIZE", 2048))),

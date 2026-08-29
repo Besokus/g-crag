@@ -407,7 +407,8 @@ async def agent_run(
     if persona is None:
         raise BizError(f"persona '{body.persona}' 不存在", 404)
     result = await run_agent(db, persona, body.query, body.modelType,
-                             ctx={"username": user.username, "tenant": user.tenant_id})
+                             ctx={"username": user.username, "tenant": user.tenant_id,
+                                  "role": user.role})
     return success({
         "persona": body.persona,
         "answer": result.answer if isinstance(result.answer, str) else result.answer,

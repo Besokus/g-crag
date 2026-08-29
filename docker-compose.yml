@@ -106,7 +106,7 @@ services:
       - "6379:6379"
     volumes:
       - ./data/redis:/data
-    command: redis-server --appendonly yes --maxmemory 300mb --maxmemory-policy allkeys-lru --maxmemory-samples 10
+    command: redis-server --appendonly yes --maxmemory 300mb --maxmemory-policy noeviction --maxmemory-samples 10 --requirepass grid-langfuse-pass
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -165,8 +165,10 @@ services:
       args:
         - HTTP_PROXY=http://host.docker.internal:7897
         - HTTPS_PROXY=http://host.docker.internal:7897
+        - BGE_PRELOAD=false
     container_name: grid-backend
     restart: unless-stopped
+    env_file: .env                     # API keys / 开关注入（environment 块优先级更高，覆盖连接串等）
     depends_on:
       - mysql
       - minio
@@ -174,15 +176,21 @@ services:
       - redis
       - neo4j
       - ollama
-    env_file: .env
     environment:
       # 容器内用 service name + 内部端口连接（覆盖 .env 的 localhost）
       DATABASE_URL: mysql+aiomysql://grid:grid123456@mysql:3306/grid_qa?charset=utf8mb4
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:grid-langfuse-pass@redis:6379/0
       MINIO_ENDPOINT: minio:9000
       MILVUS_HOST: milvus
       NEO4J_URI: bolt://neo4j:7687
+      # 容器内 localhost 指自身，OTLP 走 compose 服务名（langfuse 内部 3000→宿主 3001）；
+      # 用 OTEL_EXPORTER_OTLP_ENDPOINT，代码会自动拼 /v1/traces（OTEL_ENDPOINT 不会拼→404）
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://langfuse:3000/api/public/otel
+      LANGFUSE_PUBLIC_KEY: pk-lf-751194e4-12a2-407b-b54f-f153b02c79be
+      LANGFUSE_SECRET_KEY: sk-lf-6396f6d5-d0e5-424d-af6e-363f3368ae57
       MCP_SERVERS: '[{"name":"mock_scada","url":"http://mock-scada:9100"}]'   # N2 启动发现 mock SCADA → 注册 query_telemetry 到 agent ToolRegistry
+      # 问答→行动闭环（create_ticket/submit_ticket 工具 + ops_planner persona + 工单流转事件）；关=现状
+      TICKET_ACTION_LOOP_ENABLE: "true"
       # 容器直连外网：云API(dashscope/deepseek/doubao 国内可达) + bge 走 hf-mirror 国内镜像。
       # 注：宿主机代理 7897 仅监听 127.0.0.1（未开 Allow LAN），容器经 host.docker.internal 连不上，
       # 故不设 HTTPS_PROXY——否则 httpx/requests 把所有出站（含 hf-mirror、云API）都发往不可达代理。
@@ -204,6 +212,8 @@ services:
     image: rag-backend:latest
     build:
       context: ./backend
+      args:
+        - BGE_PRELOAD=false
     container_name: grid-mock-scada
     restart: unless-stopped
     command: python -m app.mcp.mock_scada_server
@@ -254,13 +264,43 @@ services:
 
   # ---------- Langfuse：LLM trace 可视化（N4）----------
   langfuse:
-    image: langfuse/langfuse:latest
+    # 钉到 v3 大版本（:latest 会静默升到新大版本导致再次缺依赖崩溃）
+    image: langfuse/langfuse:3
     container_name: grid-langfuse
     restart: unless-stopped
     depends_on:
       - postgres-langfuse
+      - clickhouse
+      - redis
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@postgres-langfuse:5432/langfuse
+      # Langfuse v3 强依赖 ClickHouse(主存储) + Redis(队列)，缺任一启动即失败
+      # 3.x 要求显式 CLICKHOUSE_USER/PASSWORD（不只看 URL），与 clickhouse 容器账号对齐
+      # 单节点 ClickHouse：CLICKHOUSE_CLUSTER_ENABLED=false 关闭 ON CLUSTER 迁移（免 keeper/集群）
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:langfuse@clickhouse:9000/langfuse
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: langfuse
+      CLICKHOUSE_DB: langfuse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_MIGRATE: "true"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: "grid-langfuse-pass"
+      # 该 v3 构建把 S3 事件上传桶名设为必填；先给占位值，事件上传可后续接 MinIO
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # 媒体上传也走同一个 MinIO bucket
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
       NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-langfuse-secret-2026}
       NEXTAUTH_URL: http://localhost:3001
       SALT: ${LANGFUSE_SALT:-langfuse-salt-2026}
@@ -282,7 +322,63 @@ services:
     volumes:
       - ./data/langfuse-db:/var/lib/postgresql/data
 
+  # ---------- Langfuse 专用 ClickHouse（v3 主存储，仅 langfuse 内部访问，不暴露端口）----------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: grid-langfuse-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: langfuse
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: langfuse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+
+
+  # ---------- Langfuse Worker（v3 事件处理：消费 Redis 队列 → 写 S3 + ClickHouse）----------
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: grid-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      - postgres-langfuse
+      - clickhouse
+      - redis
+      - langfuse
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@postgres-langfuse:5432/langfuse
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:langfuse@clickhouse:9000/langfuse
+      CLICKHOUSE_USER: langfuse
+      CLICKHOUSE_PASSWORD: langfuse
+      CLICKHOUSE_DB: langfuse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_MIGRATE: "false"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: "grid-langfuse-pass"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-langfuse-secret-2026}
+      SALT: ${LANGFUSE_SALT:-langfuse-salt-2026}
+    command: ["node", "--max-old-space-size=1024", "/app/worker/dist/index.js"]
+
 volumes:
   mysql-data:
   grid-backend-data:
+  clickhouse-data:
 

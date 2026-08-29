@@ -1131,7 +1131,8 @@ async def answer(
     return result
 
 
-async def _stream_agent(db, query, model_type, conversation_id, username, tenant, t0):
+async def _stream_agent(db, query, model_type, conversation_id, username, tenant, t0,
+                        user_role: str | None = None):
     """S2: Agent 流式（meta→tool_step×N→token→done）。run_agent on_step→asyncio.Queue 桥接。
     单轮缓存（Redis L1 + MySQL qa_cache L2，复用三级缓存）：命中跳过 agent；done 后写。"""
     import asyncio
@@ -1197,7 +1198,7 @@ async def _stream_agent(db, query, model_type, conversation_id, username, tenant
             qa_persona = await get_persona("qa")
             res = await run_agent(
                 db, qa_persona, query, model_type,
-                ctx={"username": username, "tenant": tenant},
+                ctx={"username": username, "tenant": tenant, "role": user_role or ""},
                 on_step=lambda s: queue.put_nowait({"type": "tool_step", "step": s}),
             )
             await queue.put({"type": "_result", "result": res})
@@ -1267,7 +1268,8 @@ async def stream_answer(
     _p = model_type or settings.LLM_PROVIDER
     safety.guard_query(query)  # 入站 prompt injection 告警（D4）
     if agent_mode:
-        async for ev in _stream_agent(db, query, model_type, conversation_id, username, tenant, t0):
+        async for ev in _stream_agent(db, query, model_type, conversation_id, username, tenant, t0,
+                                      user_role=user_role):
             yield ev
         return
     is_single = not conversation_id  # 仅单轮查/写缓存（多轮上下文变化不缓存）

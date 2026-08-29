@@ -993,14 +993,15 @@ async def answer(
     else:
         ans = raw
         _trace = citation.evidence_trace(ans)
-    _tc = _get_trace()
-    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
-        _tc.attach("citation", refs=len(contexts), annotated=len(_trace or []))
     # ===== Task 10: 可核验引用三层校验 + 校验-CRAG 联动 =====
+    # attach 必须在 citation span 关闭后（span 打开前 attach 找不到同名 span 会静默 no-op）
     with _trace_span("citation"):
         final_ans, citation_extras = await _apply_citation_verification(
             ans, contexts, model_type, db=db, cmap_override=_cmap_override,
         )
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("citation", refs=len(contexts), annotated=len(_trace or []))
     # 校验要求 rewrite 且开关开 → 复用 rewrite_query + mixed_search 重检索重生成再 verify（最多 1 次，防死循环）
     # C2: CRAG 已 rewritten 时不再二次 rewrite（citation 仍 needed→用现 contexts，省二次 LLM，防级联重检索）
     if (citation_extras.get("citationVerified", {}).get("rewrite_needed")
@@ -1638,13 +1639,16 @@ async def stream_answer(
                                       max_tokens=settings.LLM_MAX_TOKENS,
                                       usage=None, model=_p, output=full))
     # 证据溯源：补标（done 段下发 annotatedAnswer，前端替换渲染出角标；持久化/缓存均用补标后）
+    # 流式路径本无 citation span → 用 record() 补计时+attrs（开关内，关=现状无此行）
+    _cit0 = time.time()
     if getattr(settings, "CITATION_AUTO_ENABLE", True):
         annotated, _trace = await citation.auto_cite(full, contexts)
     else:
         annotated, _trace = full, citation.evidence_trace(full)
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
-        _tc.attach("citation", refs=len(contexts), annotated=len(_trace or []))
+        _tc.record("citation", time.time() - _cit0, refs=len(contexts),
+                   annotated=len(_trace or []))
     # C3：流式接校验（CITATION_VERIFIER_ENABLE 开时，done 前同步跑校验1+2；NLI 按 C1 异步后置）。
     # annotated 可能被校验 drop 编号→警示替换；citationVerified 随 done 下发（前端零改动，不读该字段）。
     _stream_citation_extras: dict = {}

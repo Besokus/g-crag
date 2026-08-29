@@ -61,3 +61,19 @@ def test_normalize_empty_and_missing_score():
     retrieval_service._normalize_unbounded_scores([])
     hits = [{"text": "no score"}, {"score": None}]
     retrieval_service._normalize_unbounded_scores(hits)  # 不抛即过
+
+
+def test_retr_span_passes_attrs(monkeypatch):
+    from app.core.qa_trace import new_collector
+    c = new_collector("q")
+    with retrieval_service._retr_span("dense_search", ef=64, cand=20):
+        pass
+    s = c.to_dict()["spans"][0]
+    assert s["name"] == "dense_search" and s["group"] == "retrieval"
+    assert s["attrs"] == {"ef": 64, "cand": 20}
+
+
+def test_retr_span_no_collector_noop():
+    # 不绑 collector（默认 contextvar None）→ 不抛即过
+    with retrieval_service._retr_span("rrf", k=60):
+        pass

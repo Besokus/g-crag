@@ -25,10 +25,10 @@ from contextlib import nullcontext
 from app.core.qa_trace import get_collector as _get_trace
 
 
-def _retr_span(name: str):
+def _retr_span(name: str, **attrs):
     """检索子链 trace 打点（group=retrieval）；无 collector 时 no-op。to_thread 不深入线程内部。"""
     c = _get_trace()
-    return c.span(name, "retrieval") if c else nullcontext()
+    return c.span(name, "retrieval", **attrs) if c else nullcontext()
 
 
 def _ov(ov: dict | None, key: str, default):
@@ -244,30 +244,37 @@ async def _dense_and_sparse(
     _ef = _ef_for_route(route, query_type, _base_ef) if route_aware else _base_ef
     with _retr_span("dense_search"):
         dense_cloud, dense_bge = await _dense_dual(dense_q, cand, _ef)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("dense_search", ef=_ef, cand=cand,
+                   cloud=len(dense_cloud or []), bge=len(dense_bge or []))
     dense_hits = []
     for d in dense_cloud:
         dense_hits.append({**d, "key": (d.get("doc_id"), d.get("chunk_idx")), "srcs": ["dense_cloud"]})
     for d in dense_bge:
         dense_hits.append({**d, "key": (d.get("doc_id"), d.get("chunk_idx")), "srcs": ["dense_bge"]})
 
-    await bm25_service.ensure_built(db)
-    sparse_hits = []
-    _bm25_q = q
-    if getattr(settings, "SYNONYM_EXPAND_ENABLE", False):
-        try:
-            from app.services import term_service
-            _bm25_q = term_service.expand_synonyms(q)   # 同义词扩展（BRD §4.3.1）提升 BM25 召回
-        except Exception:
-            pass
-    for s in bm25_service.search(_bm25_q, topk=cand):
-        c = bm25_service.get_chunk(s["idx"])
-        if not c:
-            continue
-        sparse_hits.append({
-            "key": (c["doc_id"], c["chunk_idx"]), "text": c["text"],
-            "doc_id": c["doc_id"], "doc_name": c["doc_name"], "chunk_idx": c["chunk_idx"],
-            "srcs": ["bm25"],
-        })
+    with _retr_span("sparse_search"):
+        await bm25_service.ensure_built(db)
+        sparse_hits = []
+        _bm25_q = q
+        if getattr(settings, "SYNONYM_EXPAND_ENABLE", False):
+            try:
+                from app.services import term_service
+                _bm25_q = term_service.expand_synonyms(q)   # 同义词扩展（BRD §4.3.1）提升 BM25 召回
+            except Exception:
+                pass
+        for s in bm25_service.search(_bm25_q, topk=cand):
+            c = bm25_service.get_chunk(s["idx"])
+            if not c:
+                continue
+            sparse_hits.append({
+                "key": (c["doc_id"], c["chunk_idx"]), "text": c["text"],
+                "doc_id": c["doc_id"], "doc_name": c["doc_name"], "chunk_idx": c["chunk_idx"],
+                "srcs": ["bm25"],
+            })
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("sparse_search", topk=cand)
     return dense_hits, sparse_hits
 
 
@@ -308,6 +315,9 @@ async def mixed_search(
     # 0) query 改写（口语→规范，含 adaptive 跳过 + 缓存 + 评估闭环）
     with _retr_span("query_rewrite"):
         q = (await query_rewrite.rewrite_query_v2(query, model_type))["query"]
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("query_rewrite", rewritten=q[:160], changed=q != query)
 
     # 路由调度：根据决策选择检索路径
     route = routing_decision.route if routing_decision else "hybrid"
@@ -342,17 +352,21 @@ async def mixed_search(
 
     if route == "sparse":
         # sparse-only: 仅 BM25，跳过 dense embedding 调用
-        await bm25_service.ensure_built(db)
-        for qq in queries:
-            for s in bm25_service.search(qq, topk=cand):
-                c = bm25_service.get_chunk(s["idx"])
-                if c:
-                    all_sparse.append({
-                        "key": (c["doc_id"], c["chunk_idx"]), "text": c["text"],
-                        "doc_id": c["doc_id"], "doc_name": c["doc_name"],
-                        "chunk_idx": c["chunk_idx"], "score": s.get("score", 0),
-                        "srcs": ["bm25"],
-                    })
+        with _retr_span("sparse_search"):
+            await bm25_service.ensure_built(db)
+            for qq in queries:
+                for s in bm25_service.search(qq, topk=cand):
+                    c = bm25_service.get_chunk(s["idx"])
+                    if c:
+                        all_sparse.append({
+                            "key": (c["doc_id"], c["chunk_idx"]), "text": c["text"],
+                            "doc_id": c["doc_id"], "doc_name": c["doc_name"],
+                            "chunk_idx": c["chunk_idx"], "score": s.get("score", 0),
+                            "srcs": ["bm25"],
+                        })
+        _tc = _get_trace()
+        if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+            _tc.attach("sparse_search", topk=cand)
         # BM25 原始分 → 0-1 相关度域（score 会被前端 %显示/CRAG/MMR 当 0-1 消费）
         _normalize_unbounded_scores(all_sparse)
         # 高置信 sparse 可跳过 rerank
@@ -370,6 +384,10 @@ async def mixed_search(
             _ef = _ef_for_route(route, _query_type, _base_ef) if _route_aware else _base_ef
             with _retr_span("dense_search"):
                 dense_cloud, dense_bge = await _dense_dual(dense_q, cand, _ef)
+            _tc = _get_trace()
+            if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+                _tc.attach("dense_search", ef=_ef, cand=cand,
+                           cloud=len(dense_cloud or []), bge=len(dense_bge or []))
             for src, results in (("dense_cloud", dense_cloud), ("dense_bge", dense_bge)):
                 for d in results:
                     all_dense.append({
@@ -404,37 +422,55 @@ async def mixed_search(
             h["srcs"] = _src_map.get(h.get("key"), list(h.get("srcs", [])))
     else:
         # hybrid / sparse_first: RRF 融合
-        # A2：route_aware 开时按 route 调权（dense/sparse_first ×1.3），关时等权=现状。
-        #     扫描 overrides 仍优先生效（_ov 默认值=route-aware 计算值）。
-        _default_dw, _default_sw = (
-            _rrf_weights_for_route(route, settings.RRF_DENSE_WEIGHT, settings.RRF_SPARSE_WEIGHT)
-            if _route_aware
-            else (settings.RRF_DENSE_WEIGHT, settings.RRF_SPARSE_WEIGHT)
-        )
-        fused = rrf.rrf_fuse([all_dense, all_sparse], key_fn=lambda h: h["key"],
-                             k=_ov(overrides, "RRF_K", settings.RRF_K),
-                             weights=[_ov(overrides, "RRF_DENSE_WEIGHT", _default_dw),
-                                      _ov(overrides, "RRF_SPARSE_WEIGHT", _default_sw)])
-        _src_map = _aggregate_srcs(all_dense, all_sparse)
-        for h in fused:
-            h["srcs"] = _src_map.get(h.get("key"), [])
-        pool = fused[: _pool_cap]
+        with _retr_span("rrf"):
+            # A2：route_aware 开时按 route 调权（dense/sparse_first ×1.3），关时等权=现状。
+            #     扫描 overrides 仍优先生效（_ov 默认值=route-aware 计算值）。
+            _default_dw, _default_sw = (
+                _rrf_weights_for_route(route, settings.RRF_DENSE_WEIGHT, settings.RRF_SPARSE_WEIGHT)
+                if _route_aware
+                else (settings.RRF_DENSE_WEIGHT, settings.RRF_SPARSE_WEIGHT)
+            )
+            _rrf_k = _ov(overrides, "RRF_K", settings.RRF_K)
+            _rrf_dw = _ov(overrides, "RRF_DENSE_WEIGHT", _default_dw)
+            _rrf_sw = _ov(overrides, "RRF_SPARSE_WEIGHT", _default_sw)
+            fused = rrf.rrf_fuse([all_dense, all_sparse], key_fn=lambda h: h["key"],
+                                 k=_rrf_k, weights=[_rrf_dw, _rrf_sw])
+            _src_map = _aggregate_srcs(all_dense, all_sparse)
+            for h in fused:
+                h["srcs"] = _src_map.get(h.get("key"), [])
+            pool = fused[: _pool_cap]
+        _tc = _get_trace()
+        if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+            _tc.attach("rrf", k=_rrf_k, dw=_rrf_dw, sw=_rrf_sw)
 
     # 3) 重排（高置信 sparse 可跳过，单路 dense/sparse 也可跳过）
     if _ov(overrides, "RERANK_ENABLE", settings.RERANK_ENABLE) and len(pool) > 1 and not skip_rerank:
+        _rr_topn = min(_pool_cap, len(pool))
+        _rr_ok, _rr_top1 = False, None
         with _retr_span("rerank"):
             try:
                 docs = [h.get("text", "") for h in pool]
                 ranked = await asyncio.wait_for(
-                    rerank_service.get_reranker().rerank(q, docs, top_n=min(_pool_cap, len(pool))),
+                    rerank_service.get_reranker().rerank(q, docs, top_n=_rr_topn),
                     timeout=getattr(settings, "RERANK_TIMEOUT", 2.0))
                 pool = [{**pool[idx], "score": float(score)} for idx, score in ranked]
+                _rr_ok, _rr_top1 = True, (round(float(ranked[0][1]), 4) if ranked else None)
             except Exception as e:
                 degraded("rerank", e, "超时/失败 → 用 RRF 原序兜底（稳 p99）")
                 # pool 保持原样，不改变
+        _tc = _get_trace()
+        if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+            if _rr_ok:
+                _tc.attach("rerank", topN=_rr_topn, top1=_rr_top1)
+            else:
+                _tc.attach("rerank", degraded=True)
     # pool 已经就绪（sparse/dense 单路直接使用，hybrid 已 RRF 融合）
 
     # 4) 元数据过滤：租户隔离 + docType/设备（多租户 + D5）+ RBAC 文档级 ACL（dept/allowed_roles）
+    # filter_acl 用 record() 事后记（过滤列表推导多 return 不便 with 包裹），补瀑布行；
+    # 耗时恒记，before/after attrs 受 QA_TRACE_DETAIL_ENABLE 控。
+    _f0 = time.time()
+    _filter_before = len(pool)
     doc_ids = {h.get("doc_id") for h in pool if h.get("doc_id")}
     if doc_ids and (tenant or doc_type or equipment or user_dept or user_role):
         rows = (await db.execute(
@@ -455,6 +491,11 @@ async def mixed_search(
             and _acl_ok(dept_map.get(h.get("doc_id"), ""),
                         ar_map.get(h.get("doc_id"), ""), user_dept, user_role)
         ]
+    _tc = _get_trace()
+    if _tc:
+        _filter_attrs = ({"before": _filter_before, "after": len(pool)}
+                         if getattr(settings, "QA_TRACE_DETAIL_ENABLE", False) else {})
+        _tc.record("filter_acl", time.time() - _f0, "retrieval", **_filter_attrs)
 
     # 4.5) docType 补全：保证每个 item 都带 doc_type（来源卡片要用，无条件查一次）
     _need_type_ids = {h.get("doc_id") for h in pool if h.get("doc_id") and not h.get("doc_type")}
@@ -473,7 +514,13 @@ async def mixed_search(
         #     扫描 overrides 仍优先生效（_ov 默认值=query_type 计算值）。
         _qt_lambda = _mmr_lambda_for_query_type(_query_type) if _route_aware else None
         _default_lambda = _qt_lambda if _qt_lambda is not None else settings.MMR_LAMBDA
-        pool = mmr.mmr(pool, topk, _ov(overrides, "MMR_LAMBDA", _default_lambda))
+        _mmr_lambda = _ov(overrides, "MMR_LAMBDA", _default_lambda)
+        _mmr_cand = len(pool)
+        with _retr_span("mmr"):
+            pool = mmr.mmr(pool, topk, _mmr_lambda)
+        _tc = _get_trace()
+        if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+            _tc.attach("mmr", lamda=_mmr_lambda, candidates=_mmr_cand)
     else:
         pool = pool[:topk]
 

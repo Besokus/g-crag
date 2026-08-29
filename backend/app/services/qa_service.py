@@ -724,6 +724,9 @@ async def answer(
     # 多轮也命中（用户认可的高频答案与上下文无关）；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
     with _trace_span("hotqa"):
         hot = await _hit_hotqa(nq, conversation_id or "", t0)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("hotqa", hit=bool(hot))
     if hot:
         try:
             from app.core import metrics
@@ -811,6 +814,9 @@ async def answer(
     # 多轮指代消解：检索用改写后的独立查询
     with _trace_span("standalone_rewrite"):
         search_q = await _search_query_for_retrieve(db, query, nq, conversation_id, history, model_type)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("standalone_rewrite", rewritten=search_q[:160], changed=search_q != nq)
 
     # 多轮且 query 完整(standalone 未改写 search_q==nq) → 也查 Redis 热点缓存
     # 场景：用户点推荐问题(完整 query)接续对话，答案不依赖上下文，可安全命中
@@ -865,12 +871,23 @@ async def answer(
                 routing = route_query(search_q)
             except Exception as e:
                 degraded("routing_dispatch", e)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False) and routing:
+        _feat = getattr(routing, "features", None)
+        _tc.attach("routing", route=routing.route, confidence=routing.confidence,
+                   reason=(routing.reason or "")[:200],
+                   queryType=(getattr(_feat, "query_type", "") or ""))
 
     with _trace_span("retrieval"):
         contexts = await retrieval_service.mixed_search(
             db, search_q, topk, tenant=tenant, routing_decision=routing,
             user_dept=user_dept, user_role=user_role,
         )
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("retrieval", hits=len(contexts),
+                   route=(routing.route if routing else "hybrid"),
+                   top1=round(float(contexts[0].get("score") or 0), 4) if contexts else None)
     if not contexts:
         # 无结果兜底：记录为知识缺口（喂证据补全闭环）+ 友好引导，而非生硬拒答
         try:
@@ -893,6 +910,10 @@ async def answer(
         contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
             db, nq, contexts, model_type, topk, tenant
         )
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("crag", grade=crag_grade, action=crag_action, confidence=confidence,
+                   **({"extras": crag_extras} if crag_extras else {}))
     # 注：CRAG refused 的证据补全收集已挪到答案生成后（与 medium 共用既有 collect 点），
     # 避免 answer="" 被先写入导致真实答案被去重吞掉（I1 修复）。
 
@@ -905,6 +926,10 @@ async def answer(
             except Exception as e:
                 degraded("kg_graph_context", e)
                 graph = []
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("graphrag", lines=len(graph),
+                   enabled=getattr(settings, "KG_RAG_ENABLE", False))
     _structured = (getattr(settings, "CITATION_STRUCTURED_OUTPUT", False)
                    and getattr(settings, "CITATION_VERIFIER_ENABLE", False))
     messages = prompt_templates.build_messages_with_history(
@@ -923,13 +948,14 @@ async def answer(
     # B4：真实 token usage（opt-in，默认关 → 走原 chat str 路径，估算 token）
     _llm_usage: dict | None = None
     try:
+        _temperature = config_service.rt_temperature()
         if getattr(settings, "LLM_USAGE_TRACK_ENABLE", False):
             raw, _llm_usage = await _llm_prov.chat_with_usage(
-                messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS,
+                messages, temperature=_temperature, max_tokens=settings.LLM_MAX_TOKENS,
             )
         else:
             raw = await _llm_prov.chat(
-                messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS)
+                messages, temperature=_temperature, max_tokens=settings.LLM_MAX_TOKENS)
     except Exception as e:
         # 全部 provider（含本地 ollama 兜底）耗尽 → 优雅拒答，不裸抛 500（I2）
         degraded("llm_all_exhausted", e)
@@ -944,6 +970,12 @@ async def answer(
     if _tc:
         _tc.record("llm", time.time() - _llm0)
         _tc.mark("provider_used", _llm_fields["modelType"])
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        from app.core.qa_trace import llm_attrs
+        _tc.attach("llm", **llm_attrs(messages, temperature=_temperature,
+                                      max_tokens=settings.LLM_MAX_TOKENS,
+                                      usage=_llm_usage, model=_llm_fields["modelType"],
+                                      output=raw))
     raw = safety.safe_answer(raw)  # 答案脱敏（PII_MASK_ENABLE 开启时，D4）
     # STRUCTURED_OUTPUT：LLM 输出 JSON → parse 取 answer_text + 结构化 citation_map(每 ref 一项不重复)
     # 跳过 auto_cite(结构化已有 cmap)；否则走 auto_cite 补标(现状)。
@@ -961,6 +993,9 @@ async def answer(
     else:
         ans = raw
         _trace = citation.evidence_trace(ans)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("citation", refs=len(contexts), annotated=len(_trace or []))
     # ===== Task 10: 可核验引用三层校验 + 校验-CRAG 联动 =====
     with _trace_span("citation"):
         final_ans, citation_extras = await _apply_citation_verification(
@@ -1290,6 +1325,9 @@ async def stream_answer(
     if not regen:
         with _trace_span("hotqa"):
             hot = await _hit_hotqa(nq, conversation_id or "", t0)
+        _tc = _get_trace()
+        if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+            _tc.attach("hotqa", hit=bool(hot))
         if hot:
             # 多轮命中 hotqa 也建独立 conv 落消息（与现有缓存命中段一致），单轮用 conversation_id
             cid = conversation_id
@@ -1437,6 +1475,9 @@ async def stream_answer(
         history = await conversation_service.get_messages(db, conversation_id, _HISTORY_LIMIT)
     with _trace_span("standalone_rewrite"):
         search_q = await _search_query_for_retrieve(db, query, nq, conversation_id, history, model_type)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("standalone_rewrite", rewritten=search_q[:160], changed=search_q != nq)
 
     # 多轮且 query 完整(search_q==nq) → 也查 Redis 热点（流式，存消息接续对话）
     if conversation_id and search_q == nq and not regen and not await _is_blacklisted(nq):
@@ -1475,12 +1516,23 @@ async def stream_answer(
                 routing = route_query(search_q)
             except Exception as e:
                 degraded("routing_dispatch", e)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False) and routing:
+        _feat = getattr(routing, "features", None)
+        _tc.attach("routing", route=routing.route, confidence=routing.confidence,
+                   reason=(routing.reason or "")[:200],
+                   queryType=(getattr(_feat, "query_type", "") or ""))
 
     with _trace_span("retrieval"):
         contexts = await retrieval_service.mixed_search(
             db, search_q, topk, tenant=tenant, routing_decision=routing,
             user_dept=user_dept, user_role=user_role,
         )
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("retrieval", hits=len(contexts),
+                   route=(routing.route if routing else "hybrid"),
+                   top1=round(float(contexts[0].get("score") or 0), 4) if contexts else None)
     if not contexts:
         # B7：stream 无结果 → 自动入证据补全队列（auto_no_recall）
         if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
@@ -1495,6 +1547,10 @@ async def stream_answer(
         contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
             db, nq, contexts, model_type, topk, tenant
         )
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("crag", grade=crag_grade, action=crag_action, confidence=confidence,
+                   **({"extras": crag_extras} if crag_extras else {}))
     # 注：stream CRAG refused 的证据补全收集已挪到答案生成后（与 medium 共用既有 collect 点），
     # 避免 answer="" 被先写入导致真实答案被去重吞掉（I1 修复，与非流式路径对齐）。
 
@@ -1506,6 +1562,11 @@ async def stream_answer(
         except Exception as e:
             degraded("kg_graph_context", e)
             graph = []
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        # 流式路径 graphrag 无既有 span → attach 静默 no-op（与 Task 1 契约一致）
+        _tc.attach("graphrag", lines=len(graph),
+                   enabled=getattr(settings, "KG_RAG_ENABLE", False))
     messages = prompt_templates.build_messages_with_history(nq, contexts, history, graph, confidence)
 
     # 流式前先建会话，确保 conversationId 可随 meta 下发
@@ -1538,8 +1599,9 @@ async def stream_answer(
     _llm0 = time.time()
     _llm_prov = get_llm_provider(model_type, tier=_tier)
     try:
+        _temperature = config_service.rt_temperature()
         async for token in _llm_prov.stream(
-            messages, temperature=config_service.rt_temperature(), max_tokens=settings.LLM_MAX_TOKENS):
+            messages, temperature=_temperature, max_tokens=settings.LLM_MAX_TOKENS):
             parts.append(token)
             yield {"type": "token", "content": token}
     except Exception as e:
@@ -1570,11 +1632,19 @@ async def stream_answer(
 
     # 3) 持久化完整答案
     full = "".join(parts)
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        from app.core.qa_trace import llm_attrs
+        _tc.attach("llm", **llm_attrs(messages, temperature=_temperature,
+                                      max_tokens=settings.LLM_MAX_TOKENS,
+                                      usage=None, model=_p, output=full))
     # 证据溯源：补标（done 段下发 annotatedAnswer，前端替换渲染出角标；持久化/缓存均用补标后）
     if getattr(settings, "CITATION_AUTO_ENABLE", True):
         annotated, _trace = await citation.auto_cite(full, contexts)
     else:
         annotated, _trace = full, citation.evidence_trace(full)
+    _tc = _get_trace()
+    if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+        _tc.attach("citation", refs=len(contexts), annotated=len(_trace or []))
     # C3：流式接校验（CITATION_VERIFIER_ENABLE 开时，done 前同步跑校验1+2；NLI 按 C1 异步后置）。
     # annotated 可能被校验 drop 编号→警示替换；citationVerified 随 done 下发（前端零改动，不读该字段）。
     _stream_citation_extras: dict = {}

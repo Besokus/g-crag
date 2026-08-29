@@ -162,9 +162,17 @@ def test_draft_ticket_wraps_domain(monkeypatch):
     assert seen["tenant"] == "tenant-a"
 
 
-def test_default_registry_has_four_tools():
+def test_default_registry_baseline_tools():
+    """基线 4 工具恒在；行动闭环 2 工具按开关出现（.env/compose 可翻转，断言不依赖开关）。"""
     names = {t.name for t in agent_tools.DEFAULT_REGISTRY._tools.values()}
-    assert names == {"search_regulation", "query_equipment_graph", "search_similar_case", "draft_ticket"}
+    assert {"search_regulation", "query_equipment_graph",
+            "search_similar_case", "draft_ticket"} <= names
+    gated = {"create_ticket", "submit_ticket"}
+    from app.config import settings as _s
+    if _s.TICKET_ACTION_LOOP_ENABLE:
+        assert gated <= names
+    else:
+        assert not (gated & names)
 
 
 # ===== Task 3: metrics 预注册 =====

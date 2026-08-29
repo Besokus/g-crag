@@ -47,6 +47,7 @@ class TicketCreateRequest(BaseModel):
     safety: list[str] = []
     risks: list[str] = []
     notes: str = ""
+    sourceRef: str = ""   # 来源关联（qa:{会话id} / diag:{traceId}），create_ticket 幂等键
 
 
 class TicketListRequest(BaseModel):

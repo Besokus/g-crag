@@ -98,20 +98,20 @@
           <template v-if="selected.status === 'draft'">
             <button class="btn btn-primary btn-sm" @click="handleSubmit(selected.id)">📤 提交审核</button>
           </template>
-          <template v-if="selected.status === 'pending_review' && can('system:config')">
+          <template v-if="selected.status === 'pending_review' && can('ticket:manage')">
             <button class="btn btn-success btn-sm" @click="handleReview(selected.id, true)">✅ 通过</button>
             <button class="btn btn-danger btn-sm" @click="handleReview(selected.id, false)">❌ 驳回</button>
           </template>
-          <template v-if="selected.status === 'reviewed'">
+          <template v-if="selected.status === 'reviewed' && can('ticket:manage')">
             <button class="btn btn-primary btn-sm" @click="handleIssue(selected.id)">📨 签发</button>
           </template>
-          <template v-if="selected.status === 'issued'">
+          <template v-if="selected.status === 'issued' && can('ticket:manage')">
             <button class="btn btn-primary btn-sm" @click="handleStartExec(selected.id)">▶️ 开始执行</button>
           </template>
-          <template v-if="selected.status === 'in_execution'">
+          <template v-if="selected.status === 'in_execution' && can('ticket:manage')">
             <button class="btn btn-success btn-sm" @click="showCompleteDialog = true">✅ 完成执行</button>
           </template>
-          <template v-if="selected.status === 'completed'">
+          <template v-if="selected.status === 'completed' && can('ticket:manage')">
             <button class="btn btn-ghost btn-sm" @click="handleArchive(selected.id)">📦 归档</button>
           </template>
           <button class="btn btn-ghost btn-sm" @click="handleDelete(selected.id)" style="color:var(--danger)">🗑️ 删除</button>
@@ -142,7 +142,7 @@ import { useAuthStore } from '../stores/auth'
 import { hasPerm } from '../utils/perm'
 
 const auth = useAuthStore()
-const can = (p) => hasPerm(auth.role, p)   // RBAC：两票审核(system:config)仅管理员
+const can = (p) => hasPerm(auth.role, p)   // RBAC：两票审批/签发/执行/归档(ticket:manage)仅 admin/editor；起草/提交所有人
 
 const tab = ref('tickets')
 const toast = ref('')

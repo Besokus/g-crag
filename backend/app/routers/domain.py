@@ -3,15 +3,15 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.limiter import limiter
-from app.core.permissions import DOMAIN_USE
+from app.core.permissions import DOMAIN_USE, TICKET_MANAGE
 from app.core.response import success
 from app.db.session import get_db
-from app.dependencies import get_current_user, require_admin, require_perm
+from app.dependencies import require_admin, require_perm
 from app.models.user import User
 from app.schemas.domain import (
     DiagnoseAgentRequest, DiagnoseDebateRequest, DiagnoseRequest,
     QueryPlanRequest, SimilarCaseRequest,
-    TicketAuditRequest, TicketCreateRequest, TicketExecuteRequest, TicketListRequest, TicketRequest, TicketReviewRequest,
+    TicketAuditRequest, TicketCreateRequest, TicketExecuteRequest, TicketRequest, TicketReviewRequest,
 )
 from app.services import debate_agent_service
 from app.services import diagnose_agent_service
@@ -122,7 +122,7 @@ async def ticket_create(
         db, ticket_type=body.ticketType, task=body.task, device=body.device,
         location=body.location, steps=body.steps, safety=body.safety,
         risks=body.risks, notes=body.notes, creator=user.username,
-        tenant=user.tenant_id,
+        source_ref=body.sourceRef or None, tenant=user.tenant_id,
     )
     await write_log(db, user.username, "创建两票", f"{body.ticketType}：{body.task[:40]}")
     return success(data, "创建成功")
@@ -182,7 +182,7 @@ async def ticket_review(
     ticket_id: str,
     body: TicketReviewRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin),
+    user: User = Depends(require_perm(TICKET_MANAGE)),
 ):
     """审核票据（通过/驳回）。"""
     data = await ticket_lifecycle_service.review_ticket(
@@ -199,7 +199,7 @@ async def ticket_issue(
     request: Request,
     ticket_id: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_perm(DOMAIN_USE)),
+    user: User = Depends(require_perm(TICKET_MANAGE)),
 ):
     """签发票据（审核通过后签发）。"""
     data = await ticket_lifecycle_service.issue_ticket(
@@ -216,7 +216,7 @@ async def ticket_execute(
     ticket_id: str,
     body: TicketExecuteRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_perm(DOMAIN_USE)),
+    user: User = Depends(require_perm(TICKET_MANAGE)),
 ):
     """开始执行/完成执行票据。没有 executor 参数时开始执行，有 log 时完成执行。"""
     if body.log:
@@ -240,7 +240,7 @@ async def ticket_archive(
     request: Request,
     ticket_id: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_perm(DOMAIN_USE)),
+    user: User = Depends(require_perm(TICKET_MANAGE)),
 ):
     """归档票据。"""
     data = await ticket_lifecycle_service.archive_ticket(

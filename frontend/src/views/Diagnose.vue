@@ -27,6 +27,12 @@
           <div class="cause-body"><div class="cause-name">{{ c.name }}</div><div class="cause-line" v-if="c.evidence"><b>依据：</b>{{ c.evidence }}</div><div class="cause-line" v-if="c.handling"><b>处置：</b>{{ c.handling }}</div></div>
         </div>
         <div class="risks" v-if="diag.diagnosis?.risks?.length"><b>⚠ 风险提示：</b><span class="badge badge-danger" v-for="r in diag.diagnosis.risks" :key="r" style="margin:2px">{{ r }}</span></div>
+        <div v-if="can('domain:use')" style="margin-top:10px">
+          <button class="btn btn-primary" @click="toTicket" :disabled="ticketCreating">
+            {{ ticketCreating ? '创建中…' : '⚙ 生成工单' }}
+          </button>
+          <span class="hint" style="margin-left:8px">将诊断结论落库为两票草稿，到「两票管理」页流转</span>
+        </div>
         <div v-if="agentMode && agentSteps.length" class="agent-trace">
           <div class="src-head" @click="traceOpen = !traceOpen" style="cursor:pointer">
             🧠 Agent 思考过程（{{ agentSteps.length }} 步<span v-if="agentDegraded"> · 已降级</span>）<span class="hint">{{ traceOpen ? '▾' : '▸' }}</span>
@@ -190,7 +196,12 @@
 
 <script setup>
 import { ref, h } from 'vue'
-import { diagnose, similarCase, generateTicket, auditTicket, diagnoseAgent, diagnoseDebate, queryPlan } from '../api'
+import { diagnose, similarCase, generateTicket, auditTicket, diagnoseAgent, diagnoseDebate, queryPlan, createTicket } from '../api'
+import { useAuthStore } from '../stores/auth'
+import { hasPerm } from '../utils/perm'
+
+const auth = useAuthStore()
+const can = (p) => hasPerm(auth.role, p)
 
 const SourcesList = {
   props: ['sources'],
@@ -254,6 +265,24 @@ async function doAudit() {
   auditLoading.value = true; audit.value = null
   try { audit.value = (await auditTicket(auditText.value, auditType.value, modelType.value || null)).data }
   catch (e) { show('审核失败（需管理员权限）') } finally { auditLoading.value = false }
+}
+
+// 诊断结论 → 两票草稿（sourceRef=diag:{时间戳} 幂等关联本次诊断）
+const ticketCreating = ref(false)
+async function toTicket() {
+  if (!diag.value?.diagnosis) return
+  ticketCreating.value = true
+  try {
+    const d = diag.value.diagnosis
+    const res = await createTicket({
+      task: (d.summary || '故障处置').slice(0, 180),
+      device: d.causes?.[0]?.name || '',
+      steps: (d.causes || []).map(c => c.handling).filter(Boolean),
+      risks: d.risks || [],
+      sourceRef: 'diag:' + Date.now(),
+    })
+    show(`工单已创建（草稿）：${res.data?.id || ''}，请到「两票管理」页流转`)
+  } catch (e) { show('工单创建失败') } finally { ticketCreating.value = false }
 }
 </script>
 

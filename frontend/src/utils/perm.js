@@ -6,8 +6,8 @@
  *
  * 角色矩阵：
  * - admin    全权（通配 '*'）
- * - editor   文档全权 + 问答 + 反馈读 + 图谱编辑 + 领域
- * - operator 问答 + 读文档 + 读图谱 + 领域 + 反馈读
+ * - editor   文档全权 + 问答 + 反馈读 + 图谱编辑 + 领域 + 两票审批
+ * - operator 问答 + 读文档 + 读图谱 + 领域 + 反馈读（两票只能起草/提交）
  * - auditor  全只读 + 审计/告警/指标读 + 领域
  */
 const ADMIN_ALL = '*'
@@ -17,7 +17,7 @@ const ROLE_PERMISSIONS = {
   editor: new Set([
     'doc:read', 'doc:upload', 'doc:delete', 'doc:manage',
     'qa:answer', 'feedback:read',
-    'kg:read', 'kg:edit', 'domain:use',
+    'kg:read', 'kg:edit', 'domain:use', 'ticket:manage',
   ]),
   operator: new Set([
     'doc:read', 'qa:answer', 'feedback:read',

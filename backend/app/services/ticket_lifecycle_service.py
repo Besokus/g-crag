@@ -11,9 +11,10 @@ from datetime import datetime
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.obs import degraded
 from app.models.ticket import Ticket, TicketStatus, TicketType
-from app.services import ticket_audit_service
+from app.services import quality_event_bus, ticket_audit_service
 
 
 def _now():
@@ -189,6 +190,7 @@ async def issue_ticket(
     t.issuer = issuer or t.issuer
     t.issued_at = _now()
     await db.commit()
+    await _emit_ticket_event("ticket.issued", t, tenant)
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -229,6 +231,7 @@ async def complete_execution(
     if deviation:
         t.deviation = deviation[:1000]
     await db.commit()
+    await _emit_ticket_event("ticket.completed", t, tenant)
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -292,6 +295,23 @@ async def get_ticket_stats(db: AsyncSession, tenant: str = "default") -> dict:
 
 
 # ---------- 内部辅助 ----------
+
+async def _emit_ticket_event(event_type: str, t: Ticket, tenant: str = "default"):
+    """流转事件：开关开才发；失败 degraded 不阻塞流转。"""
+    if not settings.TICKET_ACTION_LOOP_ENABLE:
+        return
+    try:
+        await quality_event_bus.emit(
+            source="ticket-lifecycle", type=event_type,
+            payload={"ticketId": t.id, "task": t.task, "device": t.device,
+                     "steps": _parse_json(t.steps, []),
+                     "executionLog": t.execution_log or "",
+                     "deviation": t.deviation or "",
+                     "creator": t.creator or ""},
+            tenant=tenant)
+    except Exception as e:
+        degraded("ticket_event_emit", e)
+
 
 def _ticket_to_dict(t: Ticket) -> dict:
     return {

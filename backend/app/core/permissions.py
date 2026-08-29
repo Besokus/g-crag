@@ -23,6 +23,7 @@ KG_READ = "kg:read"
 KG_EDIT = "kg:edit"
 # 领域增强（诊断 / 两票 / 相似案例）
 DOMAIN_USE = "domain:use"
+TICKET_MANAGE = "ticket:manage"      # 两票审批/签发/执行/归档（分级审批：operator 只能起草提交）
 # 系统管理
 SYSTEM_CONFIG = "system:config"      # admin 专有：Milvus/模型/persona/routing 配置
 USER_MANAGE = "user:manage"          # 用户管理：改角色 / dept
@@ -51,7 +52,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "editor": {
         DOC_READ, DOC_UPLOAD, DOC_DELETE, DOC_MANAGE,
         QA_ANSWER, FEEDBACK_READ,
-        KG_READ, KG_EDIT, DOMAIN_USE,
+        KG_READ, KG_EDIT, DOMAIN_USE, TICKET_MANAGE,
     },
     "operator": {
         DOC_READ, QA_ANSWER, FEEDBACK_READ,

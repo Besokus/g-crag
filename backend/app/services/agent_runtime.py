@@ -21,6 +21,8 @@ MAX_ITER_DEFAULT = 6
 # S4：高风险工具按 role 限制（未列出的全员可调）。仅 ctx 提供时生效（ctx=None 零回归）。
 tool_permissions: dict[str, list[str]] = {
     "draft_ticket": ["admin"],
+    "create_ticket": ["admin", "editor"],
+    "submit_ticket": ["admin", "editor"],
 }
 
 

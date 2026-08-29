@@ -338,6 +338,10 @@ class Settings(BaseSettings):
     # ---------- N3 数字孪生变电站 3D ----------
     TWIN_LAYOUT_PATH: str = "app/data/station_layout_110kv.json"  # 110kV 站布局模板路径
 
+    # ---------- 问答→行动闭环（工单工作流打通）----------
+    # 问答→行动闭环：Agent 工具 create_ticket/submit_ticket + ops_planner persona + 工单流转事件（关=现状/开=工单闭环打通）
+    TICKET_ACTION_LOOP_ENABLE: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

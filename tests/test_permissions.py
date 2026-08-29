@@ -62,3 +62,29 @@ def test_valid_roles_complete():
     assert VALID_ROLES == {"admin", "editor", "operator", "auditor"}
     for r in VALID_ROLES:
         assert r in ROLE_PERMISSIONS
+
+
+# ===== 问答→行动闭环（ticket:manage 权限分层 + 高风险工单工具 role 限制）=====
+
+def test_ticket_manage_role_mapping():
+    """ticket:manage 仅 admin/editor；operator 一线只能起草提交不能审批。"""
+    from app.core.permissions import ROLE_PERMISSIONS, TICKET_MANAGE
+    assert TICKET_MANAGE == "ticket:manage"
+    assert TICKET_MANAGE in ROLE_PERMISSIONS["editor"]
+    assert TICKET_MANAGE not in ROLE_PERMISSIONS["operator"]
+    assert TICKET_MANAGE not in ROLE_PERMISSIONS["auditor"]
+
+
+def test_ticket_manage_has_perm():
+    from app.core.permissions import has_perm, TICKET_MANAGE
+    assert has_perm("admin", TICKET_MANAGE) is True
+    assert has_perm("editor", TICKET_MANAGE) is True
+    assert has_perm("operator", TICKET_MANAGE) is False
+    assert has_perm("auditor", TICKET_MANAGE) is False
+
+
+def test_ticket_tools_role_restricted():
+    """create_ticket/submit_ticket 是高风险落库工具，限 admin/editor。"""
+    from app.services.agent_runtime import tool_permissions
+    assert tool_permissions.get("create_ticket") == ["admin", "editor"]
+    assert tool_permissions.get("submit_ticket") == ["admin", "editor"]

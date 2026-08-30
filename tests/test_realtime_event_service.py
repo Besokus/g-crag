@@ -236,3 +236,34 @@ def test_task_handler_is_exported_for_task_center_registration():
 
 def test_proactive_schema_v2_flag_default_off():
     assert service.settings.PROACTIVE_SCHEMA_V2_ENABLE is False
+
+
+def test_proactive_readonly_tools_merge_telemetry(monkeypatch):
+    """关=三只读工具原集（现状）；开=并入 query_telemetry。"""
+    assert service._proactive_readonly_tools() == service.PROACTIVE_READ_ONLY_TOOLS
+    monkeypatch.setattr(service.settings, "PROACTIVE_TELEMETRY_ENABLE", True)
+    assert service._proactive_readonly_tools() == (
+        service.PROACTIVE_READ_ONLY_TOOLS | {"query_telemetry"}
+    )
+
+
+def test_proactive_prompt_telemetry_hint_and_device_context(monkeypatch):
+    event = SimpleNamespace(
+        source="scada", event_type="alarm", severity="critical",
+        canonical_device_name="1号主变", canonical_device_id="SUB-A:T1",
+        source_device_id="T1_main_transformer", station="A站",
+        title="油温越限", summary="顶层油温96℃", normalized_json="{}",
+    )
+    monkeypatch.setattr(service.settings, "PROACTIVE_TELEMETRY_ENABLE", False)
+    prompt_off = service._agent_prompt(event)
+    assert "query_telemetry" not in prompt_off          # 关=现状 prompt
+    monkeypatch.setattr(service.settings, "PROACTIVE_TELEMETRY_ENABLE", True)
+    prompt_on = service._agent_prompt(event)
+    assert "query_telemetry" in prompt_on
+    assert "T1_main_transformer" in prompt_on           # 源系统 ID（mock_scada 的键）
+    assert "SUB-A:T1" in prompt_on                       # 平台规范 ID
+    assert "如实说明" in prompt_on                        # 无数据按证据不足处理
+
+
+def test_proactive_telemetry_flag_default_off():
+    assert service.settings.PROACTIVE_TELEMETRY_ENABLE is False

@@ -350,6 +350,8 @@ class Settings(BaseSettings):
     # ---------- 主动运维闭环补全（结构化根因 + 遥测证据 + 闭环回填，全部默认关=现状）----------
     # 结构化根因：开=proactive_diagnosis persona 输出 schema v2（根因列表/证据/置信度）；关=现状用 alert persona 自由 JSON
     PROACTIVE_SCHEMA_V2_ENABLE: bool = False
+    # 遥测证据：开=诊断工具集并入 query_telemetry（mock_scada MCP 注册名），prompt 注入设备上下文；关=现状三只读工具
+    PROACTIVE_TELEMETRY_ENABLE: bool = False
 
 
 @lru_cache

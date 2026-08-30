@@ -23,7 +23,8 @@
         <table class="tbl">
           <thead><tr><th>状态</th><th>事件 / 设备</th><th>建议摘要</th><th>证据</th><th>安全边界</th><th>时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="r in runs.list" :key="r.id" class="run-row"
+            <template v-for="r in runs.list" :key="r.id">
+            <tr class="run-row"
                 :class="{ open: expandedRunId === r.id }"
                 @click="expandedRunId = expandedRunId === r.id ? '' : r.id">
               <td><span class="badge" :class="statusBadge(r.status)">{{ statusLabel(r.status) }}</span></td>
@@ -84,6 +85,7 @@
                 </template>
               </td>
             </tr>
+            </template>
             <tr v-if="!runs.list?.length"><td colspan="7" class="empty">暂无主动运维记录</td></tr>
           </tbody>
         </table>

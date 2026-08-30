@@ -11,7 +11,7 @@ from app.config import settings
 from app.core.obs import degraded
 from app.db.session import AsyncSessionLocal
 from app.models.persona_config import PersonaConfig
-from app.services.agent_personas import ALERT_PERSONA, DIAGNOSE_PERSONA, EVIDENCE_PERSONA, OPS_PLANNER_PERSONA, QA_PERSONA
+from app.services.agent_personas import ALERT_PERSONA, DIAGNOSE_PERSONA, EVIDENCE_PERSONA, OPS_PLANNER_PERSONA, PROACTIVE_DIAGNOSIS_PERSONA, QA_PERSONA
 from app.services.agent_personas import _alert_fallback, _diagnose_fallback, _evidence_fallback, _qa_fallback
 from app.services.agent_runtime import Persona
 
@@ -20,6 +20,9 @@ from app.services.agent_runtime import Persona
 _CODE_PERSONAS = {"diagnose": DIAGNOSE_PERSONA, "qa": QA_PERSONA, "alert": ALERT_PERSONA, "evidence_gap": EVIDENCE_PERSONA}
 if settings.TICKET_ACTION_LOOP_ENABLE:
     _CODE_PERSONAS["ops_planner"] = OPS_PLANNER_PERSONA
+# 主动运维结构化诊断 persona（关=继续用 alert persona，现状不变）。
+if settings.PROACTIVE_SCHEMA_V2_ENABLE:
+    _CODE_PERSONAS["proactive_diagnosis"] = PROACTIVE_DIAGNOSIS_PERSONA
 
 # fallback registry：纯 DB persona（code 无）按 fallback_key 映射到 code fallback 函数
 _FALLBACK_REGISTRY = {"qa": _qa_fallback, "diagnose": _diagnose_fallback, "alert": _alert_fallback, "evidence_gap": _evidence_fallback, "none": None}

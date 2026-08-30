@@ -650,8 +650,8 @@ def normalize_ticket_draft(answer: dict[str, Any], event: RealtimeEvent) -> dict
         "task": str(raw.get("task") or answer.get("summary") or event.title or "实时告警处置")[:2000],
         "device": str(raw.get("device") or event.canonical_device_name or event.canonical_device_id)[:200],
         "location": str(raw.get("location") or event.station)[:200],
-        "steps": _string_list(raw.get("steps")),
-        "safety": _string_list(raw.get("safety") or raw.get("safety_measures")),
+        "steps": _string_list(raw.get("steps") or answer.get("steps")),
+        "safety": _string_list(raw.get("safety") or raw.get("safety_measures") or answer.get("safety")),
         "risks": risks,
         "notes": (
             f"由实时事件 {event.source}/{event.event_id} 自动生成；仅为草稿，"
@@ -705,9 +705,12 @@ async def process_proactive_run(
         from app.services.agent_runtime import run_agent
         from app.services.persona_store import get_persona
 
-        persona = await get_persona("alert")
+        persona_name = (
+            "proactive_diagnosis" if settings.PROACTIVE_SCHEMA_V2_ENABLE else "alert"
+        )
+        persona = await get_persona(persona_name)
         if persona is None:
-            raise ValueError("alert persona 不存在")
+            raise ValueError(f"{persona_name} persona 不存在")
         persona = copy.copy(persona)
         persona.allowed_tools = [
             tool for tool in (getattr(persona, "allowed_tools", []) or [])
@@ -732,14 +735,26 @@ async def process_proactive_run(
             "ticket": {},
         }
         ticket_draft = normalize_ticket_draft(answer, event)
-        recommendation = {
-            "summary": str(answer.get("summary") or "")[:4000],
-            "handling": answer.get("handling") or "",
-            "risks": _string_list(answer.get("risks")),
-            "readOnly": True,
-            "requiresHumanReview": True,
-            "controlExecuted": False,
-        }
+        if (
+            settings.PROACTIVE_SCHEMA_V2_ENABLE
+            and answer.get("schema") == "proactive-recommendation/v2"
+        ):
+            # v2：整个 answer 自带 schema/rootCauses/steps/confidence/basis，叠加只读安全标记原样落库
+            recommendation = {
+                **answer,
+                "readOnly": True,
+                "requiresHumanReview": True,
+                "controlExecuted": False,
+            }
+        else:
+            recommendation = {
+                "summary": str(answer.get("summary") or "")[:4000],
+                "handling": answer.get("handling") or "",
+                "risks": _string_list(answer.get("risks")),
+                "readOnly": True,
+                "requiresHumanReview": True,
+                "controlExecuted": False,
+            }
         evidence = {
             "steps": result.steps,
             "toolsUsed": result.tools_used,

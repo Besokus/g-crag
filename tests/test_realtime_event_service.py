@@ -232,3 +232,7 @@ def test_task_handler_is_exported_for_task_center_registration():
 
     assert service.TASK_HANDLERS[service.TASK_TYPE] is service.proactive_ops_task_handler
     assert get_task_handler(service.TASK_TYPE) is service.proactive_ops_task_handler
+
+
+def test_proactive_schema_v2_flag_default_off():
+    assert service.settings.PROACTIVE_SCHEMA_V2_ENABLE is False

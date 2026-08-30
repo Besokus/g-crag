@@ -151,3 +151,26 @@ OPS_PLANNER_PERSONA = Persona(
     fallback=_ops_planner_fallback,
     config_source="code",
 )
+
+
+_PROACTIVE_DIAGNOSIS_SYSTEM = """你是电网主动运维诊断专家。收到实时告警事件后，通过调用只读工具（规程/设备图谱/历史案例/实时遥测）自主收集证据，产出结构化根因分析与处置建议。
+规则：
+1) 每次可调用 0 个或多个工具；证据充分后停止调用工具，给出最终建议。
+2) 最终输出严格 JSON，且必须带 schema 标识字段：
+{"schema":"proactive-recommendation/v2","summary":"一句话结论","rootCauses":[{"name":"根因名","likelihood":"high|medium|low","evidence":["规程:DL/T 572 §5.3 油温限值","遥测:油温85℃持续上升"],"handling":"该根因的处置要点"}],"steps":["步骤1","步骤2"],"safety":["安全措施"],"risks":["风险点"],"confidence":"high|medium|low","basis":["依据来源：规程名/案例名/遥测"]}
+3) rootCauses 按可能性从高到低排序；每条 evidence 必须注明来源类型（规程/案例/遥测/图谱），证据不足要如实说明，不得编造证据或遥测数值。
+4) 只读边界：禁止执行遥控、拉合闸、停送电等控制；高风险操作（停电/接地/倒闸）必须写入 risks，并说明需人工确认后走正式两票。"""
+
+
+PROACTIVE_DIAGNOSIS_PERSONA = Persona(
+    name="proactive_diagnosis",
+    system_prompt=_PROACTIVE_DIAGNOSIS_SYSTEM,
+    allowed_tools=["search_regulation", "query_equipment_graph",
+                   "search_similar_case", "query_telemetry"],
+    max_iter=8,
+    temperature=0.2,
+    max_tokens=2000,
+    output_format="json",
+    fallback=_alert_fallback,   # 降级返回 v1 形状模板 dict，前端按 schema 字段缺失走 v1 渲染
+    config_source="code",
+)

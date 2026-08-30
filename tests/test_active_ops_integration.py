@@ -499,3 +499,78 @@ async def test_ticket_lifecycle_single_ticket_actions_are_tenant_bound(active_op
         assert await ticket_lifecycle_service.delete_ticket(
             db, ticket_id, tenant="tenant-a",
         ) is True
+
+
+@pytest.mark.asyncio
+async def test_proactive_run_uses_v2_persona_and_schema_when_enabled(active_ops_db, monkeypatch):
+    """开关开：请求 proactive_diagnosis persona；recommendation_json 存整个 v2 answer；顶层 steps/safety 回退进草案。"""
+    event = _stored_event("SCADA-V2", status="queued")
+    run = ProactiveOpsRun(
+        id="run-v2",
+        tenant_id="tenant-a",
+        event_ref_id=event.id,
+        triggered_by="connector-a",
+        status="queued",
+        risk_level="critical",
+        execution_mode="read_only",
+        requires_human_review=True,
+        control_executed=False,
+    )
+    async with active_ops_db() as db:
+        db.add_all([event, run])
+        await db.commit()
+
+    requested = []
+
+    async def fake_get_persona(name):
+        requested.append(name)
+        return SimpleNamespace(
+            name=name,
+            allowed_tools=["search_regulation", "draft_ticket", "query_telemetry"],
+        )
+
+    async def fake_run_agent(db, persona, prompt, model_type, ctx):
+        # 只读交集过滤仍生效（draft_ticket 被滤掉），遥测工具在 Task 3 开后才保留
+        assert "draft_ticket" not in persona.allowed_tools
+        return SimpleNamespace(
+            answer={
+                "schema": "proactive-recommendation/v2",
+                "summary": "冷却风机异常导致油温越限",
+                "rootCauses": [
+                    {"name": "冷却风机故障", "likelihood": "high",
+                     "evidence": ["遥测:油温96℃持续上升"], "handling": "检查风机电源与叶轮"},
+                ],
+                "steps": ["检查风机电源", "必要时申请减载"],
+                "safety": ["双人作业"],
+                "risks": ["油温持续升高"],
+                "confidence": "high",
+                "basis": ["规程:DL/T 572", "遥测:mock_scada"],
+            },
+            steps=[], tools_used=[], iterations=1, degraded=False,
+            degrade_reason="", latency_ms=3,
+        )
+
+    from app.services import agent_runtime, persona_store
+
+    monkeypatch.setattr(realtime_event_service.settings, "PROACTIVE_SCHEMA_V2_ENABLE", True)
+    monkeypatch.setattr(persona_store, "get_persona", fake_get_persona)
+    monkeypatch.setattr(agent_runtime, "run_agent", fake_run_agent)
+
+    async with active_ops_db() as db:
+        await realtime_event_service.process_proactive_run(
+            db, "run-v2", tenant_id="tenant-a",
+        )
+
+    async with active_ops_db() as db:
+        done = await db.get(ProactiveOpsRun, "run-v2")
+
+    assert requested == ["proactive_diagnosis"]
+    assert done.status == "proposed"
+    assert done.control_executed is False
+    rec = json.loads(done.recommendation_json)
+    assert rec["schema"] == "proactive-recommendation/v2"
+    assert rec["rootCauses"][0]["name"] == "冷却风机故障"
+    assert rec["readOnly"] is True and rec["controlExecuted"] is False
+    draft = json.loads(done.ticket_draft_json)
+    assert draft["steps"] == ["检查风机电源", "必要时申请减载"]   # v2 顶层 steps 回退进草案
+    assert draft["safety"] == ["双人作业"]

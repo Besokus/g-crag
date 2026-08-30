@@ -347,6 +347,10 @@ class Settings(BaseSettings):
     # 问答→行动闭环：Agent 工具 create_ticket/submit_ticket + ops_planner persona + 工单流转事件（关=现状/开=工单闭环打通）
     TICKET_ACTION_LOOP_ENABLE: bool = False
 
+    # ---------- 主动运维闭环补全（结构化根因 + 遥测证据 + 闭环回填，全部默认关=现状）----------
+    # 结构化根因：开=proactive_diagnosis persona 输出 schema v2（根因列表/证据/置信度）；关=现状用 alert persona 自由 JSON
+    PROACTIVE_SCHEMA_V2_ENABLE: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

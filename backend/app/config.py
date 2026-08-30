@@ -352,6 +352,8 @@ class Settings(BaseSettings):
     PROACTIVE_SCHEMA_V2_ENABLE: bool = False
     # 遥测证据：开=诊断工具集并入 query_telemetry（mock_scada MCP 注册名），prompt 注入设备上下文；关=现状三只读工具
     PROACTIVE_TELEMETRY_ENABLE: bool = False
+    # 闭环回填：confirm/reject/to-ticket 成功后 emit 质量事件（source=proactive-ops）；关=现状不 emit
+    PROACTIVE_FEEDBACK_ENABLE: bool = False
 
 
 @lru_cache

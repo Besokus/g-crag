@@ -574,3 +574,138 @@ async def test_proactive_run_uses_v2_persona_and_schema_when_enabled(active_ops_
     draft = json.loads(done.ticket_draft_json)
     assert draft["steps"] == ["检查风机电源", "必要时申请减载"]   # v2 顶层 steps 回退进草案
     assert draft["safety"] == ["双人作业"]
+
+
+def _seed_review_run(event_id: str, run_id: str, status: str) -> list:
+    """构造可流转的 run + 关联 event（id 规则沿用 _stored_event）。"""
+    event = _stored_event(event_id, status="completed")
+    run = ProactiveOpsRun(
+        id=run_id,
+        tenant_id="tenant-a",
+        event_ref_id=event.id,
+        triggered_by="connector-a",
+        status=status,
+        risk_level="critical",
+        execution_mode="read_only",
+        requires_human_review=True,
+        control_executed=False,
+    )
+    return [event, run]
+
+
+@pytest.mark.asyncio
+async def test_confirm_emits_proposal_confirmed(active_ops_db, monkeypatch):
+    collected = []
+
+    async def fake_emit(source, type, payload=None, tenant="default"):
+        collected.append((source, type, payload, tenant))
+
+    monkeypatch.setattr(realtime_event_service.quality_event_bus, "emit", fake_emit)
+    monkeypatch.setattr(
+        realtime_event_service.settings, "PROACTIVE_FEEDBACK_ENABLE", True)
+    rows = _seed_review_run("SCADA-CF", "run-cf", "proposed")
+    async with active_ops_db() as db:
+        db.add_all(rows)
+        await db.commit()
+        await realtime_event_service.confirm_run(
+            db, "run-cf", tenant_id="tenant-a", reviewer="alice", note="同意",
+        )
+    assert collected == [(
+        "proactive-ops", "proposal.confirmed",
+        {"runId": "run-cf", "eventRefId": "db-SCADA-CF", "reviewer": "alice"},
+        "tenant-a",
+    )]
+
+
+@pytest.mark.asyncio
+async def test_reject_emits_proposal_rejected(active_ops_db, monkeypatch):
+    collected = []
+
+    async def fake_emit(source, type, payload=None, tenant="default"):
+        collected.append((source, type, payload, tenant))
+
+    monkeypatch.setattr(realtime_event_service.quality_event_bus, "emit", fake_emit)
+    monkeypatch.setattr(
+        realtime_event_service.settings, "PROACTIVE_FEEDBACK_ENABLE", True)
+    rows = _seed_review_run("SCADA-RJ", "run-rj", "proposed")
+    async with active_ops_db() as db:
+        db.add_all(rows)
+        await db.commit()
+        await realtime_event_service.reject_run(
+            db, "run-rj", tenant_id="tenant-a", reviewer="bob", note="证据不足",
+        )
+    assert collected == [(
+        "proactive-ops", "proposal.rejected",
+        {"runId": "run-rj", "eventRefId": "db-SCADA-RJ",
+         "reviewer": "bob", "note": "证据不足"},
+        "tenant-a",
+    )]
+
+
+@pytest.mark.asyncio
+async def test_to_ticket_emits_proposal_ticketed(active_ops_db, monkeypatch):
+    collected = []
+
+    async def fake_emit(source, type, payload=None, tenant="default"):
+        collected.append((source, type, payload, tenant))
+
+    monkeypatch.setattr(realtime_event_service.quality_event_bus, "emit", fake_emit)
+    monkeypatch.setattr(
+        realtime_event_service.settings, "PROACTIVE_FEEDBACK_ENABLE", True)
+    rows = _seed_review_run("SCADA-TK", "run-tk", "confirmed")
+    rows[1].ticket_draft_json = json.dumps({
+        "ticketType": "操作票", "task": "核验主变冷却系统",
+        "device": "1号主变", "steps": ["核对设备"],
+    }, ensure_ascii=False)
+    async with active_ops_db() as db:
+        db.add_all(rows)
+        await db.commit()
+        result = await realtime_event_service.run_to_ticket(
+            db, "run-tk", tenant_id="tenant-a", creator="carol",
+        )
+    assert collected == [(
+        "proactive-ops", "proposal.ticketed",
+        {"runId": "run-tk", "eventRefId": "db-SCADA-TK",
+         "ticketId": result["run"]["ticketId"]},
+        "tenant-a",
+    )]
+
+
+@pytest.mark.asyncio
+async def test_proactive_feedback_disabled_by_flag(active_ops_db, monkeypatch):
+    """开关关（默认）=现状：不 emit。"""
+    collected = []
+
+    async def fake_emit(*args, **kwargs):
+        collected.append((args, kwargs))
+
+    monkeypatch.setattr(realtime_event_service.quality_event_bus, "emit", fake_emit)
+    monkeypatch.setattr(
+        realtime_event_service.settings, "PROACTIVE_FEEDBACK_ENABLE", False)
+    rows = _seed_review_run("SCADA-OFF", "run-off", "proposed")
+    async with active_ops_db() as db:
+        db.add_all(rows)
+        await db.commit()
+        await realtime_event_service.confirm_run(
+            db, "run-off", tenant_id="tenant-a", reviewer="alice",
+        )
+    assert collected == []
+
+
+@pytest.mark.asyncio
+async def test_proactive_feedback_emit_failure_does_not_block(active_ops_db, monkeypatch):
+    """emit 抛异常 → degraded 吞掉，流转事务不受影响。"""
+    async def broken_emit(*args, **kwargs):
+        raise RuntimeError("quality bus down")
+
+    monkeypatch.setattr(realtime_event_service.quality_event_bus, "emit", broken_emit)
+    monkeypatch.setattr(
+        realtime_event_service.settings, "PROACTIVE_FEEDBACK_ENABLE", True)
+    rows = _seed_review_run("SCADA-DG", "run-dg", "proposed")
+    async with active_ops_db() as db:
+        db.add_all(rows)
+        await db.commit()
+        data = await realtime_event_service.confirm_run(
+            db, "run-dg", tenant_id="tenant-a", reviewer="alice",
+        )
+    assert data["status"] == "confirmed"

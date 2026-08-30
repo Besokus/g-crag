@@ -30,6 +30,7 @@ from app.models.realtime_event import (
     RealtimeEvent,
 )
 from app.schemas.realtime_event import DeviceMappingUpsertRequest, RealtimeEventIn
+from app.services import quality_event_bus
 
 
 TASK_TYPE = "proactive_ops.process"
@@ -902,6 +903,7 @@ async def confirm_run(
     run.control_executed = False
     await _sync_alert_review(db, run, "confirmed", reviewer, note)
     await db.commit()
+    await _emit_run_event("proposal.confirmed", run, tenant_id)
     return run_to_dict(run)
 
 
@@ -918,6 +920,7 @@ async def reject_run(
     run.control_executed = False
     await _sync_alert_review(db, run, "rejected", reviewer, note)
     await db.commit()
+    await _emit_run_event("proposal.rejected", run, tenant_id)
     return run_to_dict(run)
 
 
@@ -968,6 +971,7 @@ async def run_to_ticket(
             alert.ticket_id = run.ticket_id
             alert.status = "ticketed"
     await db.commit()
+    await _emit_run_event("proposal.ticketed", run, tenant_id)
     return {"run": run_to_dict(run), "ticket": ticket}
 
 
@@ -1004,6 +1008,25 @@ async def retry_run(
     await db.commit()
     queue = {"mode": "task_center", "taskId": task.id}
     return {"run": run_to_dict(run), "queue": queue}
+
+
+async def _emit_run_event(event_type: str, run: ProactiveOpsRun, tenant: str = "default") -> None:
+    """闭环回填：流转成功后发质量事件；开关开才发，失败 degraded 不阻塞流转。"""
+    if not settings.PROACTIVE_FEEDBACK_ENABLE:
+        return
+    payload: dict[str, Any] = {"runId": run.id, "eventRefId": run.event_ref_id}
+    if event_type == "proposal.confirmed":
+        payload["reviewer"] = run.reviewer or ""
+    elif event_type == "proposal.rejected":
+        payload.update({"reviewer": run.reviewer or "", "note": run.review_note or ""})
+    elif event_type == "proposal.ticketed":
+        payload["ticketId"] = run.ticket_id or ""
+    try:
+        await quality_event_bus.emit(
+            source="proactive-ops", type=event_type, payload=payload, tenant=tenant,
+        )
+    except Exception as e:
+        degraded("proactive_feedback_emit", e)
 
 
 async def _reviewable_run(db: AsyncSession, run_id: str, tenant_id: str) -> ProactiveOpsRun:

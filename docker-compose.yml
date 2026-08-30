@@ -193,6 +193,10 @@ services:
       TICKET_ACTION_LOOP_ENABLE: "true"
       # 链路节点详情（瀑布图 attrs：参数/prompt 采集；关=现状只记耗时；纯观测不进缓存版本）
       QA_TRACE_DETAIL_ENABLE: "true"
+      # 主动运维闭环补全（结构化根因 + 遥测证据 + 闭环回填）；关=现状
+      PROACTIVE_SCHEMA_V2_ENABLE: "true"
+      PROACTIVE_TELEMETRY_ENABLE: "true"
+      PROACTIVE_FEEDBACK_ENABLE: "true"
       # 容器直连外网：云API(dashscope/deepseek/doubao 国内可达) + bge 走 hf-mirror 国内镜像。
       # 注：宿主机代理 7897 仅监听 127.0.0.1（未开 Allow LAN），容器经 host.docker.internal 连不上，
       # 故不设 HTTPS_PROXY——否则 httpx/requests 把所有出站（含 hf-mirror、云API）都发往不可达代理。

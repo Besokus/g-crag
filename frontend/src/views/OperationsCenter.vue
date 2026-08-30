@@ -23,19 +23,65 @@
         <table class="tbl">
           <thead><tr><th>状态</th><th>事件 / 设备</th><th>建议摘要</th><th>证据</th><th>安全边界</th><th>时间</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="r in runs.list" :key="r.id">
+            <tr v-for="r in runs.list" :key="r.id" class="run-row"
+                :class="{ open: expandedRunId === r.id }"
+                @click="expandedRunId = expandedRunId === r.id ? '' : r.id">
               <td><span class="badge" :class="statusBadge(r.status)">{{ statusLabel(r.status) }}</span></td>
               <td class="main-cell"><b>{{ r.event?.title || '未命名事件' }}</b><small>{{ r.event?.device?.canonicalName || r.event?.device?.sourceDeviceId || '未映射设备' }} · {{ r.event?.source }}</small></td>
               <td class="wide-cell">{{ r.recommendation?.summary || r.recommendation?.handling || r.errorMessage || '分析中…' }}</td>
               <td><span v-if="r.evidence?.toolsUsed?.length" class="badge badge-info">{{ r.evidence.toolsUsed.length }} 个工具</span><span v-else class="muted">—</span></td>
               <td><span class="badge badge-success">只读</span> <span v-if="r.requiresHumanReview" class="badge badge-warning">需人审</span></td>
               <td class="muted">{{ r.createdAt }}</td>
-              <td class="actions">
+              <td class="actions" @click.stop>
                 <button v-if="can('alert:manage') && r.status==='proposed'" class="btn btn-primary btn-sm" @click="confirmRun(r)">确认</button>
                 <button v-if="can('alert:manage') && ['proposed','confirmed'].includes(r.status)" class="btn btn-ghost btn-sm" @click="rejectRun(r)">驳回</button>
                 <button v-if="can('alert:manage') && r.status==='confirmed'" class="btn btn-success btn-sm" @click="toTicket(r)">转两票草稿</button>
                 <button v-if="can('alert:manage') && r.status==='failed'" class="btn btn-ghost btn-sm" @click="retryRun(r)">重试</button>
                 <span v-if="r.ticketId" class="badge badge-neutral">票 {{ r.ticketId.slice(-6) }}</span>
+              </td>
+            </tr>
+            <tr v-if="expandedRunId === r.id">
+              <td colspan="7" class="run-detail">
+                <template v-if="isV2(r)">
+                  <div class="rec-head">
+                    <b>{{ r.recommendation.summary || '（无摘要）' }}</b>
+                    <span class="badge" :class="levelBadge(r.recommendation.confidence)">
+                      置信 {{ levelLabel(r.recommendation.confidence) }}
+                    </span>
+                  </div>
+                  <table class="tbl inner">
+                    <thead><tr><th>根因</th><th>可能性</th><th>证据</th><th>处置建议</th></tr></thead>
+                    <tbody>
+                      <tr v-for="(c, i) in r.recommendation.rootCauses || []" :key="i">
+                        <td>{{ c.name }}</td>
+                        <td><span class="badge" :class="levelBadge(c.likelihood)">{{ levelLabel(c.likelihood) }}</span></td>
+                        <td><ul class="evi"><li v-for="(e, j) in c.evidence || []" :key="j">{{ e }}</li></ul></td>
+                        <td>{{ c.handling }}</td>
+                      </tr>
+                      <tr v-if="!(r.recommendation.rootCauses || []).length"><td colspan="4" class="empty">模型未给出根因列表</td></tr>
+                    </tbody>
+                  </table>
+                  <div class="chip-group" v-if="(r.recommendation.steps || []).length">
+                    <span class="lbl">步骤</span>
+                    <span v-for="(s, i) in r.recommendation.steps" :key="'s' + i" class="chip">{{ s }}</span>
+                  </div>
+                  <div class="chip-group" v-if="(r.recommendation.safety || []).length">
+                    <span class="lbl">安全</span>
+                    <span v-for="(s, i) in r.recommendation.safety" :key="'f' + i" class="chip safe">{{ s }}</span>
+                  </div>
+                  <div class="chip-group" v-if="(r.recommendation.risks || []).length">
+                    <span class="lbl lbl-danger">风险</span>
+                    <span v-for="(s, i) in r.recommendation.risks" :key="'r' + i" class="chip risk">{{ s }}</span>
+                  </div>
+                  <div class="basis" v-if="(r.recommendation.basis || []).length">
+                    依据：{{ r.recommendation.basis.join('；') }}
+                  </div>
+                </template>
+                <template v-else>
+                  <!-- v1（alert persona 自由 JSON）回退现状展示 -->
+                  <div class="rec-head"><b>{{ r.recommendation?.summary || r.errorMessage || '分析中…' }}</b></div>
+                  <div class="rec-v1" v-if="r.recommendation?.handling">{{ r.recommendation.handling }}</div>
+                </template>
               </td>
             </tr>
             <tr v-if="!runs.list?.length"><td colspan="7" class="empty">暂无主动运维记录</td></tr>
@@ -133,6 +179,12 @@ const toast = (text) => { toastMsg.value = text; clearTimeout(toastTimer); toast
 const proposedCount = computed(() => (runs.value.list || []).filter(r => r.status === 'proposed').length)
 const canAudit = computed(() => can('audit:read'))
 const deadTaskLabel = computed(() => canAudit.value ? (taskStats.value.tasks?.dead || 0) : '—')
+// 运维建议行点击展开详情（仿 QaTraceChart 单开互斥；按 id 记忆，10s 轮询刷新后仍跟随原行）
+const expandedRunId = ref('')
+// v2 判据：schema 字段自识别；v1（无 schema）回退现状文本
+function isV2(r) { return r?.recommendation?.schema === 'proactive-recommendation/v2' }
+const levelLabel = (v) => ({ high: '高', medium: '中', low: '低' })[v] || v || '—'
+const levelBadge = (v) => ({ high: 'badge-danger', medium: 'badge-warning', low: 'badge-info' })[v] || 'badge-neutral'
 
 function unwrapBiz(response) {
   if (!response || response.code !== 200) throw new Error(response?.message || '请求失败')
@@ -143,7 +195,7 @@ function statusBadge(s) { return ({ proposed:'badge-warning', confirmed:'badge-i
 function statusLabel(s) { return ({ proposed:'待确认', confirmed:'已确认', ticketed:'已转两票', succeeded:'成功', completed:'完成', published:'已投递', failed:'失败', dead:'死信', running:'运行中', processing:'处理中', dispatching:'投递中', queued:'排队中', pending:'待投递', ignored:'已忽略', rejected:'已驳回' })[s] || s }
 function severityBadge(s) { return s === 'critical' || s === 'major' ? 'badge-danger' : s === 'warning' ? 'badge-warning' : 'badge-info' }
 
-async function loadRuns() { try { runs.value = unwrapBiz(await getProactiveRuns({ size: 50 })) || runs.value } catch { toast('主动运维记录加载失败') } }
+async function loadRuns() { try { const data = unwrapBiz(await getProactiveRuns({ size: 50 })) || runs.value; runs.value = data; const ids = new Set((data.list || []).map(r => r.id)); if (expandedRunId.value && !ids.has(expandedRunId.value)) expandedRunId.value = '' } catch { toast('主动运维记录加载失败') } }
 async function loadEvents() { try { events.value = unwrapBiz(await getRealtimeEvents({ size: 50 })) || events.value } catch { toast('实时事件加载失败') } }
 async function loadMappings() { if (!can('system:config')) return; try { mappings.value = unwrapBiz(await getDeviceMappings({ size: 100 })) || mappings.value } catch { toast('设备映射加载失败') } }
 async function loadTasks() { if (!canAudit.value) return; try { const [list, eventList, stats] = await Promise.all([getPersistentTasks({ size: 50 }), getDomainEvents({ size: 50 }), getTaskCenterStats()]); tasks.value = unwrapBiz(list) || tasks.value; domainEvents.value = unwrapBiz(eventList) || domainEvents.value; taskStats.value = unwrapBiz(stats) || taskStats.value } catch { toast('任务与事件中心加载失败') } }
@@ -178,4 +230,20 @@ onUnmounted(() => { clearInterval(refreshTimer); clearTimeout(toastTimer); try {
 .warning { color: var(--warning); }.danger { color: var(--danger); }.ok { color: var(--success); }
 .table-wrap { overflow-x:auto; }.main-cell { min-width:190px; }.main-cell small { display:block; color:var(--text-soft); margin-top:4px; max-width:300px; }.wide-cell { min-width:260px; max-width:420px; line-height:1.55; }.reason { max-width:230px; margin-top:4px; color:var(--text-soft); font-size:11px; }.actions { white-space:nowrap; }.actions .btn,.actions .badge { margin:2px; }.error-cell { max-width:260px; color:var(--danger); font-size:12px; overflow:hidden; text-overflow:ellipsis; }.mapping-form { display:grid; grid-template-columns:120px repeat(4,minmax(130px,1fr)) auto; gap:8px; margin-bottom:16px; }.mini-stats { display:flex; gap:18px; flex-wrap:wrap; padding:10px 12px; margin-bottom:12px; background:var(--surface-2); border-radius:8px; color:var(--text-muted); font-size:13px; }.section-title{display:flex;align-items:baseline;gap:10px;margin:14px 0 8px;padding-left:9px;border-left:3px solid var(--primary);font-weight:700}.section-title small{color:var(--text-soft);font-size:11px;font-weight:400}.event-title{margin-top:24px;border-left-color:var(--warning)}.event-type{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--primary);font-size:12px}.event-table tbody tr{border-left:2px solid transparent}.event-table tbody tr:hover{border-left-color:var(--warning)}
 @media(max-width:900px){.ops-stats{grid-template-columns:1fr 1fr}.mapping-form{grid-template-columns:1fr 1fr}.wide-cell{min-width:200px}}
+/* 主动运维建议行点击展开详情（v2 结构化 / v1 文本回退） */
+.run-row { cursor: pointer; }
+.run-row.open { background: var(--surface-2); }
+.run-detail { background: var(--surface-2); border-left: 3px solid var(--primary); padding: 12px 16px; font-size: 12px; }
+.run-detail .inner { margin: 8px 0; }
+.run-detail .inner th, .run-detail .inner td { font-size: 12px; padding: 4px 8px; }
+.rec-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rec-v1 { color: var(--text-soft); margin-top: 4px; white-space: pre-wrap; }
+.evi { margin: 0; padding-left: 16px; color: var(--text-soft); }
+.chip-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.chip-group .lbl { color: var(--text-muted); font-weight: 700; }
+.chip-group .lbl-danger { color: var(--danger); }
+.chip { background: var(--surface-3); border-radius: 10px; padding: 2px 10px; }
+.chip.safe { border: 1px solid var(--success); }
+.chip.risk { border: 1px solid var(--danger); color: var(--danger); }
+.basis { color: var(--text-soft); margin-top: 6px; }
 </style>

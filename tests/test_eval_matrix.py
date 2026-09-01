@@ -223,3 +223,70 @@ def test_wait_backend_ready_injected_prober_and_timeout():
                                  prober=lambda url: True, interval_s=0.01) is True
     assert em.wait_backend_ready("http://x", timeout_s=0.05,
                                  prober=lambda url: False, interval_s=0.01) is False
+
+
+# ---------- 编排 main（fake 探针/后端，CI 兼容）----------
+
+
+def _fake_probe_writer(metrics_by_variant: dict):
+    """伪造 _run_probe_sync：按 env 变体名与 --json-out 落 canned 探针 JSON。"""
+
+    def fake(cli_args, env):
+        variant = env["EVAL_MATRIX_VARIANT"]
+        out = Path(cli_args[cli_args.index("--json-out") + 1])
+        dim = "retrieval" if "retrieval" in cli_args else "generation"
+        metrics = metrics_by_variant.get((variant, dim))
+        if metrics is None:
+            return False
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"variant": variant, "dim": dim, "metrics": metrics},
+                                  ensure_ascii=False), encoding="utf-8")
+        return True
+
+    return fake
+
+
+def test_main_orchestrates_and_writes_matrix(tmp_path, monkeypatch):
+    import eval_matrix as em
+
+    metrics = {
+        ("baseline", "retrieval"): {"recall": 0.87, "mrr": 0.6, "ndcg": 0.5,
+                                    "noResultRate": 0.03, "sampleSize": 32},
+        ("hyde", "retrieval"): {"recall": 0.90, "mrr": 0.6, "ndcg": 0.5,
+                                "noResultRate": 0.03, "sampleSize": 32},
+        ("baseline", "generation"): {"faithfulness": 0.86, "hallucination": 0.05,
+                                     "avgLatencyMs": 8000, "sampleSize": 5},
+        ("crag_v3", "generation"): {"faithfulness": 0.89, "hallucination": 0.04,
+                                    "avgLatencyMs": 8200, "sampleSize": 5},
+    }
+    monkeypatch.setattr(em, "_run_probe_sync", _fake_probe_writer(metrics))
+
+    def fake_gen(v, json_out, env, port, args):
+        return em._run_probe_sync(
+            ["--probe", "generation", "--json-out", str(json_out), "--limit", "5"], env)
+
+    monkeypatch.setattr(em, "_run_generation_with_backend", fake_gen)
+
+    rc = em.main_with_args(
+        ["--dims", "retrieval,generation", "--variants", "baseline,hyde,crag_v3",
+         "--out-dir", str(tmp_path)])
+    assert rc == 0
+    mds = list(tmp_path.glob("eval_matrix_*.md"))
+    assert mds and "hyde" in mds[0].read_text(encoding="utf-8")
+    assert "建议常开候选" in mds[0].read_text(encoding="utf-8")
+    js = list(tmp_path.glob("eval_matrix_*.json"))
+    assert js and json.loads(js[0].read_text(encoding="utf-8"))["matrix"]["generation"]["rows"]
+
+
+def test_main_all_probes_failed_exit_1(tmp_path, monkeypatch):
+    import eval_matrix as em
+
+    monkeypatch.setattr(em, "_run_probe_sync", lambda a, e: False)
+    monkeypatch.setattr(em, "_run_generation_with_backend", lambda *a, **k: False)
+    assert em.main_with_args(["--dims", "retrieval", "--out-dir", str(tmp_path)]) == 1
+
+
+def test_main_unknown_dim_exit_2(tmp_path):
+    import eval_matrix as em
+
+    assert em.main_with_args(["--dims", "bad", "--out-dir", str(tmp_path)]) == 2

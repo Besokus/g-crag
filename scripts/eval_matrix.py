@@ -128,7 +128,23 @@ def _run_probe_sync(cli_args: list[str], env: dict) -> bool:
     return r.returncode == 0
 
 
-def main() -> int:
+def _run_generation_with_backend(v: dict, json_out: Path, env: dict, port: int, args) -> bool:
+    """起变体后端 → 等就绪 → generation 探针 → 停后端；未就绪跳过不中断整场。"""
+    base_url = f"http://127.0.0.1:{port}"
+    print(f">>> 起变体后端 {v['name']} @:{port} ...")
+    proc = start_backend(port, env)
+    try:
+        if not wait_backend_ready(base_url, args.health_timeout):
+            print(f"    后端未就绪（>{args.health_timeout}s），跳过 {v['name']}")
+            return False
+        return _run_probe_sync(
+            ["--probe", "generation", "--json-out", str(json_out),
+             "--base-url", base_url, "--limit", str(args.limit)], env)
+    finally:
+        stop_backend(proc)
+
+
+def main_with_args(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="开关对照评测矩阵（variants × dims → 能力收益矩阵）")
     ap.add_argument("--dims", default="retrieval,generation")
     ap.add_argument("--variants", default="all", help="all 或逗号名单（baseline 恒含）")
@@ -142,7 +158,7 @@ def main() -> int:
                     help=argparse.SUPPRESS)
     ap.add_argument("--base-url", default="", help=argparse.SUPPRESS)
     ap.add_argument("--json-out", default="", help=argparse.SUPPRESS)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.probe:
         if not args.json_out:
@@ -170,6 +186,7 @@ def main() -> int:
     ts = time.strftime("%Y%m%d_%H%M%S")
     outdir = out_base / f"eval_matrix_{ts}"
     probes: list[dict] = []
+    port = args.backend_port_base
     for v in variants:
         env = svc.build_env_overlay(v, dict(os.environ))
         env["EVAL_MATRIX_VARIANT"] = v["name"]
@@ -181,18 +198,32 @@ def main() -> int:
                     ["--probe", "retrieval", "--json-out", str(json_out),
                      "--topk", str(args.topk)], env)
             else:
-                # ---- Task 4 在此追加：_run_generation_with_backend 分支 ----
-                print(f">>> 跳过 {v['name']}/{dim}（generation 编排在 Task 4 接线）")
-                ok = False
+                ok = _run_generation_with_backend(v, json_out, env, port, args)
+                port += 1
             if ok:
                 probes.append(json.loads(json_out.read_text(encoding="utf-8")))
             else:
                 print(f"    {v['name']}/{dim}: 探针失败（详见上方输出）")
 
-    # ---- Task 4 在此追加：聚合落盘 ----
-    print(f"探针成功 {len(probes)} 个（聚合在 Task 4 接线）")
-    return 0 if probes else 1
+    if not probes:
+        print("无成功探针，无法聚合")
+        return 1
+
+    agg = svc.aggregate(probes)
+    meta = {
+        "envSummary": f"provider={os.environ.get('LLM_PROVIDER', '')}",
+        "topk": args.topk, "limit": args.limit,
+        "goldenSize": next((p["metrics"].get("sampleSize") for p in probes
+                            if p["dim"] == "retrieval"), None),
+    }
+    md_path = out_base / f"eval_matrix_{ts}.md"
+    json_path = out_base / f"eval_matrix_{ts}.json"
+    md_path.write_text(svc.render_markdown(agg, meta), encoding="utf-8")
+    json_path.write_text(json.dumps({"meta": meta, "matrix": agg},
+                                    ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"=== 矩阵完成：报告 {md_path} | JSON {json_path} ===")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main_with_args())

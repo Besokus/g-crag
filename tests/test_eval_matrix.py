@@ -118,3 +118,37 @@ def test_render_markdown_columns_warnings_and_meta():
     assert "| hyde |" in md and "Δ召回" in md and "建议常开候选" in md
     assert "噪声警告" in md and "32" in md
     assert "semantic_cache" in md and "verdict 仅为建议" in md
+
+
+# ---------- scripts/eval_matrix.py 探针（mock 服务层，不碰 Milvus/网络/子进程）----------
+import json  # noqa: E402
+
+
+def test_probe_retrieval_writes_json(tmp_path, monkeypatch):
+    import eval_matrix as em
+
+    async def fake_eval(db, overrides, topk=5):
+        return {"recall": 0.9, "mrr": 0.7, "ndcg": 0.6, "noResultRate": 0.0, "sampleSize": 32}
+
+    from app.services import retrieval_eval_service
+    monkeypatch.setattr(retrieval_eval_service, "evaluate_over_golden", fake_eval)
+    # run_probe_retrieval 的 from-import 在调用时才解析 → patch 源模块属性生效
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    import app.db.session as db_session
+    monkeypatch.setattr(db_session, "AsyncSessionLocal", lambda: _FakeSession())
+
+    out = tmp_path / "probe.json"
+    monkeypatch.setenv("EVAL_MATRIX_VARIANT", "hyde")
+    rc = em.run_probe_retrieval(out, topk=5)
+    assert rc == 0
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["variant"] == "hyde" and data["dim"] == "retrieval"
+    assert data["metrics"]["recall"] == 0.9
+    assert data["env"].get("EVAL_MATRIX_VARIANT") is None  # env 摘要只含 *_ENABLE 键

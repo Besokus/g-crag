@@ -152,3 +152,74 @@ def test_probe_retrieval_writes_json(tmp_path, monkeypatch):
     assert data["variant"] == "hyde" and data["dim"] == "retrieval"
     assert data["metrics"]["recall"] == 0.9
     assert data["env"].get("EVAL_MATRIX_VARIANT") is None  # env 摘要只含 *_ENABLE 键
+
+
+# ---------- eval_generation 抽函数 + 后端起停 ----------
+
+
+def test_run_generation_eval_importable_and_defaults():
+    """可导入 + 默认值保持原 CLI 口径（base 8001 / gate 0.85），不发请求。"""
+    import inspect
+
+    import eval_generation as eg
+
+    sig = inspect.signature(eg.run_generation_eval)
+    assert sig.parameters["base_url"].default == eg.BASE
+    assert sig.parameters["gate"].default == 0.85
+    assert eg.BASE == "http://127.0.0.1:8001"  # 原 CLI 行为不变
+
+
+class _FakeProc:
+    def __init__(self):
+        self.terminated = False
+        self.killed = False
+        self.polled = None
+
+    def poll(self):
+        return self.polled
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+def test_stop_backend_terminate_graceful_and_kill_fallback():
+    import subprocess as sp
+
+    import eval_matrix as em
+
+    p = _FakeProc()
+    em.stop_backend(p)
+    assert p.terminated and not p.killed
+
+    p2 = _FakeProc()
+
+    def timeout_wait(timeout=None):
+        raise sp.TimeoutExpired(cmd="uvicorn", timeout=timeout or 10)
+
+    p2.wait = timeout_wait
+    em.stop_backend(p2)
+    assert p2.terminated and p2.killed  # terminate 超时 → kill 兜底
+
+
+def test_stop_backend_skips_dead_process():
+    import eval_matrix as em
+
+    p = _FakeProc()
+    p.polled = 0  # 已退出
+    em.stop_backend(p)
+    assert not p.terminated and not p.killed
+
+
+def test_wait_backend_ready_injected_prober_and_timeout():
+    import eval_matrix as em
+
+    assert em.wait_backend_ready("http://x", timeout_s=1.0,
+                                 prober=lambda url: True, interval_s=0.01) is True
+    assert em.wait_backend_ready("http://x", timeout_s=0.05,
+                                 prober=lambda url: False, interval_s=0.01) is False

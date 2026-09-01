@@ -60,7 +60,57 @@ def run_probe_retrieval(json_out: Path, topk: int) -> int:
     return 0
 
 
-# ---- Task 3 在此追加：run_probe_generation / start_backend / wait_backend_ready / stop_backend ----
+def run_probe_generation(json_out: Path, base_url: str, limit: int) -> int:
+    """生成探针：base_url 指向**父进程已按变体 env 起好的后端**；gate 传 1.01（矩阵只比数值不卡门禁）。"""
+    from eval_generation import run_generation_eval
+
+    metrics = asyncio.run(run_generation_eval(base_url=base_url, limit=limit, gate=1.01))
+    slim = {k: v for k, v in metrics.items() if k != "rows"}
+    _write_probe(json_out, "generation", slim)
+    print(f"[probe:generation variant={os.environ.get('EVAL_MATRIX_VARIANT', '?')}] "
+          f"faithfulness={metrics.get('faithfulness')}")
+    return 0
+
+
+def start_backend(port: int, env: dict) -> subprocess.Popen:
+    """起变体后端子进程（uvicorn --app-dir backend，同 AGENTS 开发口径）。"""
+    return subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "app.main:app",
+         "--host", "127.0.0.1", "--port", str(port), "--app-dir", "backend"],
+        cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _login_probe(base_url: str) -> bool:
+    import httpx
+
+    try:
+        return httpx.post(f"{base_url}/api/system/login", json={}, timeout=5).status_code == 200
+    except Exception:
+        return False
+
+
+def wait_backend_ready(base_url: str, timeout_s: float, prober=None,
+                       interval_s: float = 2.0) -> bool:
+    """轮询到就绪；prober 可注入供单测。bge 预热 ~20s，编排默认等 240s。"""
+    deadline = time.time() + timeout_s
+    prober = prober or _login_probe
+    while time.time() < deadline:
+        if prober(base_url):
+            return True
+        time.sleep(interval_s)
+    return False
+
+
+def stop_backend(proc: subprocess.Popen) -> None:
+    """terminate→wait(10)→kill 兜底；已退出进程跳过。"""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def _run_probe_sync(cli_args: list[str], env: dict) -> bool:
@@ -100,9 +150,10 @@ def main() -> int:
             return 2
         if args.probe == "retrieval":
             return run_probe_retrieval(Path(args.json_out), args.topk)
-        # ---- Task 3 在此追加 generation 探针分支 ----
-        print("generation 探针未实现（Task 3）")
-        return 2
+        if not args.base_url:
+            print("generation 探针必须给 --base-url")
+            return 2
+        return run_probe_generation(Path(args.json_out), args.base_url, args.limit)
 
     dims = {d.strip() for d in args.dims.split(",") if d.strip()}
     unknown = dims - {"retrieval", "generation"}

@@ -12,7 +12,7 @@ def _run(coro):
 
 
 def test_a5_cv_has_g_segment(monkeypatch):
-    """citation_cache_version() 输出形如 cvXXX{G}（G 段=进程内存镜像）。"""
+    """citation_cache_version() 输出形如 cvXXX{G}R{R}（G 段=进程内存镜像；T9 追加 R 段=CRAG_V3 代际）。"""
     import app.config as cfg
     cfg._gov_generation = 0  # 测试隔离：先清零（防其他用例 bump 累积）
     # 模拟 governance_propagate_service bump 7 次
@@ -20,22 +20,27 @@ def test_a5_cv_has_g_segment(monkeypatch):
         cfg.bump_gov_generation_inproc()
     try:
         cv = cfg.citation_cache_version()
-        # 末段含 G=7（前 3 段是 V/S/N 各 0/1）
-        assert cv.startswith("cv")
-        assert cv.endswith("7")  # G=7
-        # "cv" + 3 开关位 + 至少 1 G 位
-        assert len(cv) >= 5
+        # 结构精确断言：cv + V/S/N 开关位 + G 段 + R 段（R=CRAG_V3_ENABLE，环境无关）
+        expected = (f"cv{int(cfg.settings.CITATION_VERIFIER_ENABLE)}"
+                    f"{int(cfg.settings.CITATION_STRUCTURED_OUTPUT)}"
+                    f"{int(cfg.settings.CITATION_NLI_ENABLE)}7"
+                    f"R{int(getattr(cfg.settings, 'CRAG_V3_ENABLE', False))}")
+        assert cv == expected
     finally:
         # 测试隔离：重置进程内存
         cfg._gov_generation = 0
 
 
 def test_a5_cv_g_default_zero():
-    """进程内存计数默认 0（无 bump 时）。"""
+    """进程内存计数默认 0（无 bump 时）——G 段（R 段之前）为 0。"""
     import app.config as cfg
     cfg._gov_generation = 0
     cv = cfg.citation_cache_version()
-    assert cv.endswith("0")
+    expected = (f"cv{int(cfg.settings.CITATION_VERIFIER_ENABLE)}"
+                f"{int(cfg.settings.CITATION_STRUCTURED_OUTPUT)}"
+                f"{int(cfg.settings.CITATION_NLI_ENABLE)}0"
+                f"R{int(getattr(cfg.settings, 'CRAG_V3_ENABLE', False))}")
+    assert cv == expected
 
 
 def test_a5_semantic_get_filters_blocked_doc(monkeypatch):

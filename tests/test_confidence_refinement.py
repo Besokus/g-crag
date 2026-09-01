@@ -126,12 +126,15 @@ def test_grade_top1_when_es_none():
 
 
 def test_grade_v3_unifies_v1_v2_caliber():
-    """同 es 值，v1(top1) 与 v2(detail→es) 给同 grade（口径稳定，断点 C 收口）。"""
-    es_val = 0.65
+    """同 es 值，v1(top1) 与 v2(detail→es) 给同 grade（口径稳定，断点 C 收口）。
+
+    es 取 0.8：CRAG_HIGH 已从 0.6 调高到 0.72（让更多 medium 进 gap），0.65 会落 ambiguous。
+    """
+    es_val = 0.8
     g_v1 = crag_grade(es_val, 5, True, es=es_val)
-    # v2 detail 算出同 es：13 relevant / 20 = 0.65
-    es_v2 = evidence_strength(detail={"relevant": 13, "partial": 0, "irrelevant": 7, "n": 20})
-    assert es_v2 == 0.65
+    # v2 detail 算出同 es：16 relevant / 20 = 0.8
+    es_v2 = evidence_strength(detail={"relevant": 16, "partial": 0, "irrelevant": 4, "n": 20})
+    assert es_v2 == 0.8
     g_v2 = crag_grade(0.0, 20, True, es=es_v2)
     assert g_v1[0] == g_v2[0] == GRADE_CORRECT
 
@@ -367,6 +370,9 @@ async def test_crag_correct_v3_v1_path_confidence(monkeypatch):
     monkeypatch.setattr(qa_service.settings, "CRAG_PERDOC_ENABLE", False)  # 走 v1
     monkeypatch.setattr(qa_service.settings, "CRAG_V3_ENABLE", True)
     monkeypatch.setattr(qa_service.settings, "RERANK_ENABLE", True)
+    # 隔离环境：本机 .env 可能开 SUFFICIENCY_GATE_ENABLE（judge 不可用→降档 high→medium_high），
+    # 本用例只测 V3 v1 路径的置信映射，sufficiency gate 必须关。
+    monkeypatch.setattr(qa_service.settings, "SUFFICIENCY_GATE_ENABLE", False)
 
     # top1=0.8 → grade=correct, es=0.8 → high
     _ctxs, conf, _action, grade, extras = await qa_service._crag_correct(
@@ -390,6 +396,8 @@ async def test_crag_correct_v3_off_no_extras(monkeypatch):
     monkeypatch.setattr(qa_service.settings, "CRAG_PERDOC_ENABLE", True)
     monkeypatch.setattr(qa_service.settings, "CRAG_V3_ENABLE", False)
     monkeypatch.setattr(qa_service.settings, "RERANK_ENABLE", True)
+    # 同上：sufficiency gate 开时会往 extras 塞 answerability/insufficient，与本断言无关
+    monkeypatch.setattr(qa_service.settings, "SUFFICIENCY_GATE_ENABLE", False)
 
     detail = {"relevant": 2, "partial": 1, "irrelevant": 2, "n": 5}
 

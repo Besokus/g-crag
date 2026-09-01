@@ -38,7 +38,10 @@ def _patch_bus(monkeypatch, store):
     return bus
 
 
-def test_quality_bus_settings_default():
+def test_quality_bus_settings_default(monkeypatch):
+    # _env_file=None 只挡 .env 文件；pymilvus 导入时 load_dotenv() 会把 .env 写进 os.environ，
+    # 断言"代码默认值"前必须把相关键从 environ 摘掉。
+    monkeypatch.delenv("QUALITY_BUS_ENABLE", raising=False)
     from app.config import Settings
     s = Settings(_env_file=None)
     assert s.QUALITY_BUS_ENABLE is False  # opt-in 默认关

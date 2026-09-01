@@ -17,8 +17,14 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_citation_settings_defaults():
-    # 用 _env_file=None 测纯默认值，避免运行时 .env 覆盖污染断言
+def test_citation_settings_defaults(monkeypatch):
+    # 用 _env_file=None 测纯默认值，避免运行时 .env 覆盖污染断言。
+    # 注意：pymilvus 导入时会 load_dotenv() 把 .env 写进 os.environ，_env_file=None 挡不住
+    # 环境变量，所以这里还要把断言涉及的键从 environ 里摘掉才是真"纯默认"。
+    for _k in ("CITATION_AUTO_ENABLE", "CITATION_SIM_THRESHOLD", "CITATION_VERIFIER_ENABLE",
+               "CITATION_NLI_ENABLE", "CITATION_NLI_TIMEOUT", "CITATION_STRUCTURED_OUTPUT",
+               "CITATION_REWRITE_ON_FAIL", "CITATION_VERIFY_SIM_THRESHOLD"):
+        monkeypatch.delenv(_k, raising=False)
     from app.config import Settings
     s = Settings(_env_file=None)
     assert s.CITATION_AUTO_ENABLE is True
@@ -419,13 +425,13 @@ def test_stream_done_includes_citation_when_enabled(monkeypatch):
     ctx = [{"chunkId": "c1", "chunk": "油温不超过85度", "docName": "A", "score": 0.9}]
     async def fake_mixed(*a, **kw): return ctx
     monkeypatch.setattr("app.services.qa_service.retrieval_service.mixed_search", fake_mixed)
-    async def fake_crag(*a, **kw): return (ctx, "high", "none", "good")
+    async def fake_crag(*a, **kw): return (ctx, "high", "none", "good", {})  # 5 元组：extras（CRAG_V3）
     monkeypatch.setattr("app.services.qa_service._crag_correct", fake_crag)
 
-    async def fake_stream(messages, temperature=0.5):
+    async def fake_stream(messages, temperature=0.5, **kwargs):
         yield "油温限值[1]。"
     monkeypatch.setattr("app.services.qa_service.get_llm_provider",
-                        lambda mt: type("P", (), {"stream": staticmethod(fake_stream)})())
+                        lambda mt, tier=None: type("P", (), {"stream": staticmethod(fake_stream)})())
 
     from app.services.qa_service import stream_answer
     events = []
@@ -456,12 +462,12 @@ def test_stream_done_no_citation_when_disabled(monkeypatch):
     ctx = [{"chunkId": "c1", "chunk": "油温", "docName": "A", "score": 0.9}]
     async def fake_mixed(*a, **kw): return ctx
     monkeypatch.setattr("app.services.qa_service.retrieval_service.mixed_search", fake_mixed)
-    async def fake_crag(*a, **kw): return (ctx, "high", "none", "good")
+    async def fake_crag(*a, **kw): return (ctx, "high", "none", "good", {})  # 5 元组：extras（CRAG_V3）
     monkeypatch.setattr("app.services.qa_service._crag_correct", fake_crag)
-    async def fake_stream(messages, temperature=0.5):
+    async def fake_stream(messages, temperature=0.5, **kwargs):
         yield "油温限值。"
     monkeypatch.setattr("app.services.qa_service.get_llm_provider",
-                        lambda mt: type("P", (), {"stream": staticmethod(fake_stream)})())
+                        lambda mt, tier=None: type("P", (), {"stream": staticmethod(fake_stream)})())
 
     from app.services.qa_service import stream_answer
     events = []

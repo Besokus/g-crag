@@ -1210,6 +1210,7 @@ async def _stream_agent(db, query, model_type, conversation_id, username, tenant
                    "cacheLayer": cached.get("cacheLayer", "redis")}
             yield {"type": "token", "content": cached["answer"]}
             try:
+                from app.core import metrics
                 metrics.QA_TOTAL.labels(_p, "true").inc()
                 metrics.cache_hit_inc(cached.get("cacheLayer", "redis") or "redis")
             except Exception:

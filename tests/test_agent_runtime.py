@@ -486,6 +486,47 @@ def test_stream_agent_event_sequence(monkeypatch):
     assert token_ev["content"] == "最终答案"
 
 
+def test_stream_agent_cache_hit_counts_metrics(monkeypatch):
+    """回归：_stream_agent 缓存命中路径必须累加 QA_TOTAL + cache_hit_inc。
+    此前该分支漏了局部导入 metrics，NameError 被 except Exception 吞掉，计数静默失效。"""
+    from app.config import settings
+    from app.services import qa_service
+
+    async def fake_cache_get(*a, **k):
+        return {"answer": "缓存答案", "retrievalSource": [], "confidence": "medium",
+                "cacheLayer": "redis"}
+    monkeypatch.setattr(qa_service.redis_client, "cache_get_json", fake_cache_get)
+    async def fake_valid(db, cached, tenant): return True
+    monkeypatch.setattr(qa_service, "_cache_knowledge_valid", fake_valid)
+    monkeypatch.setattr(qa_service.settings, "CACHE_PERSIST_ENABLE", False)
+
+    class _C:
+        id = "c-hit"
+    async def fake_create(db, username, query): return _C()
+    async def fake_save(db, cid, role, text): pass
+    monkeypatch.setattr(qa_service.conversation_service, "create_conversation", fake_create)
+    monkeypatch.setattr(qa_service.conversation_service, "save_message", fake_save)
+
+    from app.core import metrics
+    _p = settings.LLM_PROVIDER  # model_type=None → 计到默认 provider
+    qa_before = metrics.QA_TOTAL.labels(_p, "true")._value.get()
+    hit_before = metrics.cache_hit_snapshot().get("redis", 0)
+
+    events = []
+    async def collect():
+        async for ev in qa_service._stream_agent(None, "缓存问题", None, None, "u", "t", 0):
+            events.append(ev)
+    asyncio.run(collect())
+
+    types = [e["type"] for e in events]
+    assert types == ["meta", "token", "done"]
+    assert events[0]["cached"] is True
+    assert events[1]["content"] == "缓存答案"
+    assert events[2]["cached"] is True
+    assert metrics.QA_TOTAL.labels(_p, "true")._value.get() == qa_before + 1
+    assert metrics.cache_hit_snapshot().get("redis", 0) == hit_before + 1
+
+
 def test_qa_answer_request_has_agent_mode():
     """S2: QaAnswerRequest 支持 agentMode 字段。"""
     from app.schemas.qa import QaAnswerRequest

@@ -1,6 +1,7 @@
 # 链路节点详情（点击看指标/参数/Prompt）— 设计 spec
 
 > 日期：2026-08-29 ｜ 状态：待用户审阅（本文档只出方案，未实现）
+> **状态更新**：已实现并 Docker e2e 验证通过（commits 09552a7…2191c96），验证记录见 plan 文件（docs/superpowers/plans/2026-08-29-trace-node-detail.md）
 > 关联：`core/qa_trace.py`（采集器）、`QaTraceChart.vue`（瀑布图）、`models/qa_trace.py`（落库）、`otel_genai.py`（Langfuse 双写）
 
 ## 背景与目标

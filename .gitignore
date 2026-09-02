@@ -67,3 +67,4 @@ ai-trends-2026.html
 /grid-qa-release-*.tar.gz
 /docker-entrypoint-initdb.d/*.sql
 /data/hf-cache/
+.mimocode/

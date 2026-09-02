@@ -676,6 +676,8 @@ async def answer_ws(ws: WebSocket):
                 db, query, req.get("modelType"),
                 conversation_id=req.get("conversationId"),
                 username=user.username, tenant=user.tenant_id,
+                # 与 SSE 端点对齐：agent 工具角色门禁与文档级 dept/role ACL 依赖这两个字段
+                user_dept=user.dept, user_role=user.role,
                 agent_mode=bool(req.get("agentMode")),
                 memory_read=bool(req.get("memoryRead")),
                 memory_write=bool(req.get("memoryWrite")),

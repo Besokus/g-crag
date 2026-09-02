@@ -389,8 +389,11 @@ async def agent_tool_calls(
     username: str | None = Query(None),
     user: User = Depends(require_perm(AUDIT_READ)),
 ):
-    """Agent 工具调用审计列表（S4，管理员/审计员）：谁/何时/哪个 persona/调了啥工具/结果。"""
-    data = await query_tool_calls(page, size, persona=persona, tool=tool, username=username)
+    """Agent 工具调用审计列表（S4，管理员/审计员）：谁/何时/哪个 persona/调了啥工具/结果（租户域内）。"""
+    data = await query_tool_calls(
+        page, size, persona=persona, tool=tool, username=username,
+        tenant=user.tenant_id or "default",
+    )
     return success(data, "查询成功")
 
 
@@ -400,7 +403,10 @@ async def agent_run(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """通用 agent 入口：按 persona 名跑 run_agent（支持自定义 DB persona）。返回 answer+steps。"""
+    """通用 agent 入口：按 persona 名跑 run_agent（支持自定义 DB persona）。返回 answer+steps。
+
+    记忆治理：memoryRead/memoryWrite 默认关（不召回不沉淀）；memoryScope 只允许 user/device。
+    """
     from app.services.persona_store import get_persona
     from app.services.agent_runtime import run_agent
     persona = await get_persona(body.persona)
@@ -408,7 +414,10 @@ async def agent_run(
         raise BizError(f"persona '{body.persona}' 不存在", 404)
     result = await run_agent(db, persona, body.query, body.modelType,
                              ctx={"username": user.username, "tenant": user.tenant_id,
-                                  "role": user.role})
+                                  "role": user.role,
+                                  "memoryRead": body.memoryRead,
+                                  "memoryWrite": body.memoryWrite,
+                                  "memoryScope": body.memoryScope})
     return success({
         "persona": body.persona,
         "answer": result.answer if isinstance(result.answer, str) else result.answer,

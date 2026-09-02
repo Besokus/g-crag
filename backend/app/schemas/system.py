@@ -1,6 +1,6 @@
 """系统（日志/配置）相关 schema。"""
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -61,6 +61,9 @@ class AgentRunRequest(BaseModel):
     persona: str                         # 通用 agent 入口：persona 名（diagnose/qa/alert/自定义）
     query: str
     modelType: Optional[str] = None
+    memoryRead: bool = False             # 长期记忆读取 opt-in（默认关=不召回）
+    memoryWrite: bool = False            # 长期记忆写入 opt-in（默认关=不沉淀）
+    memoryScope: Literal["user", "device"] = "user"  # 记忆归属域（tenant 域禁止）
 
 
 class LlmRouterConfigRequest(BaseModel):

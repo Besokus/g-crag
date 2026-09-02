@@ -1,5 +1,5 @@
 """问答相关 schema。"""
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -9,6 +9,9 @@ class QaAnswerRequest(BaseModel):
     modelType: Optional[str] = None       # deepseek | qwen | doubao
     conversationId: Optional[str] = None  # 多轮对话 id（首次不传则新建）
     agentMode: bool = False               # S2：深度思考(Agent)模式，走通用 Agent 引擎
+    memoryRead: bool = False              # Agent 模式长期记忆读取 opt-in（默认关=现状）
+    memoryWrite: bool = False             # Agent 模式长期记忆写入 opt-in（默认关=现状）
+    memoryScope: Literal["user", "device"] = "user"  # 记忆归属域（tenant 域禁止：跨用户记忆=越权）
 
 
 class QaAnswerData(BaseModel):
@@ -30,7 +33,9 @@ class FeedbackRequest(BaseModel):
     feedback: str            # like | dislike
     conversationId: Optional[str] = None
     reason: Optional[str] = None          # 用户纠错理由/标注（沉淀坏 case）
-    retrievalSources: Optional[str] = None  # 检索命中的文档名（逗号分隔，用于检索质量评估）
+    retrievalSources: Optional[str] = None  # 检索命中的文档名（逗号分隔，旧客户端兼容）
+    traceId: Optional[str] = None         # 关联问答链路 trace（非法值自动重建）
+    sources: Optional[List[dict]] = None  # 结构化检索来源（优先于 retrievalSources）
 
 
 class FaithfulnessRequest(BaseModel):

@@ -22,3 +22,7 @@ class AgentToolCall(Base):
     tenant: Mapped[str] = mapped_column(String(64), default="default", index=True)
     role: Mapped[str] = mapped_column(String(32), default="")
     degraded: Mapped[bool] = mapped_column(Boolean, default=False)
+    provider: Mapped[str] = mapped_column(String(64), default="")    # builtin | mcp:<server>
+    action_type: Mapped[str] = mapped_column(String(16), default="")  # read | write
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    denied_reason: Mapped[str | None] = mapped_column(String(64), default=None)  # role_not_allowed 等

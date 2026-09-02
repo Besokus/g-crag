@@ -35,6 +35,19 @@ CATEGORY_PREFERENCE = "preference"
 CATEGORY_DIAGNOSIS = "diagnosis"
 CATEGORY_PENDING = "pending"
 
+# 记忆写入模式：legacy=历史自动沉淀（治理后不可召回）；explicit/explicit_opt_in=用户显式同意
+RECALLABLE_WRITE_MODES = ("explicit", "explicit_opt_in")
+
+
+def _owner_key(tenant_id: str, user_id: str) -> str:
+    """向量/热记忆的归属键：租户+用户复合，防止跨租户同名用户串扰。"""
+    tenant = (tenant_id or "default").strip() or "default"
+    return f"{tenant}:{user_id}"
+
+
+def _norm_tenant(tenant_id: str | None) -> str:
+    return (tenant_id or "default").strip() or "default"
+
 # extract_facts prompt（极简化：只抽原子事实，≤200 token 输出）
 _EXTRACT_PROMPT = """你是电网运维对话记忆抽取器。从下面的用户提问和AI回答中，抽取值得长期记住的原子事实。
 
@@ -104,19 +117,26 @@ class _AgentMemoryService:
         return facts
 
     async def consolidate(self, user_id: str, facts: list[dict],
-                          model_type: str | None = None) -> int:
+                          model_type: str | None = None, *,
+                          tenant_id: str = "default", agent_id: str = "",
+                          write_mode: str = "explicit") -> int:
         """整合新事实：去重/消解/合并 → 写入 Milvus + Neo4j + Redis + MySQL。
 
+        tenant_id/agent_id/write_mode：治理字段（记忆归属域 + 写入模式）。
         Returns: 实际写入的条数
         """
         if not facts:
             return 0
+        tenant_id = _norm_tenant(tenant_id)
+        owner_key = _owner_key(tenant_id, user_id)
 
         # 容量管理：检查当前用户记忆数，超上限时淘汰低权重
         async with AsyncSessionLocal() as db:
             current_count = (await db.execute(
                 select(func.count()).select_from(AgentMemory)
-                .where(AgentMemory.user_id == user_id, AgentMemory.deleted_at.is_(None))
+                .where(AgentMemory.user_id == user_id,
+                       AgentMemory.tenant_id == tenant_id,
+                       AgentMemory.deleted_at.is_(None))
             )).scalar() or 0
 
             capacity = settings.MEMORY_CAPACITY
@@ -126,7 +146,9 @@ class _AgentMemoryService:
                 to_evict = len(facts)
                 evict_rows = (await db.execute(
                     select(AgentMemory)
-                    .where(AgentMemory.user_id == user_id, AgentMemory.deleted_at.is_(None))
+                    .where(AgentMemory.user_id == user_id,
+                           AgentMemory.tenant_id == tenant_id,
+                           AgentMemory.deleted_at.is_(None))
                     .order_by(AgentMemory.weight.asc(), AgentMemory.last_hit_at.asc())
                     .limit(to_evict)
                 )).scalars().all()
@@ -143,7 +165,9 @@ class _AgentMemoryService:
             existing_texts = set()
             existing_rows = (await db.execute(
                 select(AgentMemory.fact_text)
-                .where(AgentMemory.user_id == user_id, AgentMemory.deleted_at.is_(None))
+                .where(AgentMemory.user_id == user_id,
+                       AgentMemory.tenant_id == tenant_id,
+                       AgentMemory.deleted_at.is_(None))
             )).scalars().all()
             existing_texts = {t for t in existing_rows if t}
 
@@ -167,11 +191,14 @@ class _AgentMemoryService:
                 mem = AgentMemory(
                     fact_id=fact_id,
                     user_id=user_id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id or "",
                     scope=SCOPE_USER,
                     fact_text=f["fact"],
                     entity=f.get("entity", ""),
                     category=f.get("category", CATEGORY_PREFERENCE),
                     weight=1.0,
+                    write_mode=write_mode or "explicit",
                     created_at=now,
                     last_hit_at=now,
                     hit_count=0,
@@ -184,7 +211,7 @@ class _AgentMemoryService:
                         fact_id=fact_id,
                         embedding=vectors[i],
                         fact_text=f["fact"],
-                        user_id=user_id,
+                        user_id=owner_key,
                         scope=SCOPE_USER,
                         entity=f.get("entity", ""),
                         category=f.get("category", CATEGORY_PREFERENCE),
@@ -201,73 +228,98 @@ class _AgentMemoryService:
                 # 写 Redis 热记忆
                 try:
                     from app.clients.redis_client import get_redis
-                    await get_redis().zadd(f"memory:hot:{user_id}", {fact_id: now.timestamp()})
+                    await get_redis().zadd(f"memory:hot:{owner_key}", {fact_id: now.timestamp()})
                 except Exception:
                     pass
                 written += 1
             await db.commit()
             return written
 
-    async def recall(self, query: str, user_id: str, scope: str = "user") -> str:
+    async def recall(self, query: str, user_id: str, scope: str = "user",
+                     tenant_id: str = "default", agent_id: str = "") -> str:
         """召回与当前查询相关的记忆，返回格式化的 system 消息文本。
 
+        治理边界（N1 治理强化）：
+        - 只召回 write_mode ∈ {explicit, explicit_opt_in} 的记忆（legacy 历史沉淀不可召回）；
+        - 租户+用户+persona+scope 四重归属过滤，向量命中的 text 一律不信、以 DB 归属行内容为准
+          （防 Milvus 向量载荷被污染/串租户）。
         零回归：无记忆时返回空字符串。
-        三层召回：Redis 热记忆（秒级）+ Milvus 向量记忆（语义）+ Neo4j 图记忆（偏好）。
         """
         if not query or not user_id:
             return ""
+        tenant_id = _norm_tenant(tenant_id)
+        agent_id = (agent_id or "").strip()
+        owner_key = _owner_key(tenant_id, user_id)
 
         parts: list[str] = []
 
-        # 1. Redis 热记忆（最近命中的 Top-5）
+        # 1. Redis 热记忆（最近命中的 Top-5；归属键=租户:用户复合）
         try:
             from app.clients.redis_client import get_redis
             r = get_redis()
-            hot_ids = await r.zrevrange(f"memory:hot:{user_id}", 0, 4)
+            hot_ids = await r.zrevrange(f"memory:hot:{owner_key}", 0, 4)
             if hot_ids:
                 async with AsyncSessionLocal() as db:
                     rows = (await db.execute(
                         select(AgentMemory.fact_text, AgentMemory.category)
-                        .where(AgentMemory.fact_id.in_(hot_ids), AgentMemory.deleted_at.is_(None))
+                        .where(
+                            AgentMemory.fact_id.in_(hot_ids),
+                            AgentMemory.deleted_at.is_(None),
+                            AgentMemory.write_mode.in_(RECALLABLE_WRITE_MODES),
+                            AgentMemory.tenant_id == tenant_id,
+                            AgentMemory.user_id == user_id,
+                            AgentMemory.agent_id.in_([agent_id, ""]),
+                        )
                     )).all()
                     for row in rows:
                         parts.append(f"[{row.category}] {row.fact_text}")
         except Exception:
             pass
 
-        # 2. Milvus 向量记忆（语义检索 Top-5）
+        # 2. Milvus 向量记忆（语义检索 Top-5；命中后回 DB 校验归属，只信 DB 内容）
         try:
             from app.services.embedding_service import embed_query
             from app.clients.milvus_client import search_memory
             query_vec = await embed_query(query)
-            hits = search_memory(query_vec, user_id, topk=5)
+            hits = search_memory(query_vec, owner_key, topk=5)
             if hits:
-                # 更新命中计数 + 热记忆
+                pks = [h.get("pk") for h in hits if h.get("pk")]
+                owned_rows: list = []
                 async with AsyncSessionLocal() as db:
-                    for hit in hits:
-                        fact_id = hit.get("pk", "")
-                        fact_text = hit.get("text", "")
-                        category = hit.get("category", "")
-                        if fact_text and f"[{category}] {fact_text}" not in parts:
-                            parts.append(f"[{category}] {fact_text}")
-                        # 更新命中
-                        if fact_id:
-                            await db.execute(
-                                update(AgentMemory)
-                                .where(AgentMemory.fact_id == fact_id)
-                                .values(
-                                    hit_count=AgentMemory.hit_count + 1,
-                                    last_hit_at=datetime.datetime.now(),
-                                )
+                    if pks:
+                        owned_rows = (await db.execute(
+                            select(AgentMemory)
+                            .where(
+                                AgentMemory.fact_id.in_(pks),
+                                AgentMemory.deleted_at.is_(None),
+                                AgentMemory.write_mode.in_(RECALLABLE_WRITE_MODES),
+                                AgentMemory.tenant_id == tenant_id,
+                                AgentMemory.user_id == user_id,
+                                AgentMemory.agent_id.in_([agent_id, ""]),
+                                AgentMemory.scope == scope,
                             )
-                            try:
-                                from app.clients.redis_client import get_redis
-                                await get_redis().zadd(
-                                    f"memory:hot:{user_id}",
-                                    {fact_id: datetime.datetime.now().timestamp()},
-                                )
-                            except Exception:
-                                pass
+                        )).scalars().all()
+                    owned_ids = set()
+                    now = datetime.datetime.now()
+                    for row in owned_rows:
+                        owned_ids.add(row.fact_id)
+                        line = f"[{row.category}] {row.fact_text}"
+                        if line not in parts:
+                            parts.append(line)
+                        # 更新命中（仅归属命中的）
+                        await db.execute(
+                            update(AgentMemory)
+                            .where(AgentMemory.fact_id == row.fact_id)
+                            .values(hit_count=AgentMemory.hit_count + 1, last_hit_at=now)
+                        )
+                    if owned_ids:
+                        try:
+                            from app.clients.redis_client import get_redis
+                            redis = get_redis()
+                            for fid in owned_ids:
+                                await redis.zadd(f"memory:hot:{owner_key}", {fid: now.timestamp()})
+                        except Exception:
+                            pass
                     await db.commit()
         except Exception as e:
             degraded("memory_recall_milvus", e)
@@ -293,20 +345,26 @@ class _AgentMemoryService:
         body = "\n".join(f"- {p}" for p in parts)
         return f"{header}\n{body}"
 
-    async def forget(self, memory_id: str) -> bool:
-        """软删除一条记忆（deleted_at = NOW()）。"""
+    async def forget(self, memory_id: str, tenant_id: str = "default") -> bool:
+        """软删除一条记忆（deleted_at = NOW()，租户域内）。"""
         async with AsyncSessionLocal() as db:
             row = (await db.execute(
-                select(AgentMemory).where(AgentMemory.fact_id == memory_id)
+                select(AgentMemory).where(
+                    AgentMemory.fact_id == memory_id,
+                    AgentMemory.tenant_id == _norm_tenant(tenant_id),
+                )
             )).scalar_one_or_none()
             if not row:
                 return False
             row.deleted_at = datetime.datetime.now()
             await db.commit()
-            # 从 Redis 热记忆移除
+            # 从 Redis 热记忆移除（归属键=租户:用户复合）
             try:
                 from app.clients.redis_client import get_redis
-                await get_redis().zrem(f"memory:hot:{row.user_id}", memory_id)
+                await get_redis().zrem(
+                    f"memory:hot:{_owner_key(row.tenant_id or 'default', row.user_id)}",
+                    memory_id,
+                )
             except Exception:
                 pass
             return True
@@ -367,16 +425,26 @@ class _AgentMemoryService:
             return len(rows_180) + len(rows_90)
 
     async def extract_and_consolidate(self, user_msg: str, answer: str,
-                                      user_id: str, model_type: str | None = None) -> None:
+                                      user_id: str, model_type: str | None = None, *,
+                                      opt_in: bool = False,
+                                      tenant_id: str = "default",
+                                      agent_id: str = "") -> None:
         """fire-and-forget：抽取事实 → 整合写入（不阻塞主流程）。
 
+        治理：opt_in=False（默认）时在抽取前直接返回——用户未显式同意绝不沉淀长期记忆。
         独立 session，异常不外抛。
         """
+        if not opt_in:
+            return
         try:
             with trace_span("memory.extract"):
                 facts = await self.extract_facts(user_msg, answer, model_type)
                 if facts:
-                    n = await self.consolidate(user_id, facts, model_type)
+                    n = await self.consolidate(
+                        user_id, facts, model_type,
+                        tenant_id=tenant_id, agent_id=agent_id,
+                        write_mode="explicit_opt_in" if agent_id else "explicit",
+                    )
                     if n:
                         from app.core.otel_genai import set_attribute
                         set_attribute("memory.facts_extracted", len(facts))
@@ -385,14 +453,23 @@ class _AgentMemoryService:
             degraded("memory_extract_and_consolidate", e)
 
     async def list_memories(self, user_id: str = "", page: int = 1,
-                            size: int = 20) -> dict:
-        """管理端：分页查询记忆列表（含已删除）。"""
+                            size: int = 20, tenant_id: str = "default",
+                            agent_id: str = "", scope: str = "") -> dict:
+        """管理端：分页查询记忆列表（含已删除，租户域内，可按 persona/归属域过滤）。"""
         async with AsyncSessionLocal() as db:
-            stmt = select(AgentMemory)
-            cnt_stmt = select(func.count()).select_from(AgentMemory)
+            stmt = select(AgentMemory).where(AgentMemory.tenant_id == _norm_tenant(tenant_id))
+            cnt_stmt = select(func.count()).select_from(AgentMemory).where(
+                AgentMemory.tenant_id == _norm_tenant(tenant_id)
+            )
             if user_id:
                 stmt = stmt.where(AgentMemory.user_id == user_id)
                 cnt_stmt = cnt_stmt.where(AgentMemory.user_id == user_id)
+            if agent_id:
+                stmt = stmt.where(AgentMemory.agent_id == agent_id)
+                cnt_stmt = cnt_stmt.where(AgentMemory.agent_id == agent_id)
+            if scope:
+                stmt = stmt.where(AgentMemory.scope == scope)
+                cnt_stmt = cnt_stmt.where(AgentMemory.scope == scope)
             total = (await db.execute(cnt_stmt)).scalar() or 0
             rows = (await db.execute(
                 stmt.order_by(AgentMemory.created_at.desc())
@@ -415,23 +492,32 @@ class _AgentMemoryService:
                 } for r in rows],
             }
 
-    async def get_stats(self) -> dict:
-        """管理端：记忆统计。"""
+    async def get_stats(self, tenant_id: str = "default",
+                        agent_id: str = "", scope: str = "") -> dict:
+        """管理端：记忆统计（租户域内，可按 persona/归属域过滤）。"""
+        _tenant = _norm_tenant(tenant_id)
         async with AsyncSessionLocal() as db:
+            _scope_filters = [AgentMemory.tenant_id == _tenant]
+            if agent_id:
+                _scope_filters.append(AgentMemory.agent_id == agent_id)
+            if scope:
+                _scope_filters.append(AgentMemory.scope == scope)
             total = (await db.execute(
                 select(func.count()).select_from(AgentMemory)
+                .where(*_scope_filters)
             )).scalar() or 0
             active = (await db.execute(
                 select(func.count()).select_from(AgentMemory)
-                .where(AgentMemory.deleted_at.is_(None))
+                .where(AgentMemory.deleted_at.is_(None), *_scope_filters)
             )).scalar() or 0
             deleted = total - active
             users = (await db.execute(
                 select(func.count(func.distinct(AgentMemory.user_id)))
+                .where(*_scope_filters)
             )).scalar() or 0
             by_category = (await db.execute(
                 select(AgentMemory.category, func.count())
-                .where(AgentMemory.deleted_at.is_(None))
+                .where(AgentMemory.deleted_at.is_(None), *_scope_filters)
                 .group_by(AgentMemory.category)
             )).all()
             return {

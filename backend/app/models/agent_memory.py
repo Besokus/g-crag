@@ -20,11 +20,14 @@ class AgentMemory(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     fact_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # UUID，Milvus pk 对齐
     user_id: Mapped[str] = mapped_column(String(64), index=True)  # 用户名（scope=user 时）
+    tenant_id: Mapped[str] = mapped_column(String(64), default="default", index=True)  # 租户域（记忆隔离边界）
+    agent_id: Mapped[str] = mapped_column(String(64), default="", index=True)  # 写入的 persona（空=通用）
     scope: Mapped[str] = mapped_column(String(16), default="user", index=True)  # user | device
     fact_text: Mapped[str] = mapped_column(Text, default="")  # 记忆文本（如"用户负责110kV城东站"）
     entity: Mapped[str] = mapped_column(String(128), default="")  # 关联实体名（如"1号主变"）
     category: Mapped[str] = mapped_column(String(32), default="preference")  # preference|diagnosis|pending
     weight: Mapped[float] = mapped_column(Float, default=1.0)  # 权重（衰减/命中更新）
+    write_mode: Mapped[str] = mapped_column(String(32), default="legacy", index=True)  # legacy | explicit | explicit_opt_in
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     last_hit_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())  # 最后命中时间
     hit_count: Mapped[int] = mapped_column(Integer, default=0)  # 命中次数

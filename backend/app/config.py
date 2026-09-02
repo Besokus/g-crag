@@ -332,6 +332,14 @@ class Settings(BaseSettings):
     MEMORY_COLLECTION: str = "memory_collection"  # Milvus 记忆 collection 名
     MEMORY_ENABLE: bool = True              # Agent 长期记忆 collection/检索总开关
     MEMORY_DECAY_CRON_HOURS: float = 24.0  # 记忆衰减+软删物理删除 周期(小时，<=0 关闭)；decay() 已实现但需 cron 触发
+    MEMORY_AUTO_SAVE_ENABLED: bool = False # 全局自动沉淀开关（关=仅用户显式 opt-in 才写长期记忆）
+
+    # ---------- N2b MCP 治理 ----------
+    MCP_EXTERNAL_ENABLED: bool = True      # MCP 外部工具总开关（关=所有外部 server 不启用）
+    MCP_PROVIDER_ALLOWLIST: str = ""       # server 名白名单（逗号分隔，空=全部已配置的允许）
+    MCP_CONNECT_TIMEOUT_SECONDS: float = 2.0   # 连接超时（秒）
+    MCP_DISCOVERY_TIMEOUT_SECONDS: float = 10.0  # 工具发现读超时（秒）
+    MCP_CALL_TIMEOUT_SECONDS: float = 30.0      # 工具调用读超时（秒）
 
     # ---------- N2 MCP 工具总线 ----------
     MCP_SERVERS: str = ""                  # JSON 配置：[{"name":"mock_scada","url":"http://localhost:9100","token":"xxx"}]

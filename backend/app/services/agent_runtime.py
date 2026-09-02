@@ -13,10 +13,17 @@ from typing import Awaitable, Callable, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.obs import degraded
 from app.providers.factory import get_llm_provider
 
 MAX_ITER_DEFAULT = 6
+
+
+def _normalize_memory_scope(ctx: dict | None) -> str:
+    """记忆归属域只认 user/device（tenant 域=跨用户记忆，禁止）。"""
+    from app.services.capability_context import normalize_scope
+    return normalize_scope((ctx or {}).get("memoryScope") or (ctx or {}).get("memory_scope"))
 
 # S4：高风险工具按 role 限制（未列出的全员可调）。仅 ctx 提供时生效（ctx=None 零回归）。
 tool_permissions: dict[str, list[str]] = {
@@ -33,12 +40,18 @@ class Tool:
     description: str
     parameters: dict
     handler: Callable[..., Awaitable[str]]
+    provider: str = "builtin"   # builtin | mcp:<server>（审计归因）
+    action_type: str = ""       # read | write（空=按 tool_permissions 推断）
 
     @property
     def schema(self) -> dict:
         return {"type": "function", "function": {
             "name": self.name, "description": self.description,
             "parameters": self.parameters}}
+
+    @property
+    def audit_action_type(self) -> str:
+        return self.action_type or ("write" if self.name in tool_permissions else "read")
 
 
 class ToolRegistry:
@@ -78,6 +91,18 @@ class ToolRegistry:
                     metrics.AGENT_TOOL_DENIED.labels(name).inc()
                 except Exception:
                     pass
+                provider = self._provider_of(name)
+                denied_tool = self._tools.get(name)
+                denied_action = denied_tool.audit_action_type if denied_tool else (
+                    "write" if name in tool_permissions else "read"
+                )
+                self._audit(
+                    ctx=ctx, name=name, tool_provider=provider,
+                    action_type=denied_action,
+                    result=f"权限不足：工具 {name} 需 {allowed_roles} 角色",
+                    error=True, denied_reason="role_not_allowed",
+                    duration_ms=0,
+                )
                 return f"权限不足：工具 {name} 需 {allowed_roles} 角色", True
         t = self._tools.get(name)
         if not t:
@@ -101,27 +126,47 @@ class ToolRegistry:
                 return f"工具 {name} 未声明租户隔离能力，已拒绝调用", True
             tool_args["tenant"] = tenant
         error = False
+        _tool_t0 = time.perf_counter()
         try:
             result = await t.handler(db, model_type, **tool_args)
         except Exception as e:
             degraded(f"agent_tool_{name}", e)
             result = f"工具 {name} 执行失败: {type(e).__name__}: {e}"
             error = True
+        duration_ms = int((time.perf_counter() - _tool_t0) * 1000)
         # 审计（fire-and-forget bg task，仅 ctx 提供时；仿 rewrite_event 独立 session）
         if ctx is not None:
-            try:
-                import asyncio
-                from app.services.agent_tool_audit_service import log_tool_call
-                asyncio.ensure_future(log_tool_call(
-                    persona=ctx.get("persona", ""), tool=name,
-                    iter=ctx.get("iter", 0), args=tool_args, result=result or "",
-                    error=error, username=ctx.get("username", ""),
-                    tenant=ctx.get("tenant", "default"), role=ctx.get("role", ""),
-                    degraded_flag=error,
-                ))
-            except Exception:
-                pass
+            self._audit(
+                ctx=ctx, name=name, tool_provider=t.provider,
+                action_type=t.audit_action_type, args=tool_args,
+                result=result or "", error=error,
+                duration_ms=duration_ms,
+            )
         return result, error
+
+    def _provider_of(self, name: str) -> str:
+        tool = self._tools.get(name)
+        return tool.provider if tool else "builtin"
+
+    def _audit(self, *, ctx: dict, name: str, tool_provider: str,
+               action_type: str = "", args: dict | None = None, result: str = "",
+               error: bool = False, duration_ms: int = 0,
+               denied_reason: str | None = None) -> None:
+        """工具调用审计（含治理字段），失败绝不影响主链路。"""
+        try:
+            import asyncio
+            from app.services.agent_tool_audit_service import log_tool_call
+            asyncio.ensure_future(log_tool_call(
+                persona=ctx.get("persona", ""), tool=name,
+                iter=ctx.get("iter", 0), args=args or {}, result=result,
+                error=error, username=ctx.get("username", ""),
+                tenant=ctx.get("tenant", "default"), role=ctx.get("role", ""),
+                degraded_flag=error,
+                provider=tool_provider, action_type=action_type,
+                duration_ms=duration_ms, denied_reason=denied_reason,
+            ))
+        except Exception:
+            pass
 
 
 @dataclass
@@ -196,14 +241,21 @@ async def run_agent(db: AsyncSession, persona: Persona, user_msg: str,
     t0 = time.perf_counter()
     provider = get_llm_provider(model_type)
 
-    # N1: 记忆召回（零侵入：recall 返回空字符串=无记忆=零行为变化；ctx=None 跳过）
+    # N1+治理: 记忆召回——全局开关 + 单次调用显式 opt-in（memoryRead/memoryWrite）双门槛
     recall_text = ""
     if ctx and ctx.get("username"):
-        try:
-            from app.services.agent_memory_service import agent_memory
-            recall_text = await agent_memory.recall(user_msg, ctx["username"], scope="user")
-        except Exception as e:
-            degraded("agent_memory_recall", e)
+        from app.services.capability_context import CapabilityContext
+        _cap = CapabilityContext.from_mapping(ctx, trusted_agent_id=persona.name)
+        if getattr(settings, "MEMORY_ENABLE", True) and _cap.memory_read_enabled(ctx):
+            try:
+                from app.services.agent_memory_service import agent_memory
+                recall_text = await agent_memory.recall(
+                    user_msg, ctx["username"],
+                    tenant_id=_cap.tenant_id, agent_id=_cap.agent_id,
+                    scope=_normalize_memory_scope(ctx),
+                )
+            except Exception as e:
+                degraded("agent_memory_recall", e)
 
     messages = [
         {"role": "system", "content": persona.system_prompt},
@@ -256,14 +308,22 @@ async def run_agent(db: AsyncSession, persona: Persona, user_msg: str,
     iters = len(steps)
     _inc_metrics(persona.name, iters)
 
-    # N1: fire-and-forget 记忆抽取（不阻塞响应；ctx=None 跳过=diagnose 老链路零回归）
+    # N1+治理: fire-and-forget 记忆抽取——opt_in=全局自动沉淀开关 且 单次调用显式同意写
     if ctx and ctx.get("username"):
         try:
             import asyncio as _asyncio
             from app.services.agent_memory_service import agent_memory
+            from app.services.capability_context import CapabilityContext
+            _cap = CapabilityContext.from_mapping(ctx, trusted_agent_id=persona.name)
+            _opt_in = (
+                getattr(settings, "MEMORY_AUTO_SAVE_ENABLED", False)
+                and _cap.memory_write_enabled(ctx)
+            )
             _answer_text = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
             _asyncio.create_task(agent_memory.extract_and_consolidate(
-                user_msg, _answer_text, ctx["username"], model_type))
+                user_msg, _answer_text, ctx["username"], model_type,
+                opt_in=_opt_in, tenant_id=_cap.tenant_id, agent_id=_cap.agent_id,
+            ))
         except Exception:
             pass
 

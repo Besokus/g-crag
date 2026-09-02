@@ -14,8 +14,13 @@ from app.models.agent_tool_call import AgentToolCall
 
 async def log_tool_call(persona: str, tool: str, iter: int, args: dict, result: str,
                         error: bool, username: str, tenant: str, role: str,
-                        degraded_flag: bool = False) -> None:
-    """记录一条工具调用审计。fire-and-forget bg task 调；失败不抛（degraded 上报）。"""
+                        degraded_flag: bool = False, *, provider: str = "",
+                        action_type: str = "", duration_ms: int = 0,
+                        denied_reason: str | None = None) -> None:
+    """记录一条工具调用审计（含治理字段 provider/action_type/duration_ms/denied_reason）。
+
+    fire-and-forget bg task 调；失败不抛（degraded 上报）。
+    """
     try:
         async with AsyncSessionLocal() as db:
             db.add(AgentToolCall(
@@ -25,6 +30,10 @@ async def log_tool_call(persona: str, tool: str, iter: int, args: dict, result: 
                 error=bool(error), username=username or "",
                 tenant=tenant or "default", role=role or "",
                 degraded=bool(degraded_flag),
+                provider=provider or "builtin",
+                action_type=action_type or "",
+                duration_ms=int(duration_ms or 0),
+                denied_reason=denied_reason,
             ))
             await db.commit()
     except Exception as e:
@@ -33,12 +42,15 @@ async def log_tool_call(persona: str, tool: str, iter: int, args: dict, result: 
 
 async def query_tool_calls(page: int = 1, size: int = 20,
                            persona: str | None = None, tool: str | None = None,
-                           username: str | None = None) -> dict:
-    """分页查询工具调用审计（admin 用）。"""
+                           username: str | None = None, tenant: str | None = None) -> dict:
+    """分页查询工具调用审计（admin 用，租户域内）。"""
     try:
         async with AsyncSessionLocal() as db:
             base = select(AgentToolCall)
             cnt = select(func.count()).select_from(AgentToolCall)
+            if tenant:
+                base = base.where(AgentToolCall.tenant == tenant)
+                cnt = cnt.where(AgentToolCall.tenant == tenant)
             if persona:
                 base = base.where(AgentToolCall.persona == persona)
                 cnt = cnt.where(AgentToolCall.persona == persona)
@@ -59,6 +71,8 @@ async def query_tool_calls(page: int = 1, size: int = 20,
                 "args": r.args_json, "result": r.result_summary,
                 "error": bool(r.error), "username": r.username,
                 "tenant": r.tenant, "role": r.role, "degraded": bool(r.degraded),
+                "provider": r.provider, "actionType": r.action_type,
+                "durationMs": r.duration_ms, "deniedReason": r.denied_reason,
             } for r in rows]}
     except Exception as e:
         degraded("agent_tool_audit_query", e)

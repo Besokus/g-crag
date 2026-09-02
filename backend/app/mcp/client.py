@@ -14,9 +14,32 @@ from typing import Any
 
 import httpx
 
+from app.config import settings
 from app.core.obs import degraded
 from app.services.agent_runtime import Tool
 from app.mcp.registry import McpServerConfig
+
+
+def _connect_timeout() -> float:
+    return float(getattr(settings, "MCP_CONNECT_TIMEOUT_SECONDS", 2.0))
+
+
+def _discovery_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=_connect_timeout(),
+        read=float(getattr(settings, "MCP_DISCOVERY_TIMEOUT_SECONDS", 10.0)),
+        write=_connect_timeout(),
+        pool=float(getattr(settings, "MCP_DISCOVERY_TIMEOUT_SECONDS", 10.0)),
+    )
+
+
+def _call_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=_connect_timeout(),
+        read=float(getattr(settings, "MCP_CALL_TIMEOUT_SECONDS", 30.0)),
+        write=_connect_timeout(),
+        pool=float(getattr(settings, "MCP_CALL_TIMEOUT_SECONDS", 30.0)),
+    )
 
 
 def mcp_to_openai(mcp_tool: dict) -> dict:
@@ -50,7 +73,7 @@ class McpClient:
         Returns: [{"server": name, "url": url, "tools": [mcp_tool_schema, ...]}, ...]
         """
         results: list[dict] = []
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=_discovery_timeout()) as client:
             for srv in servers:
                 if not srv.enabled:
                     continue
@@ -109,6 +132,7 @@ class McpClient:
                     description=fn.get("description", f"MCP tool: {tool_name}"),
                     parameters=parameters,
                     handler=make_handler(server_url, tool_name, ""),
+                    provider=f"mcp:{server_name}",
                 )
                 registry.register(tool)
                 count += 1
@@ -127,7 +151,7 @@ class McpClient:
 
         Returns: 工具结果文本（LLM 可读）
         """
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=_call_timeout()) as client:
             try:
                 resp = await client.post(
                     f"{server_url}/mcp/tools/call",

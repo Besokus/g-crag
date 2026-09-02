@@ -178,6 +178,9 @@ async def answer_stream(
                 conversation_id=body.conversationId, username=user.username, tenant=user.tenant_id,
                 regen=regen, agent_mode=body.agentMode,
                 user_dept=user.dept, user_role=user.role,
+                memory_read=body.memoryRead, memory_write=body.memoryWrite,
+                memory_scope=body.memoryScope,
+                trace_id=_trace_c.trace_id if _trace_c else "",
             ):
                 if isinstance(item, dict):
                     if item.get("type") == "token":
@@ -398,11 +401,18 @@ async def feedback(
     user: User = Depends(get_current_user),
 ):
     """问答反馈（👍/👎），沉淀坏 case；dislike 自动异步打 judge 分 + 缓存失效。"""
+    from app.core.trace_id import resolve_trace_id
+
+    tenant_id = getattr(user, "tenant_id", None) or "default"
+    trace_id = resolve_trace_id(body.traceId)
     await feedback_service.record_feedback(
         db, conversation_id=body.conversationId or "", query=body.query,
         answer=body.answer, feedback=body.feedback, username=user.username,
         reason=body.reason or "",
         retrieval_sources=body.retrievalSources or "",
+        trace_id=trace_id,
+        sources=body.sources,
+        tenant_id=tenant_id,
     )
     try:
         from app.config import settings
@@ -505,8 +515,28 @@ async def list_feedbacks(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_perm(FEEDBACK_READ)),
 ):
-    """反馈管理台：分页列出 👍/👎（可过滤 dislike 坏 case）。"""
-    data = await feedback_service.list_feedbacks(db, feedback, page, size)
+    """反馈管理台：分页列出 👍/👎（可过滤 dislike 坏 case，租户域内）。"""
+    data = await feedback_service.list_feedbacks(
+        db, feedback, page, size,
+        tenant_id=getattr(user, "tenant_id", None) or "default",
+    )
+    return success(data, "查询成功")
+
+
+@router.get("/feedbacks/{feedback_id}")
+async def get_feedback(
+    feedback_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_perm(FEEDBACK_READ)),
+):
+    """反馈详情（租户域内；跨租户主键不可见）。"""
+    data = await feedback_service.get_feedback(
+        db, feedback_id,
+        tenant_id=getattr(user, "tenant_id", None) or "default",
+    )
+    if data is None:
+        from app.core.response import BizError
+        raise BizError("反馈不存在", 404)
     return success(data, "查询成功")
 
 
@@ -526,8 +556,10 @@ async def feedback_stats(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_perm(FEEDBACK_READ)),
 ):
-    """故障趋势看板：反馈分布 + 坏 case 设备聚类 + 高频问题 + 平均幻觉率（反哺优化）。"""
-    data = await feedback_service.feedback_stats(db)
+    """故障趋势看板：反馈分布 + 坏 case 设备聚类 + 高频问题 + 平均幻觉率（租户域内）。"""
+    data = await feedback_service.feedback_stats(
+        db, tenant_id=getattr(user, "tenant_id", None) or "default",
+    )
     return success(data, "查询成功")
 
 
@@ -537,8 +569,11 @@ async def mark_golden(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_perm(FEEDBACK_MANAGE)),
 ):
-    """一键把坏 case 回流 golden_qa.json，让 CI 评测门禁覆盖它（反馈→评测闭环）。"""
-    data = await feedback_service.mark_golden(db, feedback_id)
+    """一键把坏 case 回流 golden_qa.json，让 CI 评测门禁覆盖它（反馈→评测闭环，租户域内）。"""
+    data = await feedback_service.mark_golden(
+        db, feedback_id,
+        tenant_id=getattr(user, "tenant_id", None) or "default",
+    )
     msg = "已加入 golden 集" if data.get("added") else (data.get("reason") or "未加入")
     return success(data, msg)
 
@@ -641,6 +676,11 @@ async def answer_ws(ws: WebSocket):
                 db, query, req.get("modelType"),
                 conversation_id=req.get("conversationId"),
                 username=user.username, tenant=user.tenant_id,
+                agent_mode=bool(req.get("agentMode")),
+                memory_read=bool(req.get("memoryRead")),
+                memory_write=bool(req.get("memoryWrite")),
+                memory_scope=str(req.get("memoryScope") or "user"),
+                trace_id=observer_trace or "",
             ):
                 if isinstance(item, dict) and item.get("type") == "token":
                     token_count += 1

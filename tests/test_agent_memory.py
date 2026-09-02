@@ -276,8 +276,9 @@ def test_agent_runtime_recall_text_injects_into_messages(monkeypatch):
     fake = CapturingProvider([{"content": "答案", "tool_calls": None}])
     monkeypatch.setattr(agent_runtime, "get_llm_provider", lambda mt: fake)
 
+    # 记忆治理契约：召回需显式 opt-in（memoryRead/memoryWrite），默认关=隐私默认
     asyncio.run(run_agent(None, persona, "1号主变", registry=_simple_registry(),
-                          ctx={"username": "user1"}))
+                          ctx={"username": "user1", "memoryRead": True}))
     msgs = fake.captured_messages
     assert msgs[1]["role"] == "system"
     assert msgs[1]["content"] == memory_text  # 记忆注入到第2条 system

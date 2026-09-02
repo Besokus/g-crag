@@ -1168,20 +1168,24 @@ async def answer(
 
 
 async def _stream_agent(db, query, model_type, conversation_id, username, tenant, t0,
-                        user_role: str | None = None):
+                        user_role: str | None = None,
+                        memory_read: bool = False, memory_write: bool = False,
+                        memory_scope: str = "user", trace_id: str = ""):
     """S2: Agent 流式（meta→tool_step×N→token→done）。run_agent on_step→asyncio.Queue 桥接。
-    单轮缓存（Redis L1 + MySQL qa_cache L2，复用三级缓存）：命中跳过 agent；done 后写。"""
+    单轮缓存（Redis L1 + MySQL qa_cache L2，复用三级缓存）：命中跳过 agent；done 后写。
+    记忆治理：memory_read/memory_write 任一开启=个性化运行，绕开共享缓存（防记忆答案污染缓存池）。"""
     import asyncio
     from app.services.agent_runtime import run_agent
     from app.services.persona_store import get_persona
 
     is_single = not conversation_id
+    personalized = bool(memory_read or memory_write)
     nq = term_service.normalize(query)
     key = _cache_key(model_type, nq, tenant)
     _p = model_type or settings.LLM_PROVIDER
 
     # 单轮查缓存（L1 Redis → L2 MySQL），命中→流式返缓存答案（不跑 agent，秒级）
-    if is_single:
+    if is_single and not personalized:
         cached = None
         try:
             cached = await redis_client.cache_get_json(key)
@@ -1235,7 +1239,9 @@ async def _stream_agent(db, query, model_type, conversation_id, username, tenant
             qa_persona = await get_persona("qa")
             res = await run_agent(
                 db, qa_persona, query, model_type,
-                ctx={"username": username, "tenant": tenant, "role": user_role or ""},
+                ctx={"username": username, "tenant": tenant, "role": user_role or "",
+                     "memoryRead": memory_read, "memoryWrite": memory_write,
+                     "memoryScope": memory_scope, "trace_id": trace_id},
                 on_step=lambda s: queue.put_nowait({"type": "tool_step", "step": s}),
             )
             await queue.put({"type": "_result", "result": res})
@@ -1253,8 +1259,8 @@ async def _stream_agent(db, query, model_type, conversation_id, username, tenant
             elif t == "_result":
                 res = item["result"]
                 ans = res.answer if isinstance(res.answer, str) else str(res.answer)
-                # 单轮 + 非降级 → 写缓存（agent 多轮验证质量高，默认 high；与普通问答共享 key）
-                if is_single and not res.degraded:
+                # 单轮 + 非降级 + 非个性化 → 写缓存（agent 多轮验证质量高，默认 high；与普通问答共享 key）
+                if is_single and not res.degraded and not personalized:
                     cache_result = {
                         "answer": ans, "retrievalSource": [], "confidence": "high",
                         "responseTime": round(time.time() - t0, 3), "hallucinationRate": 0.0,
@@ -1295,10 +1301,13 @@ async def stream_answer(
     topk: int = 5, conversation_id: str | None = None, username: str = "",
     tenant: str = "default", regen: bool = False, agent_mode: bool = False,
     user_dept: str | None = None, user_role: str | None = None,
+    memory_read: bool = False, memory_write: bool = False,
+    memory_scope: str = "user", trace_id: str = "",
 ):
     """流式问答：单轮查热点缓存(命中则快流不调LLM) → 否则 meta/token/done 三段。
 
     agent_mode=True（S2）：走通用 Agent 引擎(QA_PERSONA)，流式推 meta→tool_step×N→token→done。
+    memory_read/memory_write：Agent 模式长期记忆 opt-in（个性化运行绕开共享缓存）。
     """
     t0 = time.time()
     nq = term_service.normalize(query)
@@ -1306,7 +1315,9 @@ async def stream_answer(
     safety.guard_query(query)  # 入站 prompt injection 告警（D4）
     if agent_mode:
         async for ev in _stream_agent(db, query, model_type, conversation_id, username, tenant, t0,
-                                      user_role=user_role):
+                                      user_role=user_role,
+                                      memory_read=memory_read, memory_write=memory_write,
+                                      memory_scope=memory_scope, trace_id=trace_id):
             yield ev
         return
     is_single = not conversation_id  # 仅单轮查/写缓存（多轮上下文变化不缓存）

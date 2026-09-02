@@ -25,6 +25,7 @@ const routes = [
       { path: 'admin', component: () => import('../views/Admin.vue'), meta: { auth: true, roles: ['admin', 'auditor'], title: '系统管理', sub: '反馈 · 日志 · 配置' } },
       { path: 'retrieval-debug', component: () => import('../views/RetrievalDebug.vue'), meta: { auth: true, admin: true, title: '检索调试', sub: '全链路 trace · 命中归因' } },
       { path: 'trace', component: () => import('../views/TraceDiagnosis.vue'), meta: { auth: true, roles: ['admin', 'auditor'], title: '链路诊断', sub: '问答耗时 · 节点瓶颈 · 历史追溯' } },
+      { path: 'quality-events', component: () => import('../views/QualityEvents.vue'), meta: { auth: true, roles: ['admin', 'auditor'], title: '质量事件', sub: '跨源质量事件 · 状态流转 · 处置留痕' } },
     ],
   },
 ]

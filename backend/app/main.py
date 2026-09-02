@@ -454,6 +454,7 @@ from app.routers import (  # noqa: E402
     integrations,
     memory,
     qa,
+    quality_event,
     realtime_event,
     retrieval,
     retrieval_tune_router,
@@ -473,6 +474,7 @@ app.include_router(domain.router, prefix=settings.API_PREFIX)
 app.include_router(memory.router, prefix=settings.API_PREFIX)
 app.include_router(twin.router, prefix=settings.API_PREFIX)
 app.include_router(task_center.router, prefix=settings.API_PREFIX)
+app.include_router(quality_event.router, prefix=settings.API_PREFIX)
 app.include_router(realtime_event.router, prefix=settings.API_PREFIX)
 app.include_router(knowledge_governance.router, prefix=settings.API_PREFIX)
 app.include_router(knowledge_evolution.router, prefix=settings.API_PREFIX)

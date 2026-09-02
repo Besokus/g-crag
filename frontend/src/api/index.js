@@ -181,6 +181,13 @@ export const getFeedbacks = (params) => request.get('/qa/feedbacks', { params })
 export const markFeedbackGolden = (id) => request.post(`/qa/feedbacks/${id}/golden`)
 export const getFeedbackStats = () => request.get('/qa/feedback-stats')
 
+// 质量事件中心（admin/auditor）：跨源质量事件聚合 + 状态流转
+export const getQualityEvents = (params) => request.get('/system/quality-events', { params })
+export const getQualityEvent = (id) => request.get(`/system/quality-events/${id}`)
+export const getQualityEventStats = () => request.get('/system/quality-events/stats')
+export const updateQualityEventStatus = (id, status, note = '') =>
+  request.patch(`/system/quality-events/${id}/status`, { status, note })
+
 // 智能推荐：生成 3 个相关问题（答案渲染后异步拉取，不阻塞流式）
 export const getRelatedQuestions = (query, answer, modelType) =>
   request.post('/qa/related', { query, answer, modelType })
@@ -262,7 +269,9 @@ export const getMemoryStats = () => request.get('/memory/stats')
 // ===== N3 数字孪生 =====
 export const getStationLayout = (stationId = '110kV-demo') => request.get('/twin/station/layout', { params: { stationId } })
 export const getStationOverview = (stationId = '110kV-demo') => request.get('/twin/station/overview', { params: { stationId } })
-export const getDeviceDetail = (deviceId) => request.get(`/twin/device/${deviceId}/detail`)
+export const getTwinStations = () => request.get('/twin/stations')
+export const getDeviceDetail = (deviceId, stationId = '') => request.get(`/twin/device/${deviceId}/detail`, { params: stationId ? { stationId } : {} })
+export const getFaultChain = (deviceId, depth = 3, stationId = '') => request.get(`/twin/device/${deviceId}/fault-chain`, { params: { depth, ...(stationId ? { stationId } : {}) } })
 
 // ===== 实时数据接入 + 主动运维闭环 =====
 export const getRealtimeEvents = (params = {}) => request.get('/realtime/events', { params })

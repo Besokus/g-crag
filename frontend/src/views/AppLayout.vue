@@ -92,6 +92,9 @@ const navItems = computed(() => {
     items.push({ to: '/prediction', icon: '🔮', label: '故障预测' })
     items.push({ to: '/trace', icon: '⏱', label: '链路诊断' })
   }
+  if (hasPerm(auth.role, 'audit:read')) {
+    items.push({ to: '/quality-events', icon: '🚨', label: '质量事件' })
+  }
   if (hasPerm(auth.role, 'system:config')) {
     items.push({ to: '/retrieval-debug', icon: '🔬', label: '检索调试' })
   }

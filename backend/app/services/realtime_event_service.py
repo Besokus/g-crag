@@ -37,6 +37,134 @@ TASK_TYPE = "proactive_ops.process"
 NORMALIZED_EVENT_TYPE = "realtime.event.normalized"
 PROPOSAL_EVENT_TYPE = "proactive_ops.proposed"
 
+# 主动运维建议质量评分（三维 0-100：证据充分 40 + 风险对齐 25 + 可执行性 35）
+QUALITY_SCORE_VERSION = "proactive-quality/v1"
+_SEVERITY_LADDER = ("info", "notice", "warning", "major", "critical")
+_RISK_ALIASES = {
+    "warn": "warning", "error": "major", "fatal": "critical", "emergency": "critical",
+    "minor": "notice", "normal": "info",
+    "0": "info", "1": "notice", "2": "warning", "3": "major", "4": "critical", "5": "critical",
+    "提示": "info", "低": "notice", "中": "warning", "严重": "major", "高": "major",
+    "紧急": "critical", "危急": "critical",
+}
+
+
+def _explicit_risk_level(answer: Any) -> str:
+    """建议的显式风险等级：只认 riskLevel/risk_level 两个键（camel/snake），值须落在严重度梯度内。"""
+    if not isinstance(answer, dict):
+        return ""
+    for key in ("riskLevel", "risk_level"):
+        raw = answer.get(key)
+        if not isinstance(raw, str):
+            continue
+        value = raw.strip().lower()
+        if not value:
+            continue
+        if value in _SEVERITY_LADDER:
+            return value
+        mapped = _RISK_ALIASES.get(value)
+        if mapped in _SEVERITY_LADDER:
+            return mapped
+    return ""
+
+
+def score_proactive_recommendation(
+    *,
+    event_severity: str,
+    risk_level: str,
+    recommendation: dict | None,
+    evidence: dict | None,
+    ticket_draft: dict | None,
+) -> dict[str, Any]:
+    """建议质量评分（纯函数，不碰 IO）。
+
+    三维：evidenceSufficiency 40（工具证据充分且未降级）/ riskUrgencyAlignment 25
+    （Agent 显式声明的风险等级与事件严重度对齐）/ actionability 35（两票草案可直接执行）。
+    """
+    recommendation = recommendation if isinstance(recommendation, dict) else {}
+    evidence = evidence if isinstance(evidence, dict) else {}
+    ticket_draft = ticket_draft if isinstance(ticket_draft, dict) else {}
+
+    # 维度一：证据充分性（40）
+    steps = evidence.get("steps")
+    tools = evidence.get("toolsUsed")
+    if (
+        isinstance(steps, list) and steps
+        and isinstance(tools, list) and tools
+        and not evidence.get("degraded")
+    ):
+        evidence_score, evidence_reason = 40, f"证据充分：{len(steps)} 步推理 / {len(tools)} 只工具，无降级"
+    elif (isinstance(steps, list) and steps) or (isinstance(tools, list) and tools):
+        evidence_score, evidence_reason = 20, "证据部分缺失（步骤或工具记录不完整/发生降级）"
+    else:
+        evidence_score, evidence_reason = 10, "缺少工具调用证据"
+
+    # 维度二：风险等级对齐（25）——只认 Agent 显式声明
+    event_norm = normalize_severity(event_severity)
+    declared = str(risk_level or "").strip().lower()
+    present = bool(declared)
+    declared_norm = declared if declared in _SEVERITY_LADDER else _RISK_ALIASES.get(declared, "")
+    valid = present and declared_norm in _SEVERITY_LADDER
+    if valid:
+        distance = abs(
+            _SEVERITY_LADDER.index(event_norm) - _SEVERITY_LADDER.index(declared_norm)
+        )
+        if distance == 0:
+            risk_score, risk_reason = 25, f"建议风险等级与事件严重度一致（{declared_norm}）"
+        else:
+            risk_score, risk_reason = 10, (
+                f"建议风险等级与事件严重度偏差较大（建议 {declared_norm} vs 事件 {event_norm}，梯度差 {distance}）"
+            )
+    else:
+        distance = None
+        risk_score, risk_reason = 10, "缺少事件或建议风险等级，无法对齐处置紧迫度"
+
+    # 维度三：可执行性（35）——两票草案要素齐备度
+    def _list(value: Any) -> list:
+        return value if isinstance(value, list) else []
+    draft_steps, draft_safety, draft_risks = (
+        _list(ticket_draft.get("steps")), _list(ticket_draft.get("safety")),
+        _list(ticket_draft.get("risks")),
+    )
+    action_score = 0
+    action_parts: list[str] = []
+    if draft_steps:
+        action_score += 15
+        action_parts.append(f"步骤 {len(draft_steps)} 项")
+    if draft_safety:
+        action_score += 10
+        action_parts.append(f"安全措施 {len(draft_safety)} 项")
+    if draft_risks:
+        action_score += 5
+        action_parts.append(f"风险提示 {len(draft_risks)} 项")
+    if ticket_draft.get("task") and ticket_draft.get("device") and ticket_draft.get("location"):
+        action_score += 5
+        action_parts.append("任务要素齐备")
+    if action_score == 35:
+        action_reason = "两票草案可直接执行：" + "、".join(action_parts)
+    elif action_score > 0:
+        action_reason = "草案可执行性不足（" + "、".join(action_parts or ["要素缺失"]) + "）"
+    else:
+        action_reason = "缺少可执行的两票草案"
+
+    return {
+        "version": QUALITY_SCORE_VERSION,
+        "totalScore": evidence_score + risk_score + action_score,
+        "dimensions": {
+            "evidenceSufficiency": {"score": evidence_score, "max": 40, "reason": evidence_reason},
+            "riskUrgencyAlignment": {"score": risk_score, "max": 25, "reason": risk_reason},
+            "actionability": {"score": action_score, "max": 35, "reason": action_reason},
+        },
+        "riskDeclaration": {
+            "present": present,
+            "valid": valid,
+            "value": declared,
+            "normalized": declared_norm if valid else "",
+            "eventSeverity": event_norm,
+            "distance": distance,
+        },
+    }
+
 
 async def _on_proposal_ws(payload: dict, _ctx) -> None:
     """Bus A 域事件订阅：主动运维建议生成完成 → WS 实时推前端。
@@ -767,6 +895,8 @@ async def process_proactive_run(
             recommendation = {
                 "summary": str(answer.get("summary") or "")[:4000],
                 "handling": answer.get("handling") or "",
+                "urgency": str(answer.get("urgency") or "")[:32],
+                "riskLevel": _explicit_risk_level(answer),
                 "risks": _string_list(answer.get("risks")),
                 "readOnly": True,
                 "requiresHumanReview": True,
@@ -780,6 +910,13 @@ async def process_proactive_run(
             "degradeReason": result.degrade_reason,
             "latencyMs": result.latency_ms,
         }
+        quality_detail = score_proactive_recommendation(
+            event_severity=event.severity,
+            risk_level=_explicit_risk_level(answer),
+            recommendation=recommendation,
+            evidence=evidence,
+            ticket_draft=ticket_draft,
+        )
         run.diagnosis_json = _json(answer.get("diagnosis") or answer)
         run.recommendation_json = _json(recommendation)
         run.evidence_json = _json(evidence)
@@ -788,6 +925,9 @@ async def process_proactive_run(
         run.status = "proposed"
         run.finished_at = _now()
         run.control_executed = False
+        run.quality_score = int(quality_detail["totalScore"])
+        run.quality_score_version = QUALITY_SCORE_VERSION
+        run.quality_detail_json = _json(quality_detail)
         event.processing_status = "completed"
 
         if run.alert_disposal_id:
@@ -960,6 +1100,15 @@ async def run_to_ticket(
     run.ticket_id = str(ticket.get("id") or ticket.get("ticketId") or "")[:64]
     run.status = "ticketed"
     run.control_executed = False
+    _timeline_now = _now()
+    run.ticket_status = "draft"
+    run.ticket_status_updated_at = _timeline_now
+    run.ticket_timeline_json = _json([{
+        "status": "draft",
+        "action": "create",
+        "actor": creator,
+        "at": _timeline_now.isoformat(timespec="seconds"),
+    }])
     if run.alert_disposal_id:
         alert = (await db.execute(
             select(AlertDisposal).where(
@@ -975,9 +1124,52 @@ async def run_to_ticket(
     return {"run": run_to_dict(run), "ticket": ticket}
 
 
+async def sync_proactive_ticket_status(
+    db: AsyncSession,
+    *,
+    ticket_id: str,
+    tenant_id: str,
+    source_ref: str,
+    status: str,
+    action: str,
+    actor: str = "",
+) -> bool:
+    """两票流转回写 proactive run（租户域 + 同状态幂等去重）。返回是否发生了回写。
+
+    由 ticket_lifecycle_service._sync_proactive_status 在每次流转后调用；
+    找不到对应 run（未转票/跨租户）或状态未变化（create 事件重复投递）返回 False。
+    """
+    run = (await db.execute(
+        select(ProactiveOpsRun).where(
+            ProactiveOpsRun.tenant_id == tenant_id,
+            ProactiveOpsRun.ticket_id == ticket_id,
+        )
+    )).scalar_one_or_none()
+    if run is None:
+        return False
+    if source_ref and source_ref != f"proactive:{run.id}":
+        return False
+    if not status or status == run.ticket_status:
+        return False
+    timeline = _loads(run.ticket_timeline_json, [])
+    if not isinstance(timeline, list):
+        timeline = []
+    now = _now()
+    timeline.append({
+        "status": status,
+        "action": action or status,
+        "actor": actor or "",
+        "at": now.isoformat(timespec="seconds"),
+    })
+    run.ticket_status = status
+    run.ticket_status_updated_at = now
+    run.ticket_timeline_json = _json(timeline)
+    await db.commit()
+    return True
+
+
 async def retry_run(
-    db: AsyncSession, run_id: str, *, tenant_id: str, model_type: str | None = None,
-) -> dict[str, Any]:
+    db: AsyncSession, run_id: str, *, tenant_id: str, model_type: str | None = None,) -> dict[str, Any]:
     run = await _reviewable_run(db, run_id, tenant_id)
     if run.status != "failed":
         raise ValueError("仅 failed 运行可重试")
@@ -1247,6 +1439,11 @@ def run_to_dict(row: ProactiveOpsRun | None) -> dict[str, Any]:
         "reviewNote": row.review_note,
         "reviewedAt": _fmt(row.reviewed_at),
         "ticketId": row.ticket_id,
+        "qualityScore": row.quality_score,
+        "qualityScoreVersion": row.quality_score_version,
+        "qualityDetail": _loads(row.quality_detail_json, {}),
+        "ticketStatus": row.ticket_status or "",
+        "ticketTimeline": _loads(row.ticket_timeline_json, []),
         "createdAt": _fmt(row.created_at),
         "startedAt": _fmt(row.started_at),
         "finishedAt": _fmt(row.finished_at),

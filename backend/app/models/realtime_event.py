@@ -124,6 +124,13 @@ class ProactiveOpsRun(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     ticket_id: Mapped[str] = mapped_column(String(64), default="")
 
+    quality_score: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 建议质量总分 0-100
+    quality_score_version: Mapped[str] = mapped_column(String(32), default="")
+    quality_detail_json: Mapped[str] = mapped_column(Text, default="")  # 三维评分明细 + 风险声明
+    ticket_status: Mapped[str] = mapped_column(String(24), default="", index=True)  # 关联两票当前状态
+    ticket_status_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ticket_timeline_json: Mapped[str] = mapped_column(Text, default="")  # 两票流转时间线（租户域回写）
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

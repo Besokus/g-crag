@@ -21,12 +21,33 @@ def _now():
     return datetime.now()
 
 
-def _ticket_query(ticket_id: str, tenant: str = "default"):
-    return select(Ticket).where(
+def _ticket_query(ticket_id: str, tenant: str = "default", *, for_update: bool = False):
+    """状态流转类操作传 for_update=True：先锁行再校验状态，防并发双流转。"""
+    stmt = select(Ticket).where(
         Ticket.id == ticket_id,
         Ticket.tenant_id == tenant,
         Ticket.is_deleted == 0,
     )
+    return stmt.with_for_update() if for_update else stmt
+
+
+async def _sync_proactive_status(
+    db: AsyncSession, t: Ticket, action: str, *, status: str | None = None, actor: str = "",
+) -> None:
+    """流转回写 proactive run 时间线（租户域）；失败 degraded 不阻塞两票流转。"""
+    try:
+        from app.services import realtime_event_service
+        await realtime_event_service.sync_proactive_ticket_status(
+            db,
+            ticket_id=str(t.id),
+            tenant_id=t.tenant_id or "default",
+            source_ref=getattr(t, "source_ref", None) or "",
+            status=status or (t.status.value if t.status else ""),
+            action=action,
+            actor=actor,
+        )
+    except Exception as e:
+        degraded("ticket_sync_proactive_status", e)
 
 
 async def create_ticket(
@@ -109,7 +130,7 @@ async def update_ticket_content(
     db: AsyncSession, ticket_id: str, tenant: str = "default", **kwargs,
 ) -> dict | None:
     """修改票据内容（仅 draft 状态可改）。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         return None
     if t.status != TicketStatus.DRAFT:
@@ -121,6 +142,7 @@ async def update_ticket_content(
             else:
                 setattr(t, k, v)
     await db.commit()
+    await _sync_proactive_status(db, t, "update", actor=t.creator or "")
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -129,7 +151,7 @@ async def submit_for_review(
     db: AsyncSession, ticket_id: str, *, tenant: str = "default",
 ) -> dict:
     """提交审核：draft → pending_review，并自动跑审核。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         raise ValueError("票据不存在")
     if t.status != TicketStatus.DRAFT:
@@ -151,6 +173,7 @@ async def submit_for_review(
     except Exception as e:
         degraded("ticket_submit_audit", e)
     await db.commit()
+    await _sync_proactive_status(db, t, "submit", actor=t.creator or "")
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -160,7 +183,7 @@ async def review_ticket(
     reviewer: str = "", tenant: str = "default",
 ) -> dict:
     """审核通过/驳回。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         raise ValueError("票据不存在")
     if t.status not in (TicketStatus.PENDING_REVIEW, TicketStatus.REVIEWED):
@@ -173,6 +196,7 @@ async def review_ticket(
     t.reviewer = reviewer or t.reviewer
     t.reviewed_at = _now()
     await db.commit()
+    await _sync_proactive_status(db, t, "review", actor=reviewer)
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -181,7 +205,7 @@ async def issue_ticket(
     db: AsyncSession, ticket_id: str, issuer: str = "", *, tenant: str = "default",
 ) -> dict:
     """签发票据：reviewed → issued。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         raise ValueError("票据不存在")
     if t.status != TicketStatus.REVIEWED:
@@ -190,6 +214,7 @@ async def issue_ticket(
     t.issuer = issuer or t.issuer
     t.issued_at = _now()
     await db.commit()
+    await _sync_proactive_status(db, t, "issue", actor=issuer)
     await _emit_ticket_event("ticket.issued", t, tenant)
     await db.refresh(t)
     return _ticket_to_dict(t)
@@ -200,7 +225,7 @@ async def start_execution(
     *, tenant: str = "default",
 ) -> dict:
     """开始执行：issued → in_execution。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         raise ValueError("票据不存在")
     if t.status != TicketStatus.ISSUED:
@@ -210,6 +235,7 @@ async def start_execution(
     t.supervisor = supervisor or t.supervisor
     t.executed_at = _now()
     await db.commit()
+    await _sync_proactive_status(db, t, "start", actor=executor)
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -219,7 +245,7 @@ async def complete_execution(
     *, tenant: str = "default",
 ) -> dict:
     """完成执行：in_execution → completed。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         raise ValueError("票据不存在")
     if t.status != TicketStatus.IN_EXECUTION:
@@ -231,6 +257,7 @@ async def complete_execution(
     if deviation:
         t.deviation = deviation[:1000]
     await db.commit()
+    await _sync_proactive_status(db, t, "complete", actor=t.executor or "")
     await _emit_ticket_event("ticket.completed", t, tenant)
     await db.refresh(t)
     return _ticket_to_dict(t)
@@ -240,7 +267,7 @@ async def archive_ticket(
     db: AsyncSession, ticket_id: str, *, tenant: str = "default",
 ) -> dict:
     """归档票据：completed → archived。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         raise ValueError("票据不存在")
     if t.status != TicketStatus.COMPLETED:
@@ -248,6 +275,7 @@ async def archive_ticket(
     t.status = TicketStatus.ARCHIVED
     t.archived_at = _now()
     await db.commit()
+    await _sync_proactive_status(db, t, "archive")
     await db.refresh(t)
     return _ticket_to_dict(t)
 
@@ -256,11 +284,12 @@ async def delete_ticket(
     db: AsyncSession, ticket_id: str, *, tenant: str = "default",
 ) -> bool:
     """软删票据。"""
-    t = (await db.execute(_ticket_query(ticket_id, tenant))).scalar_one_or_none()
+    t = (await db.execute(_ticket_query(ticket_id, tenant, for_update=True))).scalar_one_or_none()
     if not t:
         return False
     t.is_deleted = 1
     await db.commit()
+    await _sync_proactive_status(db, t, "delete", status="deleted")
     return True
 
 

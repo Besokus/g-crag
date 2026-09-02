@@ -9,14 +9,165 @@
 import datetime
 import json
 import os
+import re
 from typing import Any
 
 from app.config import settings
 from app.core.obs import degraded
 from app.core.otel_genai import get_trace_id, trace_span
 
-# 布局缓存（启动时加载一次）
+# 布局缓存：station_id → layout；meta：station_id → {path, mtime, loadedAt}（发现/失效依据）
 _layout_cache: dict[str, dict] = {}
+_layout_cache_meta: dict[str, dict] = {}
+
+# 站点 ID 只允许字母数字-_（拒绝路径穿越/特殊字符）
+_STATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_LAYOUT_FILE_PATTERN = re.compile(r"^station_layout[\w.-]*\.json$", re.IGNORECASE)
+
+
+class TwinStationError(Exception):
+    """站点选择错误基类。"""
+
+
+class UnknownStationError(TwinStationError):
+    """站点未在布局目录中发现。"""
+
+
+class InvalidStationIdError(TwinStationError):
+    """站点 ID 非法（路径样/特殊字符）。"""
+
+
+def _layout_dir() -> str:
+    """配置布局文件所在目录（相对路径基于 backend/；配置本身是目录时即该目录）。"""
+    configured = _configured_layout_path()
+    if os.path.isdir(configured):
+        return configured
+    return os.path.dirname(configured) or "."
+
+
+def _configured_layout_path() -> str:
+    layout_path = settings.TWIN_LAYOUT_PATH
+    if not os.path.isabs(layout_path):
+        backend_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        layout_path = os.path.join(backend_root, layout_path)
+    return layout_path
+
+
+def _discover_station_files() -> dict[str, str]:
+    """发现布局文件：配置文件 + 同目录 station_layout*.json 兄弟文件。
+
+    返回 {station_id: 绝对路径}；station_id 取文件内容里的 stationId（非文件名）。
+    """
+    files: list[str] = []
+    configured = _configured_layout_path()
+    configured_is_file = os.path.isfile(configured)
+    if configured_is_file:
+        files.append(configured)
+    try:
+        configured_name = os.path.basename(configured) if configured_is_file else ""
+        for name in sorted(os.listdir(_layout_dir())):
+            if configured_name and name == configured_name:
+                continue
+            if _LAYOUT_FILE_PATTERN.match(name):
+                files.append(os.path.join(_layout_dir(), name))
+    except Exception as e:
+        degraded("twin_discover_stations", e)
+
+    index: dict[str, str] = {}
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            station_id = str(data.get("stationId") or "").strip()
+            if station_id:
+                index[station_id] = path
+                _layout_cache_meta.setdefault(station_id, {}).update(
+                    {"path": path, "mtime": _mtime(path)}
+                )
+        except Exception as e:
+            degraded("twin_read_station_file", e, path)
+    return index
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def default_station_id() -> str:
+    """配置文件对应的默认站点 ID（读不到时退回历史值 110kV-demo）。"""
+    try:
+        with open(_configured_layout_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("stationId") or "").strip() or "110kV-demo"
+    except Exception:
+        return "110kV-demo"
+
+
+async def list_stations() -> dict:
+    """多站点目录：配置站点（默认）+ 同目录兄弟布局文件，全部按内容 stationId 标识。"""
+    index = _discover_station_files()
+    default_id = default_station_id()
+    stations: list[dict] = []
+    seen: set[str] = set()
+    ordered = [default_id] + sorted(sid for sid in index if sid != default_id)
+    for station_id in ordered:
+        if station_id in seen or station_id not in index:
+            continue
+        seen.add(station_id)
+        meta = {"stationId": station_id, "path": index[station_id]}
+        try:
+            with open(index[station_id], "r", encoding="utf-8") as f:
+                data = json.load(f)
+            meta.update({
+                "stationName": data.get("stationName", ""),
+                "voltageLevel": data.get("voltageLevel", ""),
+                "type": data.get("type", ""),
+                "deviceCount": len(data.get("devices", []) or []),
+            })
+        except Exception:
+            pass
+        stations.append(meta)
+    return {"stations": stations, "defaultStationId": default_id, "total": len(stations)}
+
+
+def _load_layout(station_id: str) -> dict:
+    """按站点 ID 加载布局（带缓存 + mtime 失效）。
+
+    - ID 非法（路径样字符）→ InvalidStationIdError；未发现 → UnknownStationError；
+    - 文件读坏 → degraded + 最小空布局（历史行为）。
+    """
+    if not isinstance(station_id, str) or not _STATION_ID_PATTERN.fullmatch(station_id or ""):
+        raise InvalidStationIdError(f"非法站点 ID：{station_id!r}")
+    meta = _layout_cache_meta.get(station_id)
+    if station_id in _layout_cache and meta:
+        if meta.get("path") and _mtime(meta["path"]) == meta.get("mtime"):
+            return _layout_cache[station_id]
+    index = _discover_station_files()
+    path = index.get(station_id)
+    if not path:
+        raise UnknownStationError(f"站点不存在：{station_id}")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        _layout_cache[station_id] = data
+        _layout_cache_meta[station_id] = {
+            "path": path, "mtime": _mtime(path),
+            "loadedAt": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        return data
+    except Exception as e:
+        degraded("twin_load_layout", e)
+        return {"stationId": station_id, "stationName": station_id, "areas": [], "devices": []}
+
+
+def _resolve_station(station_id: str | None) -> str:
+    """空/None → 默认站点；否则透传（校验交给 _load_layout）。"""
+    if station_id:
+        return station_id
+    return default_station_id()
 
 # 设备类型枚举（决定 Three.js 几何体+图标+默认颜色+模型描述符）
 # model 字段：前端按 model 选择专属几何体工厂函数（不再是统一 BoxGeometry）
@@ -104,25 +255,6 @@ DEVICE_TYPES: dict[str, dict] = {
 }
 
 
-def _load_layout(station_id: str) -> dict:
-    """从 JSON 文件加载站布局模板（带缓存）。"""
-    if station_id in _layout_cache:
-        return _layout_cache[station_id]
-    layout_path = settings.TWIN_LAYOUT_PATH
-    if not os.path.isabs(layout_path):
-        # 相对于 backend/ 目录
-        backend_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        layout_path = os.path.join(backend_root, layout_path)
-    try:
-        with open(layout_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        _layout_cache[station_id] = data
-        return data
-    except Exception as e:
-        degraded("twin_load_layout", e)
-        return {"stationId": station_id, "stationName": station_id, "areas": [], "devices": []}
-
-
 def _color_by_risk(risk_score: float) -> str:
     """riskScore → HSL 色带（绿→黄→红）。
 
@@ -149,16 +281,17 @@ def _color_by_risk(risk_score: float) -> str:
     return f"hsl({h}, 90%, 50%)"
 
 
-async def get_station_layout(station_id: str = "110kV-demo") -> dict:
-    """获取站点布局模板（areas + devices + connections）。"""
-    return _load_layout(station_id)
+async def get_station_layout(station_id: str = "") -> dict:
+    """获取站点布局模板（areas + devices + connections）；空=默认站点。"""
+    return _load_layout(_resolve_station(station_id))
 
 
-async def get_station_overview(station_id: str = "110kV-demo") -> dict:
+async def get_station_overview(station_id: str = "") -> dict:
     """获取站点总览：设备列表 + 各设备状态（riskScore/颜色/告警/工单）。
 
     聚合 fault_prediction_service + alert_disposal_service + ticket 数据。
     """
+    station_id = _resolve_station(station_id)
     layout = _load_layout(station_id)
     devices = layout.get("devices", [])
 
@@ -232,20 +365,22 @@ async def get_station_overview(station_id: str = "110kV-demo") -> dict:
     }
 
 
-async def get_device_detail(device_id: str) -> dict:
-    """获取设备详情：风险/告警/知识图谱上下文/故障传播链/工单。
+async def get_device_detail(device_id: str, station_id: str | None = None) -> dict:
+    """获取设备详情：风险/告警/知识图谱上下文/故障传播链/工单（按站点切片）。
 
     聚合 kg_service.graph_context + kg_service.get_paths + fault_prediction。
     """
-    layout = _load_layout("110kV-demo")
+    station_id = _resolve_station(station_id)
+    layout = _load_layout(station_id)
     devices = layout.get("devices", [])
     dev = next((d for d in devices if d["deviceId"] == device_id), None)
     if not dev:
-        return {"error": "设备不存在", "deviceId": device_id}
+        return {"error": "设备不存在", "deviceId": device_id, "stationId": station_id}
 
     kg_entity = dev.get("kgEntity", dev.get("name", ""))
     detail: dict[str, Any] = {
         "deviceId": device_id,
+        "stationId": station_id,
         "name": dev.get("name", ""),
         "type": dev.get("type", ""),
         "area": dev.get("area", ""),
@@ -319,9 +454,10 @@ async def get_device_detail(device_id: str) -> dict:
     return detail
 
 
-async def get_fault_chain(device_id: str, depth: int = 3) -> list[dict]:
-    """获取设备故障传播链（kg_service.get_paths 封装）。"""
-    layout = _load_layout("110kV-demo")
+async def get_fault_chain(device_id: str, depth: int = 3,
+                           station_id: str | None = None) -> list[dict]:
+    """获取设备故障传播链（kg_service.get_paths 封装，按站点切片）。"""
+    layout = _load_layout(_resolve_station(station_id))
     devices = layout.get("devices", [])
     dev = next((d for d in devices if d["deviceId"] == device_id), None)
     if not dev:
@@ -335,13 +471,14 @@ async def get_fault_chain(device_id: str, depth: int = 3) -> list[dict]:
         return []
 
 
-async def push_alert_location(alert: dict) -> dict:
-    """告警定位推送：查设备坐标 → WebSocket 广播给孪生前端。
+async def push_alert_location(alert: dict, station_id: str | None = None) -> dict:
+    """告警定位推送：查设备坐标 → WebSocket 按站点订阅广播。
 
-    alert: {severity, title, device/deviceId, ...}
+    alert: {severity, title, device/deviceId, ...}；station_id 空=默认站点。
     返回推送结果。
     """
-    layout = _load_layout("110kV-demo")
+    station_id = _resolve_station(station_id)
+    layout = _load_layout(station_id)
     devices = layout.get("devices", [])
 
     # 匹配设备
@@ -361,11 +498,12 @@ async def push_alert_location(alert: dict) -> dict:
                 break
 
     if not dev:
-        return {"matched": False, "message": "未匹配到设备"}
+        return {"matched": False, "message": "未匹配到设备", "stationId": station_id}
 
     position = dev.get("position", [0, 0, 0])
     message = {
         "type": "alert",
+        "stationId": station_id,
         "deviceId": dev["deviceId"],
         "deviceName": dev.get("name", ""),
         "position": position,
@@ -383,4 +521,5 @@ async def push_alert_location(alert: dict) -> dict:
     except Exception as e:
         degraded("twin_push_alert", e)
 
-    return {"matched": True, "deviceId": dev["deviceId"], "position": position, "pushed": True}
+    return {"matched": True, "stationId": station_id, "deviceId": dev["deviceId"],
+            "position": position, "pushed": True}

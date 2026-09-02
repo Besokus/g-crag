@@ -36,28 +36,39 @@ def client_count() -> int:
     return len(_clients)
 
 
-# ===== N3 数字孪生 WebSocket 通道 =====
+# ===== N3 数字孪生 WebSocket 通道（多站点切片：订阅按站点隔离） =====
 
-async def connect_twin(ws: WebSocket) -> None:
-    """接受数字孪生 WebSocket 连接，加入 twin 订阅集合。"""
+_twin_clients: dict[WebSocket, str] = {}  # ws → 订阅的 station_id（空=全站）
+
+
+async def connect_twin(ws: WebSocket, station_id: str = "") -> None:
+    """接受数字孪生 WebSocket 连接，按站点加入 twin 订阅集合。"""
     await ws.accept()
-    _twin_clients.add(ws)
+    _twin_clients[ws] = station_id or ""
 
 
 def disconnect_twin(ws: WebSocket) -> None:
-    _twin_clients.discard(ws)
+    """断开孪生订阅（幂等）。"""
+    _twin_clients.pop(ws, None)
 
 
 async def broadcast_twin(message: dict) -> None:
-    """向所有数字孪生订阅客户端推送告警定位/状态变更（断连的剔除）。"""
+    """向孪生订阅客户端推送告警定位/状态变更（断连的剔除）。
+
+    站点隔离：message 带 stationId 时只推给订阅该站的客户端；
+    不带（如 layout-refresh 全局通知）推给全部。
+    """
+    target_station = str(message.get("stationId") or "")
     dead = []
-    for ws in list(_twin_clients):
+    for ws, subscribed in list(_twin_clients.items()):
+        if target_station and subscribed and subscribed != target_station:
+            continue
         try:
             await ws.send_json(message)
         except Exception:
             dead.append(ws)
     for ws in dead:
-        _twin_clients.discard(ws)
+        _twin_clients.pop(ws, None)
 
 
 def twin_client_count() -> int:

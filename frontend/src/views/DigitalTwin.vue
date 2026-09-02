@@ -2,6 +2,10 @@
   <div>
     <div class="card" style="margin-bottom:12px">
       <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <select v-model="currentStationId" class="input" style="width:auto" @change="switchStation" title="切换站点">
+          <option v-if="!stations.length" value="">默认站点</option>
+          <option v-for="s in stations" :key="s.stationId" :value="s.stationId">{{ s.stationName || s.stationId }}</option>
+        </select>
         <span class="badge badge-neutral">{{ overview.deviceCount || 0 }} 设备</span>
         <span class="badge badge-danger" v-if="overview.highRiskCount">{{ overview.highRiskCount }} 高风险</span>
         <span class="muted" style="font-size:12px">{{ overview.stationName || '加载中...' }}</span>
@@ -80,7 +84,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
-import { getStationOverview, getDeviceDetail } from '../api'
+import { getStationOverview, getDeviceDetail, getTwinStations } from '../api'
 import { useAuthStore } from '../stores/auth'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -100,6 +104,8 @@ import {
 const auth = useAuthStore()
 const overview = ref({ devices: [], stationName: '' })
 const selectedDevice = ref(null)
+const stations = ref([])
+const currentStationId = ref('')
 const autoRotate = ref(true)
 const showLabels = ref(true)
 const showWires = ref(true)
@@ -148,13 +154,26 @@ function resize() {
     camera.updateProjectionMatrix()
   }
 }
+async function loadStations() {
+  try {
+    const r = await getTwinStations()
+    const data = r.data || {}
+    stations.value = data.stations || []
+    if (data.defaultStationId && !currentStationId.value) currentStationId.value = data.defaultStationId
+  } catch (e) { console.error('load stations error:', e) }
+}
 async function loadOverview() {
   try {
-    const r = await getStationOverview('110kV-demo')
+    const r = await getStationOverview(currentStationId.value || '')
     overview.value = r.data || { devices: [] }
     await nextTick()
     render3D()
   } catch (e) { console.error('load overview error:', e) }
+}
+function switchStation() {
+  selectedDevice.value = null
+  loadOverview()
+  connectTwinWs()  // 重连以切换站点订阅
 }
 function applyCamera() {
   const { azimuth, elevation, distance, target } = cameraState
@@ -427,7 +446,7 @@ function render3D() {
 
 async function selectDevice(deviceId) {
   try {
-    const r = await getDeviceDetail(deviceId)
+    const r = await getDeviceDetail(deviceId, currentStationId.value || '')
     selectedDevice.value = r.data
     highlightFaultChain(deviceId)
     flyToDevice(deviceId)
@@ -502,8 +521,10 @@ watch(showWires, (v) => {
 
 function connectTwinWs() {
   try {
+    if (twinWs) { try { twinWs.close() } catch (x) {} twinWs = null }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    twinWs = new WebSocket(`${proto}://${location.host}/api/twin/ws/twin?token=${encodeURIComponent(auth.token || '')}`)
+    const stationQ = currentStationId.value ? `&stationId=${encodeURIComponent(currentStationId.value)}` : ''
+    twinWs = new WebSocket(`${proto}://${location.host}/api/twin/ws/twin?token=${encodeURIComponent(auth.token || '')}${stationQ}`)
     twinWs.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data)
@@ -532,7 +553,8 @@ function flyToAlert(position) {
   fly()
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await loadStations()
   loadOverview()
   connectTwinWs()
   document.addEventListener('fullscreenchange', onFsChange)

@@ -133,12 +133,14 @@ def test_load_layout_caches_result():
 def test_load_layout_fallback_on_missing_file(monkeypatch):
     """文件不存在时返回空布局兜底。"""
     twin_service._layout_cache.clear()
+    twin_service._layout_cache_meta.clear()
     from app.config import settings
     monkeypatch.setattr(settings, "TWIN_LAYOUT_PATH", "nonexistent/path.json")
-    layout = _load_layout("110kV-demo")
-    assert layout["areas"] == []
-    assert layout["devices"] == []
+    # 多站点契约：未发现的站点显式抛 UnknownStationError（路由层转 404），不再静默兜底
+    with pytest.raises(twin_service.UnknownStationError):
+        _load_layout("110kV-demo")
     twin_service._layout_cache.clear()
+    twin_service._layout_cache_meta.clear()
 
 
 # ===== get_station_layout =====

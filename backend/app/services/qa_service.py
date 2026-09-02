@@ -1003,10 +1003,13 @@ async def answer(
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
         _tc.attach("citation", refs=len(contexts), annotated=len(_trace or []))
     # 校验要求 rewrite 且开关开 → 复用 rewrite_query + mixed_search 重检索重生成再 verify（最多 1 次，防死循环）
-    # C2: CRAG 已 rewritten 时不再二次 rewrite（citation 仍 needed→用现 contexts，省二次 LLM，防级联重检索）
+    # C2: CRAG 已做过改写轮（rewritten* 任一终态）或已 refused 时不再二次 rewrite
+    # （citation 仍 needed→用现 contexts，省二次 LLM，防级联重检索；
+    #   rewritten_failed 二次全链路只是重复注定失败的改写，refused 二次改写违背拒答语义）
     if (citation_extras.get("citationVerified", {}).get("rewrite_needed")
             and getattr(settings, "CITATION_REWRITE_ON_FAIL", True)
-            and crag_action != "rewritten"):
+            and crag_action not in ("rewritten", "rewritten_recovered",
+                                    "rewritten_partial", "rewritten_failed", "refused")):
         try:
             from app.services.query_rewrite import rewrite_query
             new_q = await rewrite_query(nq, model_type, force=True)

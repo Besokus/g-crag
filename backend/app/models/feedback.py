@@ -21,4 +21,7 @@ class Feedback(Base):
     judge_halluc: Mapped[float | None] = mapped_column(Float, default=None)       # LLM-judge 幻觉率
     retrieval_quality: Mapped[str | None] = mapped_column(String(16), default=None)  # good | partial | poor（检索质量评估）
     retrieval_sources: Mapped[str | None] = mapped_column(Text, default=None)  # 检索命中文档列表（用于追溯：docName 用逗号分隔）
+    trace_id: Mapped[str] = mapped_column(String(64), default="", index=True)  # 反馈关联的问答链路 trace
+    sources_json: Mapped[str | None] = mapped_column(Text, default=None)       # 结构化检索来源 JSON（normalize_sources 产物）
+    tenant_id: Mapped[str] = mapped_column(String(64), default="default", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

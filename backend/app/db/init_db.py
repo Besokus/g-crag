@@ -73,6 +73,26 @@ _COLUMN_MIGRATIONS = [
     ("chunks", "table_header", "TEXT NOT NULL"),                          # 表格类 chunk 绑定的表头（MySQL TEXT 不可 DEFAULT''，ORM default="" 在 INSERT 填值）
     ("chunks", "semantic_tags", "TEXT NOT NULL"),                         # 语义增强规则标签 JSON(BRD §4.1.3 apply_rules)
     ("chunks", "metadata_complete", "TINYINT(1) NOT NULL DEFAULT 0"),     # 元数据是否齐全（前端降级依据）
+    # 反馈租户隔离 + 结构化检索来源（trace 关联 + 质量事件中心）
+    ("feedbacks", "trace_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    ("feedbacks", "sources_json", "TEXT NULL"),
+    ("feedbacks", "tenant_id", "VARCHAR(64) NOT NULL DEFAULT 'default'"),
+    # 主动运维建议质量评分 + 两票流转回写
+    ("proactive_ops_run", "quality_score", "INT NULL"),
+    ("proactive_ops_run", "quality_score_version", "VARCHAR(32) NOT NULL DEFAULT ''"),
+    ("proactive_ops_run", "quality_detail_json", "TEXT NULL"),
+    ("proactive_ops_run", "ticket_status", "VARCHAR(24) NOT NULL DEFAULT ''"),
+    ("proactive_ops_run", "ticket_status_updated_at", "DATETIME NULL"),
+    ("proactive_ops_run", "ticket_timeline_json", "TEXT NULL"),
+    # Agent 工具调用治理审计（provider/动作类型/耗时/拒绝原因）
+    ("agent_tool_call", "provider", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    ("agent_tool_call", "action_type", "VARCHAR(16) NOT NULL DEFAULT ''"),
+    ("agent_tool_call", "duration_ms", "INT NOT NULL DEFAULT 0"),
+    ("agent_tool_call", "denied_reason", "VARCHAR(64) NULL"),
+    # 记忆治理：租户域 + persona 归属 + 写入模式（legacy 不可召回，仅 explicit 可召回）
+    ("agent_memory", "tenant_id", "VARCHAR(64) NOT NULL DEFAULT 'default'"),
+    ("agent_memory", "agent_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    ("agent_memory", "write_mode", "VARCHAR(32) NOT NULL DEFAULT 'legacy'"),
 ]
 
 _INDEX_MIGRATIONS = [
@@ -91,6 +111,17 @@ _INDEX_MIGRATIONS = [
         "chunks",
         "ix_chunks_doc_idx",
         "INDEX `ix_chunks_doc_idx` (`doc_id`, `chunk_idx`)",
+    ),
+    # 反馈/主动运维租户域过滤索引
+    (
+        "feedbacks",
+        "ix_feedbacks_tenant_created",
+        "INDEX `ix_feedbacks_tenant_created` (`tenant_id`, `created_at`)",
+    ),
+    (
+        "proactive_ops_run",
+        "ix_proactive_run_ticket_status",
+        "INDEX `ix_proactive_run_ticket_status` (`tenant_id`, `ticket_status`)",
     ),
 ]
 

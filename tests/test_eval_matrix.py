@@ -231,7 +231,7 @@ def test_wait_backend_ready_injected_prober_and_timeout():
 def _fake_probe_writer(metrics_by_variant: dict):
     """伪造 _run_probe_sync：按 env 变体名与 --json-out 落 canned 探针 JSON。"""
 
-    def fake(cli_args, env):
+    def fake(cli_args, env, timeout_s=1800):
         variant = env["EVAL_MATRIX_VARIANT"]
         out = Path(cli_args[cli_args.index("--json-out") + 1])
         dim = "retrieval" if "retrieval" in cli_args else "generation"
@@ -281,7 +281,7 @@ def test_main_orchestrates_and_writes_matrix(tmp_path, monkeypatch):
 def test_main_all_probes_failed_exit_1(tmp_path, monkeypatch):
     import eval_matrix as em
 
-    monkeypatch.setattr(em, "_run_probe_sync", lambda a, e: False)
+    monkeypatch.setattr(em, "_run_probe_sync", lambda a, e, timeout_s=1800: False)
     monkeypatch.setattr(em, "_run_generation_with_backend", lambda *a, **k: False)
     assert em.main_with_args(["--dims", "retrieval", "--out-dir", str(tmp_path)]) == 1
 
@@ -290,3 +290,47 @@ def test_main_unknown_dim_exit_2(tmp_path):
     import eval_matrix as em
 
     assert em.main_with_args(["--dims", "bad", "--out-dir", str(tmp_path)]) == 2
+
+
+# ---------- 就绪探针（首跑教训回归）----------
+
+
+def test_login_probe_accepts_any_http_response(monkeypatch):
+    """2026-09-03 首跑回归：空 body POST /login 被 FastAPI 参数校验回 422，
+    探针曾断言 ==200 导致生成维后端全部被误判"未就绪"。422 也证明端口在监听。"""
+    import eval_matrix as em
+
+    class _Resp:
+        status_code = 422
+
+    def _fake_post(url, json=None, timeout=None, **kw):
+        return _Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "post", _fake_post)
+    assert em._login_probe("http://127.0.0.1:8010") is True
+
+
+def test_login_probe_false_on_connection_error(monkeypatch):
+    import httpx
+    import eval_matrix as em
+
+    def _boom(url, json=None, timeout=None, **kw):
+        raise ConnectionError("refused")
+
+    monkeypatch.setattr(httpx, "post", _boom)
+    assert em._login_probe("http://127.0.0.1:8010") is False
+
+
+# ---------- env 覆盖（首跑教训回归）----------
+
+
+def test_build_env_overlay_forces_flywheel_off():
+    """矩阵探针不得触发数据飞轮：EVAL_EMIT/EVAL_TO_TUNE 强制 false，
+    即使父环境/变体覆盖开了也不许（否则 baseline 探针内会再跑一遍 tune 扫描）。"""
+    env = svc.build_env_overlay({"name": "x", "env": {}}, {"EVAL_EMIT_ENABLE": "true"})
+    assert env["EVAL_EMIT_ENABLE"] == "false"
+    assert env["EVAL_TO_TUNE_ENABLE"] == "false"
+    env2 = svc.build_env_overlay({"name": "x", "env": {"EVAL_EMIT_ENABLE": "true"}}, {})
+    assert env2["EVAL_EMIT_ENABLE"] == "false"
+    assert env2["PYTHONUTF8"] == "1"

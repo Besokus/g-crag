@@ -17,7 +17,7 @@ DOCS = {
 
 
 def main():
-    c = httpx.Client(base_url=BASE, timeout=120)
+    c = httpx.Client(base_url=BASE, timeout=120, trust_env=False)
     tok = c.post("/api/system/login", json={"username": "admin", "password": "admin123"}).json()["data"]["token"]
     H = {"Authorization": "Bearer " + tok}
 

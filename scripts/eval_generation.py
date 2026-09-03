@@ -34,7 +34,7 @@ async def run_generation_eval(base_url: str = BASE, limit: int = 10, gate: float
     from app.rag.judge import judge_hallucination
 
     rows, sup_sum, hall_sum, lat_sum = [], 0.0, 0.0, 0.0
-    async with httpx.AsyncClient(timeout=120) as c:
+    async with httpx.AsyncClient(timeout=300, trust_env=False) as c:  # LLM 链降级重试时答案可能 >2min
         token = (
             await c.post(f"{base_url}/api/system/login",
                          json={"username": "admin", "password": "admin123"})
@@ -48,8 +48,15 @@ async def run_generation_eval(base_url: str = BASE, limit: int = 10, gate: float
                              json={"query": q, "modelType": "deepseek"})
             ).json()["data"]
             latency_ms = (time.perf_counter() - t0) * 1000
-            sources = [s.get("text", "") for s in r.get("retrievalSource", [])]
+            # 答案端 retrievalSource 的文本字段是 chunk（qa_service 全路径如此），
+            # 旧实现取 text 恒空串 → judge 判"资料为空"→ 整场评测废掉
+            sources = [(s.get("chunk") or s.get("text") or "") for s in r.get("retrievalSource", [])]
             j = await judge_hallucination(r["answer"], sources, settings.LLM_PROVIDER)
+            if j.get("supported_ratio") is None:
+                # LLM-judge 偶发输出不可解析（如 fallback 链上模型输出非 JSON）：
+                # 跳过该样本并告警，不让单个脏判定杀掉整场评测。
+                print(f"  ⚠ judge 输出不可解析，跳过样本 | {q[:24]}")
+                continue
             sup_sum += j["supported_ratio"]
             hall_sum += j["hallucination"]
             lat_sum += latency_ms

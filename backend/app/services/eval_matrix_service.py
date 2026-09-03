@@ -90,9 +90,16 @@ def select_variants(names: str, dims: set[str]) -> list[dict]:
 
 
 def build_env_overlay(variant: dict, base_env: dict | None = None) -> dict:
-    """子进程 env = 父 env + 变体覆盖；编码强制 utf-8 兜 Windows GBK（同 eval_suite.run_dim）。"""
+    """子进程 env = 父 env + 变体覆盖；编码强制 utf-8 兜 Windows GBK（同 eval_suite.run_dim）。
+
+    矩阵是观测仪器：强制关闭数据飞轮触发器（EVAL_EMIT/EVAL_TO_TUNE），否则 baseline
+    探针 recall 低于门禁会 emit eval_low → 订阅者在探针进程内再跑一遍全量 tune 扫描，
+    单探针耗时翻数倍（2026-09-03 首跑实测主因之一）。置于变体覆盖之后（不可被变体翻回）。
+    """
     env = {**(base_env or {}), "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     env.update(variant.get("env") or {})
+    env["EVAL_EMIT_ENABLE"] = "false"
+    env["EVAL_TO_TUNE_ENABLE"] = "false"
     return env
 
 

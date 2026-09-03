@@ -84,7 +84,7 @@ def main():
     args = ap.parse_args()
 
     golden = load_golden()
-    with httpx.Client(timeout=60) as c:
+    with httpx.Client(timeout=60, trust_env=False) as c:
         token = c.post(
             f"{BASE}/api/system/login", json={"username": "admin", "password": "admin123"}
         ).json()["data"]["token"]

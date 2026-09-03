@@ -72,20 +72,40 @@ def run_probe_generation(json_out: Path, base_url: str, limit: int) -> int:
     return 0
 
 
-def start_backend(port: int, env: dict) -> subprocess.Popen:
-    """起变体后端子进程（uvicorn --app-dir backend，同 AGENTS 开发口径）。"""
+def start_backend(port: int, env: dict, log_path: Path | None = None) -> subprocess.Popen:
+    """起变体后端子进程（uvicorn --app-dir backend，同 AGENTS 开发口径）。
+
+    子进程输出落盘到 log_path（报告目录内），不再 DEVNULL——首跑"后端未就绪"
+    因日志被吞排查了一圈才发现是就绪探针自身 bug。
+    """
+    if log_path is None:
+        log_path = Path(os.environ.get("EVAL_MATRIX_LOG_DIR", "reports")) / f"_backend_{port}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "app.main:app",
          "--host", "127.0.0.1", "--port", str(port), "--app-dir", "backend"],
-        cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=str(ROOT), env=env,
+        stdout=open(log_path, "wb"), stderr=subprocess.STDOUT,
     )
 
 
 def _login_probe(base_url: str) -> bool:
+    """就绪探针：HTTP 层有任何响应即视为就绪。
+
+    首跑教训（2026-09-03 实跑）：原实现断言 `status_code == 200`，但空 body 的
+    POST /login 会被 FastAPI 参数校验直接回 422（BizError 约定只管业务层错误，
+    请求体验证错误仍是 4xx）——探针永远 False，生成维后端被误判"未就绪"。
+    422 本身已证明 uvicorn 在监听，探针语义应为"端口可达"而非"登录成功"。
+
+    trust_env=False：Windows 系统代理（注册表级）会被 httpx 默认信任，把 127.0.0.1
+    请求也转发给 loopback-only 代理 → 502 空 body——首跑"后端未就绪"的真正根因
+    （本机回环目标永远不该走代理）。
+    """
     import httpx
 
     try:
-        return httpx.post(f"{base_url}/api/system/login", json={}, timeout=5).status_code == 200
+        httpx.post(f"{base_url}/api/system/login", json={}, timeout=5, trust_env=False)
+        return True
     except Exception:
         return False
 
@@ -113,14 +133,19 @@ def stop_backend(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def _run_probe_sync(cli_args: list[str], env: dict) -> bool:
-    """以 env 覆盖后的子进程跑探针；utf-8 强制与超时兜底同 eval_suite.run_dim。"""
+def _run_probe_sync(cli_args: list[str], env: dict, timeout_s: int = 1800) -> bool:
+    """以 env 覆盖后的子进程跑探针；utf-8 强制与超时兜底同 eval_suite.run_dim。
+
+    timeout 默认 1800s 按纯检索口径定；LLM 逐条调用的变体（hyde/multi_query/self_rag
+    的改写分支）在 golden 扩充后（109 条）单条 ~15-25s，1800s 不够——编排层按
+    --probe-timeout 传入。
+    """
     cmd = [sys.executable, str(ROOT / "scripts" / "eval_matrix.py")] + cli_args
     try:
         r = subprocess.run(cmd, cwd=str(ROOT), env=env, capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=1800)
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        print("    探针超时（1800s）")
+        print(f"    探针超时（{timeout_s}s）")
         return False
     if r.returncode != 0:
         print((r.stdout or "")[-800:])
@@ -132,14 +157,15 @@ def _run_generation_with_backend(v: dict, json_out: Path, env: dict, port: int, 
     """起变体后端 → 等就绪 → generation 探针 → 停后端；未就绪跳过不中断整场。"""
     base_url = f"http://127.0.0.1:{port}"
     print(f">>> 起变体后端 {v['name']} @:{port} ...")
-    proc = start_backend(port, env)
+    proc = start_backend(port, env, log_path=json_out.parent / f"_backend_{v['name']}_{port}.log")
     try:
         if not wait_backend_ready(base_url, args.health_timeout):
             print(f"    后端未就绪（>{args.health_timeout}s），跳过 {v['name']}")
             return False
         return _run_probe_sync(
             ["--probe", "generation", "--json-out", str(json_out),
-             "--base-url", base_url, "--limit", str(args.limit)], env)
+             "--base-url", base_url, "--limit", str(args.limit)], env,
+            timeout_s=args.probe_timeout)
     finally:
         stop_backend(proc)
 
@@ -154,6 +180,8 @@ def main_with_args(argv: list[str] | None = None) -> int:
     ap.add_argument("--backend-port-base", type=int, default=8010)
     ap.add_argument("--health-timeout", type=float, default=240.0,
                     help="后端子进程就绪等待秒（bge 预热 ~20s）")
+    ap.add_argument("--probe-timeout", type=int, default=3600,
+                    help="单个探针子进程超时秒（LLM 逐条变体在 golden 扩充后需要 >1800s）")
     ap.add_argument("--probe", choices=["retrieval", "generation"], default=None,
                     help=argparse.SUPPRESS)
     ap.add_argument("--base-url", default="", help=argparse.SUPPRESS)
@@ -196,7 +224,7 @@ def main_with_args(argv: list[str] | None = None) -> int:
                 print(f">>> 探针 {v['name']}/{dim}")
                 ok = _run_probe_sync(
                     ["--probe", "retrieval", "--json-out", str(json_out),
-                     "--topk", str(args.topk)], env)
+                     "--topk", str(args.topk)], env, timeout_s=args.probe_timeout)
             else:
                 ok = _run_generation_with_backend(v, json_out, env, port, args)
                 port += 1

@@ -22,7 +22,7 @@ QUERIES = [
 
 
 async def main():
-    async with httpx.AsyncClient(timeout=120) as c:
+    async with httpx.AsyncClient(timeout=120, trust_env=False) as c:
         token = (await c.post(
             f"{BASE}/api/system/login",
             json={"username": "admin", "password": "admin123"},

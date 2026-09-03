@@ -20,7 +20,7 @@ OFF = ["量子纠缠在通信中的应用", "红烧肉的家常做法"]
 
 
 async def main():
-    async with httpx.AsyncClient(base_url=BASE, timeout=180) as c:
+    async with httpx.AsyncClient(base_url=BASE, timeout=180, trust_env=False) as c:
         tok = (await c.post("/api/system/login", json={"username": "admin", "password": "admin123"})).json()["data"]["token"]
         H = {"Authorization": "Bearer " + tok}
 

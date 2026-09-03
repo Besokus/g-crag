@@ -38,7 +38,7 @@ DOCS = {
 
 
 def main():
-    with httpx.Client(timeout=180) as c:
+    with httpx.Client(timeout=180, trust_env=False) as c:
         token = c.post(
             f"{BASE}/api/system/login",
             json={"username": "admin", "password": "admin123"},

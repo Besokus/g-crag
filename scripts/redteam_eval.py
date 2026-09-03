@@ -180,7 +180,7 @@ async def main() -> None:
     base = args.base_url.rstrip("/")
     all_rows: list[dict] = []
 
-    async with httpx.AsyncClient(timeout=120) as c:
+    async with httpx.AsyncClient(timeout=120, trust_env=False) as c:
         token = await _login(c, base, args.username, args.password)
         headers = {"Authorization": f"Bearer {token}"}
 

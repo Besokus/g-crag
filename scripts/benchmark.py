@@ -15,7 +15,7 @@ QUERIES = ["主变压器巡视", "断路器维护", "线路保护", "互感器�
 
 async def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 50
-    async with httpx.AsyncClient(timeout=60) as c:
+    async with httpx.AsyncClient(timeout=60, trust_env=False) as c:
         token = (await c.post(
             f"{BASE}/api/system/login",
             json={"username": "admin", "password": "admin123"},

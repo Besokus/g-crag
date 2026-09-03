@@ -23,36 +23,63 @@ def _load_golden() -> list[dict]:
     return json.loads(_GOLDEN.read_text(encoding="utf-8"))
 
 
-def _recall_at_k(expect: list[str], got: list[str]) -> float:
-    """recall@k：期望文档命中比例（二值相关）。"""
-    if not expect:
+def _doc_relevance_binary(expect: list[str], doc_name: str) -> int:
+    """二元相关性：任一 expect 关键词是 docName 子串 → 1（对齐 scripts/eval_retrieval.py 口径）。
+
+    golden 的 expect 是内容关键词（如"主变压器"），docName 是文档标题（如
+    "主变压器运行规程.txt"）——精确相等永远 False，必须用子串匹配。
+    """
+    return 1 if any(kw and kw in doc_name for kw in expect) else 0
+
+
+def _doc_relevance_graded(relevant_docs: dict, doc_name: str, fallback_expect: list[str]) -> int:
+    """分级相关性：优先 relevant_docs{文档关键词→grade}（key 是 docName 子串），否则二元兜底。"""
+    if relevant_docs:
+        for key, grade in relevant_docs.items():
+            if key and key in doc_name:
+                return grade
+        return 0
+    return _doc_relevance_binary(fallback_expect, doc_name)
+
+
+def _recall_at_k(expect: list[str], got: list[str], relevant_docs: dict | None = None) -> float:
+    """query 级召回：top-k 中命中任一相关文档 → 1，否则 0（与 eval_retrieval 报告口径一致）。"""
+    if not expect and not relevant_docs:
         return 0.0
-    hit = sum(1 for d in expect if d in got)
-    return hit / len(expect)
+    rd = relevant_docs or {}
+    return 1.0 if any(_doc_relevance_graded(rd, d, expect) > 0 for d in got) else 0.0
 
 
-def _mrr(expect: list[str], got: list[str]) -> float:
-    """MRR：第一个命中的期望文档的倒数排名。"""
+def _mrr(expect: list[str], got: list[str], relevant_docs: dict | None = None) -> float:
+    """MRR：第一个相关文档（分级>0）的倒数排名。"""
+    rd = relevant_docs or {}
     for i, d in enumerate(got, 1):
-        if d in expect:
+        if _doc_relevance_graded(rd, d, expect) > 0:
             return 1.0 / i
     return 0.0
 
 
-def _ndcg(relevant_docs: dict, got: list[str]) -> float:
-    """分级 nDCG（relevant_docs value 1-3 为相关性等级）。"""
-    def _dcg(order):
-        s = 0.0
-        for i, d in enumerate(order, 1):
-            rel = relevant_docs.get(d, 0)
-            if rel:
-                s += (2 ** rel - 1) / (i + 1)
-        return s
-    ideal = sorted(relevant_docs.values(), reverse=True)
-    idcg = sum((2 ** r - 1) / (i + 1) for i, r in enumerate(ideal, 1))
-    if idcg == 0:
-        return 0.0
-    return _dcg(got) / idcg
+def _ndcg(relevant_docs: dict, got: list[str], expect: list[str] | None = None,
+          k: int | None = None) -> float:
+    """分级 nDCG：relevant_docs key 按 docName 子串匹配取等级；无 relevant_docs 退化二元。
+
+    口径对齐 scripts/eval_retrieval.py::ndcg_at_k（线性折损、ideal 取等级降序）。
+    """
+    import math
+
+    rd = relevant_docs or {}
+    exp = expect or []
+    if k is None:
+        k = len(got)
+    rels = [_doc_relevance_graded(rd, d, exp) for d in got[:k]]
+    dcg = sum(r / math.log2(i + 2) for i, r in enumerate(rels) if r)
+    if rd:
+        ideal = sorted(rd.values(), reverse=True)[:k]
+    else:
+        max_rel = min(len(exp), k)
+        ideal = [1] * max_rel + [0] * (k - max_rel)
+    idcg = sum(r / math.log2(i + 2) for i, r in enumerate(ideal) if r)
+    return dcg / idcg if idcg > 0 else 0.0
 
 
 def _mean(xs: list[float]) -> float:
@@ -74,14 +101,14 @@ async def evaluate_over_golden(db: AsyncSession, overrides: dict | None = None, 
             n_empty += 1
             per_query.append({"query": item["query"], "recall": 0.0, "mrr": 0.0, "empty": True})
             continue
-        r = _recall_at_k(item.get("expect", []), got)
-        m = _mrr(item.get("expect", []), got)
+        rd = item.get("relevant_docs") or {}
+        r = _recall_at_k(item.get("expect", []), got, rd)
+        m = _mrr(item.get("expect", []), got, rd)
         recalls.append(r)
         mrrs.append(m)
-        n = None
-        if item.get("relevant_docs"):
-            n = _ndcg(item.get("relevant_docs", {}), got)
-            ndcgs.append(n)
+        # 无分级标注时 nDCG 退化为二元（对齐 eval_retrieval 口径，全集均值）
+        n = _ndcg(rd, got, item.get("expect", []), topk)
+        ndcgs.append(n)
         per_query.append({"query": item["query"], "recall": r, "mrr": m, "ndcg": n})
     result = {
         "recall": _mean(recalls), "mrr": _mean(mrrs), "ndcg": _mean(ndcgs),

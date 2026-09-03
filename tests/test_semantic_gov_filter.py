@@ -12,7 +12,7 @@ def _run(coro):
 
 
 def test_a5_cv_has_g_segment(monkeypatch):
-    """citation_cache_version() 输出形如 cvXXX{G}R{R}（G 段=进程内存镜像；T9 追加 R 段=CRAG_V3 代际）。"""
+    """citation_cache_version() 输出形如 cvXXX{G}R{R}S{S}（G=治理代际；R=CRAG_V3 代际；S=注入拦截档，红队#2）。"""
     import app.config as cfg
     cfg._gov_generation = 0  # 测试隔离：先清零（防其他用例 bump 累积）
     # 模拟 governance_propagate_service bump 7 次
@@ -24,7 +24,8 @@ def test_a5_cv_has_g_segment(monkeypatch):
         expected = (f"cv{int(cfg.settings.CITATION_VERIFIER_ENABLE)}"
                     f"{int(cfg.settings.CITATION_STRUCTURED_OUTPUT)}"
                     f"{int(cfg.settings.CITATION_NLI_ENABLE)}7"
-                    f"R{int(getattr(cfg.settings, 'CRAG_V3_ENABLE', False))}")
+                    f"R{int(getattr(cfg.settings, 'CRAG_V3_ENABLE', False))}"
+                    f"S{int(getattr(cfg.settings, 'INJECTION_GUARD_STRICT_ENABLE', False))}")
         assert cv == expected
     finally:
         # 测试隔离：重置进程内存
@@ -39,7 +40,8 @@ def test_a5_cv_g_default_zero():
     expected = (f"cv{int(cfg.settings.CITATION_VERIFIER_ENABLE)}"
                 f"{int(cfg.settings.CITATION_STRUCTURED_OUTPUT)}"
                 f"{int(cfg.settings.CITATION_NLI_ENABLE)}0"
-                f"R{int(getattr(cfg.settings, 'CRAG_V3_ENABLE', False))}")
+                f"R{int(getattr(cfg.settings, 'CRAG_V3_ENABLE', False))}"
+                f"S{int(getattr(cfg.settings, 'INJECTION_GUARD_STRICT_ENABLE', False))}")
     assert cv == expected
 
 

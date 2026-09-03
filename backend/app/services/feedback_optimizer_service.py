@@ -257,14 +257,36 @@ async def get_optimization_report() -> dict:
 
 _BLACKLIST_KEY = "qa:cache:blacklist"
 
+# 进程内黑名单快照（Redis 异常时兜底）：读成功即刷新；短 TTL 防陈旧。
+# 红队缺口 #3：原实现 Redis 异常 fail-open（返回 False），L2 MySQL 仍可命中
+# 已拉黑坏答案。现为 快照优先 → 无快照 fail-closed（视为拉黑=强制重走 LLM）。
+_BLACKLIST_SNAPSHOT: set[str] = set()
+_BLACKLIST_SNAPSHOT_AT: float = 0.0
+_BLACKLIST_SNAPSHOT_TTL = 60.0
+
 
 async def is_query_blacklisted(nq: str) -> bool:
-    """该归一化 query 是否在缓存黑名单（高频坏答案，禁止缓存命中，强制重走 LLM）。"""
+    """该归一化 query 是否在缓存黑名单（高频坏答案，禁止缓存命中，强制重走 LLM）。
+
+    Redis 异常时降级：优先用 60s 内的进程内快照判断；无可用快照则 fail-closed
+    （返回 True=按拉黑处理，宁可多走一次 LLM，也不冒命中已拉黑坏答案的风险）。
+    """
+    global _BLACKLIST_SNAPSHOT, _BLACKLIST_SNAPSHOT_AT
+    import time as _time
+
     try:
         from app.clients import redis_client
-        return bool(await redis_client.get_redis().sismember(_BLACKLIST_KEY, nq))
-    except Exception:
-        return False
+        members = await redis_client.get_redis().smembers(_BLACKLIST_KEY)
+        # smembers 返回 set[bytes|str]，归一化为 str 快照
+        snapshot = {m.decode() if isinstance(m, bytes) else str(m) for m in members or set()}
+        _BLACKLIST_SNAPSHOT = snapshot
+        _BLACKLIST_SNAPSHOT_AT = _time.time()
+        return nq in snapshot
+    except Exception as e:
+        degraded("cache_blacklist_check", e)
+        if _BLACKLIST_SNAPSHOT and (_time.time() - _BLACKLIST_SNAPSHOT_AT) <= _BLACKLIST_SNAPSHOT_TTL:
+            return nq in _BLACKLIST_SNAPSHOT
+        return True
 
 
 async def auto_tune_cache_ttl(db: AsyncSession) -> dict:

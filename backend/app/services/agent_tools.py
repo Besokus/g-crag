@@ -126,23 +126,25 @@ def build_default_registry() -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(Tool("search_regulation",
                       "检索电网运维规程/手册/标准，获取故障处置的规程依据、限值、标准步骤。",
-                      _SCHEMA_QUERY, _t_search_regulation))
+                      _SCHEMA_QUERY, _t_search_regulation, required_roles=[]))
     reg.register(Tool("query_equipment_graph",
                       "查知识图谱中设备的故障-处置因果链（设备→故障→处置 多跳）。",
-                      _SCHEMA_ENTITY, _t_query_equipment_graph))
+                      _SCHEMA_ENTITY, _t_query_equipment_graph, required_roles=[]))
     reg.register(Tool("search_similar_case",
                       "查历史相似故障案例（故障案例库），看历史上类似故障怎么处理的。",
-                      _SCHEMA_SYMPTOM, _t_search_similar_case))
+                      _SCHEMA_SYMPTOM, _t_search_similar_case, required_roles=[]))
     reg.register(Tool("draft_ticket",
                       "生成处置操作票草案（步骤/安措/风险）。诊断基本明确、需要处置步骤时调用。",
-                      _SCHEMA_TASK, _t_draft_ticket))
+                      _SCHEMA_TASK, _t_draft_ticket, required_roles=["admin"]))
     if settings.TICKET_ACTION_LOOP_ENABLE:
         reg.register(Tool("create_ticket",
                           "把已确定的处置方案落库成两票草稿。仅当用户明确要求生成/创建工单时调用。",
-                          _SCHEMA_CREATE_TICKET, _t_create_ticket))
+                          _SCHEMA_CREATE_TICKET, _t_create_ticket,
+                          required_roles=["admin", "editor"]))
         reg.register(Tool("submit_ticket",
                           "把工单提交审核（自动跑审核引擎）。create_ticket 成功后按用户要求调用。",
-                          _SCHEMA_SUBMIT_TICKET, _t_submit_ticket))
+                          _SCHEMA_SUBMIT_TICKET, _t_submit_ticket,
+                          required_roles=["admin", "editor"]))
     return reg
 
 

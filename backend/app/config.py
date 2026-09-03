@@ -230,6 +230,7 @@ class Settings(BaseSettings):
 
     # ---------- 安全合规（电网强监管）----------
     SAFETY_FILTER_ENABLE: bool = True   # 入站 prompt injection 防护
+    INJECTION_GUARD_STRICT_ENABLE: bool = False  # 红队缺口#2: 高危注入(指令覆盖类)QA侧直接结构化拒答(关=现状只告警防误杀)
     PII_MASK_ENABLE: bool = False       # 出站答案敏感信息脱敏（默认关，按合规要求开）
     HIGH_RISK_KEYWORDS: str = "停电,拉闸,合闸,接地,挂地线,带电,登高,攀登,放电,倒闸"
 
@@ -279,6 +280,7 @@ class Settings(BaseSettings):
     QUALITY_BUS_ENABLE: bool = False  # 质量事件总线总开关（emit 入库恒做；开=异步派发订阅者）
     DISLIKE_TO_GAP_ENABLE: bool = False  # B1 dislike→质量事件(→evidence_gap 补全)；opt-in
     GOVERNANCE_PROPAGATE_ENABLE: bool = False  # A3/A4 治理联动清理 Milvus/Neo4j/qa_cache；opt-in
+    GOVERNANCE_PROPAGATE_DRY_RUN_ENABLE: bool = False  # A4 安全阀: 开=只产出候选清理报告(质量事件)不删除，人工确认后走 execute 端点；关=事件直接触发真实清理
     SEMANTIC_CACHE_GOV_FILTER_ENABLE: bool = False  # A5 semantic 命中后过 blocked_document_ids 过滤；opt-in
     EVAL_EMIT_ENABLE: bool = False  # B3 评测低分 emit(online_eval.low_faith/retrieval_eval.eval_low)；opt-in
     EVAL_TO_TUNE_ENABLE: bool = False  # C1 评测低分→retrieval_tune 订阅触发扫描；opt-in
@@ -394,4 +396,5 @@ def citation_cache_version() -> str:
     s = settings
     return (f"cv{int(s.CITATION_VERIFIER_ENABLE)}{int(s.CITATION_STRUCTURED_OUTPUT)}"
             f"{int(s.CITATION_NLI_ENABLE)}{_gov_generation}"
-            f"R{int(getattr(s, 'CRAG_V3_ENABLE', False))}")  # T9: confidence 模型代际(V3开关)，切换→老缓存自动失效
+            f"R{int(getattr(s, 'CRAG_V3_ENABLE', False))}"
+            f"S{int(getattr(s, 'INJECTION_GUARD_STRICT_ENABLE', False))}")  # S: 注入拦截档(红队#2)/QA persona 防线语义代际

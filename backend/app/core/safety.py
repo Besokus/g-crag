@@ -23,6 +23,17 @@ _INJECTION_PATTERNS = [
 ]
 _INJECTION_RE = re.compile("|".join(_INJECTION_PATTERNS), re.IGNORECASE)
 
+# 高危注入子集（指令覆盖类：试图覆盖系统指令/伪装系统消息）。与角色扮演类
+# （DAN/越狱/<script>）分级：高危模式在 INJECTION_GUARD_STRICT_ENABLE 开启时于
+# QA 侧直接拦截（结构化拒答），其余维持只告警不阻断，防误杀技术问题。
+_INJECTION_CRITICAL_PATTERNS = [
+    r"忽略\s*(以上|上文|前面|上述|上面)\s*.{0,8}(指令|规则|要求|提示|设定)",
+    r"ignore\s+.{0,20}instructions",
+    r"disregard\s+.{0,20}(rules|instructions)",
+    r"\bsystem\s*[:：]\s*",
+]
+_INJECTION_CRITICAL_RE = re.compile("|".join(_INJECTION_CRITICAL_PATTERNS), re.IGNORECASE)
+
 # ===== 电网安全关键词分类（8 类危险操作维度） =====
 # 每类包含：关键词列表 + 严重程度(critical/warning/info)
 _GRID_HAZARD_CATEGORIES: Dict[str, Dict] = {
@@ -113,6 +124,20 @@ def detect_injection(text: str) -> tuple[bool, str]:
     if not text:
         return False, ""
     m = _INJECTION_RE.search(text)
+    if m:
+        return True, m.group(0)
+    return False, ""
+
+
+def detect_injection_critical(text: str) -> tuple[bool, str]:
+    """检测高危注入（指令覆盖类子集）。返回 (是否命中, 命中片段)。
+
+    与 detect_injection 的区别：只认"覆盖系统指令/伪装 system"类硬注入，
+    不含 DAN/越狱角色扮演与 <script>，供 INJECTION_GUARD_STRICT_ENABLE 拦截用。
+    """
+    if not text:
+        return False, ""
+    m = _INJECTION_CRITICAL_RE.search(text)
     if m:
         return True, m.group(0)
     return False, ""

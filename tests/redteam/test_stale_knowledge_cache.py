@@ -145,11 +145,11 @@ async def test_cache_validation_fails_closed_on_governance_error(test_db, monkey
 
 
 @pytest.mark.asyncio
-async def test_cache_validation_without_tenant_fails_open_documented_gap(test_db, monkeypatch):
-    """【缺口固化】tenant 为空时 fail-open（qa_service.py:187/204 `not bool(tenant)`）：
-    治理查询异常且无租户 → 缓存照常可用（离线/兼容路径不校验时效）。
+async def test_cache_validation_without_tenant_fail_closed(test_db, monkeypatch):
+    """红队缺口 #7 已修：治理查询异常时无论是否带租户一律 fail-closed。
 
-    若内部调用方未来统一强制带租户或改 fail-closed，请同步更新 docs/redteam/README.md。
+    原为缺口固化（tenant 为空 fail-open）；现在内部调用方恒带租户，
+    异常路径统一返回 False——宁可缓存 miss 重走检索，不冒脏缓存风险。
     """
 
     async def _boom(*_a, **_k):
@@ -158,7 +158,7 @@ async def test_cache_validation_without_tenant_fails_open_documented_gap(test_db
     monkeypatch.setattr(knowledge_governance_service, "blocked_document_ids", _boom)
     assert await qa_service._cache_knowledge_valid(
         test_db, _cached_entry(["any-doc"]), None,
-    ) is True
+    ) is False
 
 
 # ===== 缓存黑名单（坏答案禁命中）=====
@@ -170,6 +170,19 @@ class _StubRedis:
 
     async def sismember(self, key: str, value: str) -> bool:
         return value in self._members
+
+    async def smembers(self, key: str) -> set:
+        return set(self._members)
+
+
+@pytest.fixture(autouse=True)
+def _reset_blacklist_snapshot():
+    """黑名单进程内快照是模块级状态，用例间必须复位。"""
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT = set()
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT_AT = 0.0
+    yield
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT = set()
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT_AT = 0.0
 
 
 def test_blacklisted_query_never_served_from_cache(monkeypatch):
@@ -184,11 +197,11 @@ def test_blacklisted_query_never_served_from_cache(monkeypatch):
     assert asyncio.run(feedback_optimizer_service.is_query_blacklisted("正常问题")) is False
 
 
-def test_blacklist_check_fails_open_without_redis_documented_gap(monkeypatch):
-    """【缺口固化】Redis 异常 → 黑名单检查 fail-open 返回 False
-    （feedback_optimizer_service.py:266-267）。此时 L2 MySQL 缓存仍可命中被拉黑答案。
+def test_blacklist_check_fail_closed_without_redis(monkeypatch):
+    """红队缺口 #3 已修：Redis 异常 → 无可用快照时 fail-closed（按拉黑处理）。
 
-    现状固化：若改为 fail-closed 或本地兜底，请同步更新 docs/redteam/README.md。
+    原为缺口固化（fail-open 返回 False，L2 MySQL 可命中已拉黑答案）；
+    现在宁可全量重走 LLM，也不冒命中坏答案的风险。
     """
     from app.clients import redis_client
 
@@ -196,7 +209,40 @@ def test_blacklist_check_fails_open_without_redis_documented_gap(monkeypatch):
         raise RuntimeError("redis down")
 
     monkeypatch.setattr(redis_client, "get_redis", _boom)
-    assert asyncio.run(feedback_optimizer_service.is_query_blacklisted("任意问题")) is False
+    assert asyncio.run(feedback_optimizer_service.is_query_blacklisted("任意问题")) is True
+
+
+def test_blacklist_check_uses_fresh_snapshot_when_redis_down(monkeypatch):
+    """Redis 异常但有 60s 内快照 → 按快照判断（不放大故障面）。"""
+    import time
+
+    from app.clients import redis_client
+
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT = {"拉黑的问题"}
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT_AT = time.time()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", _boom)
+    assert asyncio.run(feedback_optimizer_service.is_query_blacklisted("拉黑的问题")) is True
+    assert asyncio.run(feedback_optimizer_service.is_query_blacklisted("正常问题")) is False
+
+
+def test_blacklist_snapshot_expired_falls_back_fail_closed(monkeypatch):
+    """Redis 异常且快照超时（>60s）→ 不用陈旧快照，fail-closed。"""
+    import time
+
+    from app.clients import redis_client
+
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT = {"拉黑的问题"}
+    feedback_optimizer_service._BLACKLIST_SNAPSHOT_AT = time.time() - 3600
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", _boom)
+    assert asyncio.run(feedback_optimizer_service.is_query_blacklisted("拉黑的问题")) is True
 
 
 # ===== 治理状态矩阵（is_retrievable 纯函数基线）=====

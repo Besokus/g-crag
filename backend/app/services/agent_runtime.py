@@ -42,6 +42,11 @@ class Tool:
     handler: Callable[..., Awaitable[str]]
     provider: str = "builtin"   # builtin | mcp:<server>（审计归因）
     action_type: str = ""       # read | write（空=按 tool_permissions 推断）
+    # 显式权限级别（红队缺口 #5：新工具必须声明，不再依赖 tool_permissions 漏登记）：
+    #   None  = 未声明（回退 tool_permissions 注册表，两票写工具仍受限）
+    #   []    = 显式声明全员可调（只读工具用这个，表示"已评审过，无需角色限制"）
+    #   ["admin", ...] = 仅列出的角色可调
+    required_roles: Optional[list[str]] = None
 
     @property
     def schema(self) -> dict:
@@ -79,10 +84,14 @@ class ToolRegistry:
         """执行工具，返回 (result_text, error)。权限检查(S4) + 审计(S4) + 失败不抛。
 
         ctx: {username, tenant, role, persona, iter} 可选。
-        ctx=None 时跳过权限与审计（diagnose 等老链路零回归）。
+        ctx=None 时跳过角色权限检查（diagnose 等老链路零回归），但**保留审计记录**
+        （username 标记 "-"，可追溯；红队缺口 #5）。
         """
-        # 权限检查（仅 ctx 提供时；高风险工具按 role 限）
-        allowed_roles = tool_permissions.get(name)
+        t = self._tools.get(name)
+        if not t:
+            return f"未知工具: {name}", True
+        # 权限检查（仅 ctx 提供时；优先工具显式 required_roles，回退 tool_permissions 注册表）
+        allowed_roles = t.required_roles if t.required_roles is not None else tool_permissions.get(name)
         if ctx is not None and allowed_roles:
             role = ctx.get("role", "")
             if role not in allowed_roles:
@@ -104,9 +113,6 @@ class ToolRegistry:
                     duration_ms=0,
                 )
                 return f"权限不足：工具 {name} 需 {allowed_roles} 角色", True
-        t = self._tools.get(name)
-        if not t:
-            return f"未知工具: {name}", True
         tool_args = dict(args) if isinstance(args, dict) else {}
         # tenant 是运行时保留参数，LLM/用户参数无权指定或覆盖。
         for reserved in ("tenant", "tenant_id", "tenantId"):
@@ -134,10 +140,21 @@ class ToolRegistry:
             result = f"工具 {name} 执行失败: {type(e).__name__}: {e}"
             error = True
         duration_ms = int((time.perf_counter() - _tool_t0) * 1000)
-        # 审计（fire-and-forget bg task，仅 ctx 提供时；仿 rewrite_event 独立 session）
+        # 审计（fire-and-forget bg task；仿 rewrite_event 独立 session）。
+        # ctx 提供时记录真实身份；ctx=None（老链路）仍补审计，username 标记 "-"
+        # 保证工具调用可追溯（红队缺口 #5：原实现完全跳过审计）。
         if ctx is not None:
             self._audit(
                 ctx=ctx, name=name, tool_provider=t.provider,
+                action_type=t.audit_action_type, args=tool_args,
+                result=result or "", error=error,
+                duration_ms=duration_ms,
+            )
+        else:
+            self._audit(
+                ctx={"persona": "ctx-less", "username": "-", "tenant": "default",
+                     "role": "", "iter": 0},
+                name=name, tool_provider=t.provider,
                 action_type=t.audit_action_type, args=tool_args,
                 result=result or "", error=error,
                 duration_ms=duration_ms,

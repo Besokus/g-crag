@@ -198,8 +198,11 @@ async def _cache_knowledge_valid(
         return not blocked
     except Exception as exc:
         degraded("knowledge_governance_cache_gate", exc)
-        # 带租户的生产问答采用 fail-closed；离线/兼容调用未提供 tenant 时不改变旧行为。
-        return not bool(tenant)
+        # fail-closed（红队缺口 #7）：治理后端不可用时无法核验文档时效，
+        # 宁可缓存 miss 重走检索/LLM，也不冒"已撤回/过期知识继续回答"的风险。
+        # 内部调用方（answer/stream_answer）恒带 tenant（默认 default）；
+        # 显式 tenant=None 的离线/兼容调用同样 fail-closed。
+        return False
 
 
 async def _crag_correct(
@@ -698,6 +701,31 @@ async def _nli_backfill(model_type, citation_map, contexts, query, tenant, sync_
         degraded("citation_nli_async_cache_write", e)
 
 
+def _injection_blocked(query: str) -> str | None:
+    """高危注入拦截文案（红队缺口 #2）。返回拒答文本=拦截；None=放行。
+
+    INJECTION_GUARD_STRICT_ENABLE 开启时，命中"指令覆盖/伪装 system"类硬注入
+    → 结构化拒答；关=现状只告警不阻断（保守模式防误杀电网技术问题）。
+    """
+    if not getattr(settings, "INJECTION_GUARD_STRICT_ENABLE", False):
+        return None
+    hit, frag = safety.detect_injection_critical(query)
+    if not hit:
+        return None
+    try:
+        from app.core import metrics
+        metrics.SAFETY_BLOCK.labels("injection_blocked").inc()
+    except Exception:
+        pass
+    try:
+        from loguru import logger
+        logger.warning(f"[安全:injection_blocked] 高危注入已拦截 hit={frag} | query={(query or '')[:60]}")
+    except Exception:
+        pass
+    return ("您的请求包含疑似指令注入内容（试图覆盖系统指令），已被安全策略拦截。"
+            "请用自然语言描述电网运维问题（设备、故障现象、处置需求）。")
+
+
 async def answer(
     db: AsyncSession, query: str, model_type: str | None = None,
     topk: int = 5, conversation_id: str | None = None, username: str = "",
@@ -707,6 +735,14 @@ async def answer(
     with _trace_span("normalize"):
         nq = term_service.normalize(query)
         safety.guard_query(query)  # 入站 prompt injection 告警（D4）
+    _blk = _injection_blocked(query)
+    if _blk:
+        return {
+            "answer": _blk, "retrievalSource": [],
+            "responseTime": round(time.time() - t0, 3), "hallucinationRate": 0.0,
+            "cached": False, "confidence": "refused", "cragAction": "injection_blocked",
+            "conversationId": conversation_id or "",
+        }
     is_single = not conversation_id  # 仅单轮查/写缓存（多轮上下文变化不缓存）
 
     # Self-RAG：非运维问题跳过检索直接拒答（省成本+防污染，SELF_RAG_ENABLE 默认关）
@@ -1313,6 +1349,14 @@ async def stream_answer(
     nq = term_service.normalize(query)
     _p = model_type or settings.LLM_PROVIDER
     safety.guard_query(query)  # 入站 prompt injection 告警（D4）
+    _blk = _injection_blocked(query)
+    if _blk:
+        yield {"type": "meta", "sources": [], "conversationId": conversation_id or ""}
+        yield {"type": "token", "content": _blk}
+        yield {"type": "done", "responseTime": round(time.time() - t0, 3),
+               "confidence": "refused", "cragAction": "injection_blocked",
+               "conversationId": conversation_id or "", "cached": False}
+        return
     if agent_mode:
         async for ev in _stream_agent(db, query, model_type, conversation_id, username, tenant, t0,
                                       user_role=user_role,

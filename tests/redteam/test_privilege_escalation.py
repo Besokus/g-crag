@@ -139,17 +139,72 @@ async def test_persona_declaration_cannot_grant_tool_role():
 
 
 @pytest.mark.asyncio
-async def test_ctx_none_skips_permission_check_documented_gap():
-    """【缺口固化】ctx=None 时跳过权限与审计：draft_ticket 直通（老链路零回归设计）。
+async def test_ctx_none_skips_permission_but_writes_audit(monkeypatch):
+    """红队缺口 #5 已修：ctx=None 仍跳过角色权限（老链路零回归），但补写审计记录。
 
-    红队视角：任何新链路忘记传 ctx 即无工具权限检查（见 docs/redteam/README.md 缺口清单）。
-    本用例固化现状，若未来改为 fail-closed 请同步更新缺口清单。
+    原为缺口固化（权限+审计全跳过）；现在 ctx 缺失时 username 标记 "-"，
+    工具调用可追溯，权限检查维持跳过不变。
     """
+    audits: list[dict] = []
+
+    async def _capture(**kw):
+        audits.append(kw)
+
+    import app.services.agent_tool_audit_service as audit_svc
+    monkeypatch.setattr(audit_svc, "log_tool_call", _capture)
+
     registry = ToolRegistry()
     captured = _tool_with_agent_permission(registry, "draft_ticket")
     result, err = await registry.run(None, None, "draft_ticket", {"message": "x"}, ctx=None)
     assert err is False
     assert captured == ["x"]
+    # 审计是 ensure_future 的 fire-and-forget 任务，让出几个事件循环节拍再断言
+    import asyncio
+    for _ in range(3):
+        await asyncio.sleep(0)
+    # 补审计：ctx 缺失也要留痕（username="-"）
+    assert any(a.get("username") == "-" and a.get("tool") == "draft_ticket" for a in audits)
+
+
+@pytest.mark.asyncio
+async def test_tool_explicit_required_roles_restricts_access():
+    """红队缺口 #5：工具可显式声明 required_roles（不再只依赖 tool_permissions 登记）。"""
+    async def handler(db, model_type, message="", tenant=None):
+        return "ok"
+
+    registry = ToolRegistry()
+    registry.register(Tool(
+        name="super_tool", description="x", parameters={"type": "object", "properties": {}},
+        handler=handler, required_roles=["admin"],
+    ))
+    result, err = await registry.run(
+        None, None, "super_tool", {},
+        ctx={"role": "operator", "username": "u", "tenant": "t1"},
+    )
+    assert err is True and "权限不足" in result
+    result, err = await registry.run(
+        None, None, "super_tool", {},
+        ctx={"role": "admin", "username": "u", "tenant": "t1"},
+    )
+    assert err is False
+
+
+@pytest.mark.asyncio
+async def test_tool_explicit_empty_roles_means_everyone():
+    """required_roles=[] 显式声明全员可调（只读工具的评审标记），即使名字未入 tool_permissions。"""
+    async def handler(db, model_type, message="", tenant=None):
+        return "ok"
+
+    registry = ToolRegistry()
+    registry.register(Tool(
+        name="readonly_tool", description="x", parameters={"type": "object", "properties": {}},
+        handler=handler, required_roles=[],
+    ))
+    result, err = await registry.run(
+        None, None, "readonly_tool", {},
+        ctx={"role": "viewer", "username": "u", "tenant": "t1"},
+    )
+    assert err is False
 
 
 # ===== LLM 工具参数不可伪造租户 =====

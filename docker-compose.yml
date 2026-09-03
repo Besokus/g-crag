@@ -152,11 +152,16 @@ services:
     restart: unless-stopped
     environment:
       MODE: standalone
+      # 容器内 InetUtils.refreshIp NPE（枚举不到可用 IP）→ 显式指定服务 IP（2026-09-03）
+      NACOS_SERVER_IP: 172.18.0.20
     ports:
       - "8848:8848"
       - "9848:9848"
     volumes:
       - ./data/nacos:/home/nacos/data
+    networks:
+      default:
+        ipv4_address: 172.18.0.20
 
   # ---------- 后端 ----------
   backend:

@@ -300,6 +300,17 @@ async def alerts_webhook(
         title = labels.get("alertname", "未知告警")
         summary = ann.get("summary", "")
         state = a.get("status", "firing")
+        # 红队缺口 #4：告警文本（title/summary 来自外部 Grafana payload）过一次注入
+        # 检测——先可观测（计数+日志），不阻断不展示过滤（下游诊断 prompt 已有防线）。
+        try:
+            from app.core.safety import detect_injection
+            _hit, _frag = detect_injection(f"{title}\n{summary}")
+            if _hit:
+                metrics.SAFETY_BLOCK.labels("webhook_injection").inc()
+                from loguru import logger
+                logger.warning(f"[安全:webhook_injection] 告警文本疑似注入 hit={_frag} | title={title[:60]}")
+        except Exception:
+            pass
         content = f"[{sev}] {title}" + (f"：{summary}" if summary else "") + f"（{state}）"
         await write_log(db, "Grafana", "告警", content[:500])
         try:
@@ -1167,3 +1178,36 @@ async def terms_delete(
     data = delete_term(alias)
     await write_log(db, admin.username, "词表管理", f"删除 {alias}")
     return success(data, "已删除")
+
+
+# ===== A4 治理传播 dry-run（候选清理报告 → 人工确认 → 真实清理） =====
+
+@router.get("/governance-propagate/candidates/{doc_id}")
+async def governance_propagate_candidates(
+    doc_id: str,
+    admin: User = Depends(require_admin),
+):
+    """治理联动清理候选报告（只读 dry-run）：统计将清理的向量/图谱边/三元组/缓存行，不删除。"""
+    from app.services.governance_propagate_service import build_cleanup_candidates
+    return success(await build_cleanup_candidates(doc_id), "候选清理报告（未执行）")
+
+
+@router.post("/governance-propagate/execute")
+async def governance_propagate_execute(
+    body: dict,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """报告确认后执行真实清理（A4 人工确认入口；需 GOVERNANCE_PROPAGATE_ENABLE=true）。"""
+    from app.config import settings as _settings
+
+    if not getattr(_settings, "GOVERNANCE_PROPAGATE_ENABLE", False):
+        raise BizError("GOVERNANCE_PROPAGATE_ENABLE 未开启，禁止真实清理", 400)
+    doc_id = str((body or {}).get("docId") or "").strip()
+    if not doc_id:
+        raise BizError("docId 必填", 400)
+    reason = str((body or {}).get("reason") or "manual_confirm").strip()
+    from app.services.governance_propagate_service import execute_propagate
+    executed = await execute_propagate(doc_id, reason)
+    await write_log(db, admin.username, "治理联动清理", f"{doc_id[:60]} reason={reason}")
+    return success({"docId": doc_id, "executed": executed}, "清理已执行")

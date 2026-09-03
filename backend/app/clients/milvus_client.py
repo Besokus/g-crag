@@ -131,6 +131,28 @@ def delete_by_doc(doc_id: str) -> None:
             Collection(name).delete(f'doc_id == "{doc_id}"')
 
 
+def count_by_doc(doc_id: str) -> dict[str, int]:
+    """按 doc_id 统计各文档 collection 命中实体数（治理 dry-run 候选报告用，不删除）。
+
+    任一 collection 统计失败按 0 计并 degraded——dry-run 只读，绝不阻塞主流程。
+    """
+    _connect()
+    out: dict[str, int] = {}
+    for name, _dim in document_collections():
+        try:
+            if not utility.has_collection(name):
+                out[name] = 0
+                continue
+            rows = Collection(name).query(expr=f'doc_id == "{doc_id}"',
+                                          output_fields=["count(*)"])
+            out[name] = int(rows[0]["count(*)"]) if rows else 0
+        except Exception as e:
+            from app.core.obs import degraded
+            degraded(f"milvus_count_by_doc_{name}", e)
+            out[name] = 0
+    return out
+
+
 def num_entities(collection_name: str | None = None) -> int:
     _connect()
     return Collection(collection_name or primary_document_collection()).num_entities

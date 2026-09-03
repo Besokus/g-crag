@@ -82,6 +82,22 @@ async def delete_by_doc(doc_id: str) -> None:
         await s.run("MATCH (:Entity)-[r:REL {doc_id: $doc_id}]->() DELETE r", doc_id=doc_id)
 
 
+async def count_by_doc(doc_id: str) -> int:
+    """统计某文档产生的边数（治理 dry-run 候选报告用，不删除）。失败返回 0。"""
+    try:
+        async with _get().session() as s:
+            result = await s.run(
+                "MATCH (:Entity)-[r:REL {doc_id: $doc_id}]->() RETURN count(r) AS c",
+                doc_id=doc_id,
+            )
+            record = await result.single()
+            return int(record["c"]) if record else 0
+    except Exception as e:
+        from app.core.obs import degraded
+        degraded("neo4j_count_by_doc", e)
+        return 0
+
+
 async def get_neighbors(entity: str = "", limit: int = 800) -> dict:
     """按实体模糊查邻居子图（nodes + links）。节点带 type/outDegree（3D 着色与大小用）。"""
     async with _get().session() as s:

@@ -1067,7 +1067,21 @@ venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/test_api.py -m "not i
 ```
 Expected: ruff 无新告警；测试全过（新增仅 `tests/test_eval_matrix.py`；`tests/redteam/` 为另一工作线的未跟踪目录，结果不计入本计划验收）。既有环境性失败不新增。
 
-- [ ] **Step 2: 检索维实跑（快速档）**
+- [x] **Step 2: 检索维实跑（快速档）**（2026-09-03 完成，7/7 变体；hyde/multi_query 经 --probe-timeout 3600 补跑；产物 reports/eval_matrix_20260903_020625、_065135、合并版 _merged）
+
+> **首跑实记（2026-09-03）**：检索维 5/7 变体成功（hyde/multi_query 因 1800s 探针超时
+> 被杀，已把 `--probe-timeout` 默认提到 3600s 后补跑）。首跑验证的价值正是抓缺陷：
+> 1. **评测口径缺陷（已修）**：`retrieval_eval_service` 打分用 expect 与 docName **精确相等**，
+>    golden expect 是内容关键词 → 全部 query 恒 0 分、矩阵与 retrieval_tune 数值失真；
+>    已对齐 `eval_retrieval.py` 口径（docName 子串 + relevant_docs 分级 + query 级召回），
+>    `tests/test_retrieval_eval_metrics.py` 重写锁死。
+> 2. **就绪探针缺陷（已修）**：`_login_probe` 断言登录 200，但空 body 登录被 FastAPI
+>    参数校验回 422 → 生成维后端全部被误判"未就绪"；已改为"HTTP 层有响应即就绪"。
+> 3. **编排健壮性**：变体后端子进程日志从 DEVNULL 改为报告目录内落盘；探针超时可配。
+> 4. **环境事实**：DASHSCOPE 账号欠费（chat 400 Arrearage），LLM 调用走 fallback 链
+>    （deepseek 空输出 → doubao 成功）；embedding 未受影响，检索维数值真实。
+> 5. golden 集 32→109 条（扩充实跑前合并），baseline recall 67.9%（旧 32 条集 93.8%
+>    是精选简单集；扩充集含多跳/对比/换皮问法，暴露真实召回缺口——这正是扩充的意义）。
 
 前置：`docker compose up -d` 数据服务健康 + `scripts/seed_demo.py` 建过库（golden 文档在 Milvus）。
 
@@ -1080,7 +1094,7 @@ venv/Scripts/python.exe scripts/eval_matrix.py --dims retrieval
 3. baseline recall 与 `python scripts/eval_retrieval.py --topk 5` 同量级（同一引擎两种入口，允许采样口径差异）；
 4. JSON 里 `env` 字段能溯源每个变体开启的 `_ENABLE` 键。
 
-- [ ] **Step 3: 生成维实跑（小样控成本）**
+- [x] **Step 3: 生成维实跑（小样控成本）**（2026-09-03 完成，9/9 变体 × limit 4；产物 reports/eval_matrix_20260903_084816；首跑暴露的就绪探针/代理/字段名/超时四缺陷已修，见 Step 2 实记与 docs/redteam 外的编排修复记录）
 
 前置：`.env` 有 `DEEPSEEK_API_KEY`（或改 `LLM_PROVIDER`）；宿主 venv 可起后端（MySQL/Milvus/Redis 走 compose 映射端口）。
 

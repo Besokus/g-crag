@@ -15,7 +15,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients import redis_client
-from app.config import settings
+from app.config import citation_cache_version, settings
 from app.core.obs import degraded
 from app.models.qa_cache import QaCache
 
@@ -49,10 +49,12 @@ async def warmup_hot_queries(
         try:
             data = json.loads(row.answer) if isinstance(row.answer, str) else row.answer
             # 用租户化 cache_key 回写 Redis；历史旧 key 不再参与租户问答命中。
+            # 回退拼 key 必须带 citation_cache_version 后缀，否则与读路径（_cache_key）永不匹配 → 预热死写。
             tenant = getattr(row, "tenant_id", None) or "default"
             model = row.model_type or "default"
             expected_prefix = f"qa:{tenant}:{model}:"
-            key = row.cache_key if (row.cache_key or "").startswith(expected_prefix) else f"{expected_prefix}{row.query_normalized}"
+            key = (row.cache_key if (row.cache_key or "").startswith(expected_prefix)
+                   else f"{expected_prefix}{row.query_normalized}:{citation_cache_version()}")
             ok = await redis_client.cache_set_json_safe(key, data, settings.QA_CACHE_TTL)
             if ok:
                 warmed += 1
@@ -84,7 +86,8 @@ async def warmup_from_file(filepath: str = "golden_qa.json") -> int:
             continue
         from app.services import term_service
         nq = term_service.normalize(query)
-        key = f"qa:default:default:{nq}"
+        # key 必须与 qa_service._cache_key 同构（含 citation_cache_version 后缀），否则预热永不命中
+        key = f"qa:default:default:{nq}:{citation_cache_version()}"
         val = {
             "answer": item.get("answer", ""),
             "retrievalSource": item.get("retrievalSource", []),

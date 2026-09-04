@@ -20,7 +20,7 @@ from app.core.obs import degraded
 from app.models.chunk import Chunk
 from app.models.document import Document
 from app.providers.factory import get_llm_provider
-from app.routing.routing_service import RouteDecision
+from app.routing.routing_service import RoutingDecision
 from app.services import embedding_service
 from app.services.term_service import normalize
 
@@ -124,7 +124,7 @@ async def generate_chunk_summary(db: AsyncSession, doc_id: str, chunks: list[dic
     try:
         texts_to_embed = [s.summary_text for s in summaries]
         if texts_to_embed:
-            embeds = await embedding_service.get_embeddings(texts_to_embed)
+            embeds = await embedding_service.embed_texts(texts_to_embed)
             for s, emb in zip(summaries, embeds):
                 s.embedding = emb
     except Exception as e:
@@ -171,7 +171,7 @@ def load_summaries(doc_id: str) -> list[dict]:
 
 async def retrieve_with_raptor(
     db: AsyncSession, query: str, topk: int = 5,
-    tenant: str = "default", routing_decision: RouteDecision | None = None,
+    tenant: str = "default", routing_decision: RoutingDecision | None = None,
 ) -> list[dict]:
     """多粒度检索：原文chunk + 段落摘要 + 文档摘要 → RRF 融合。
 
@@ -199,7 +199,7 @@ async def retrieve_with_raptor(
 
     # 2) query embedding
     try:
-        q_emb = (await embedding_service.get_embeddings([query]))[0]
+        q_emb = await embedding_service.embed_query(query)
     except Exception as e:
         degraded("raptor_query_embed", e)
         return []

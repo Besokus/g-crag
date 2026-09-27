@@ -223,6 +223,9 @@ async def _dense_dual(dense_q: str, cand: int, ef: int) -> tuple[list[dict], lis
     if settings.EMB_PROVIDER == "bge":
         # 纯本地部署不访问云 collection，也不重复计算同一份 BGE query 向量。
         return [], await _path("bge", settings.MILVUS_COLLECTION_BGE, "bge")
+    if not settings.LOCAL_EMBEDDING_ENABLE:
+        # 只用云端（ADR 0006）：不查 bge collection，也不加载本地模型
+        return await _path(settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"), []
     return await asyncio.gather(
         _path(settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"),
         _path("bge", settings.MILVUS_COLLECTION_BGE, "bge"),

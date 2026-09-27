@@ -1,10 +1,18 @@
 """_dense_dual 云路降级可见性单测：云端 embedding/检索异常时打 trace mark，
 供 qa_service 透出 retrievalDegraded 给前端（不依赖真实 Milvus/DashScope）。"""
 import asyncio
+
+import pytest
 from unittest.mock import AsyncMock, patch
 
 from app.core.qa_trace import TraceCollector
 from app.services import retrieval_service
+
+
+@pytest.fixture(autouse=True)
+def _local_embedding_on(monkeypatch):
+    """本文件验证原版 bge 双路行为；G-CRAG 默认关闭 bge（见 test_cloud_only_embedding.py）。"""
+    monkeypatch.setattr(retrieval_service.settings, "LOCAL_EMBEDDING_ENABLE", True)
 
 
 def test_cloud_failure_marks_trace():

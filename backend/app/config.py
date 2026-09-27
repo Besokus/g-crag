@@ -170,7 +170,9 @@ class Settings(BaseSettings):
     QUERY_REWRITE_ENABLE: bool = False  # LLM 改写 query（增延迟，默认关）
     BGE_MODEL: str = "BAAI/bge-small-zh-v1.5"   # 可换 bge-large-zh-v1.5(1024维,效果更好)
     BGE_DIM: int = 512
-    DOC_SIZE_THRESHOLD: int = 5000   # 文档总字数超此值 → 走云 embedding；否则本地 bge
+    DOC_SIZE_THRESHOLD: int = 5000   # 文档总字数超此值 → 走云 embedding；否则本地 bge（仅 LOCAL_EMBEDDING_ENABLE=True 时生效）
+    # G-CRAG 只用云端模型（ADR 0006）：关=不预热 bge、入库全走云 embedding、检索只查云 collection；开=原版 bge 双路
+    LOCAL_EMBEDDING_ENABLE: bool = False
     MILVUS_COLLECTION_BGE: str = "grid_chunks_bge"   # 本地 bge 向量库(独立 collection, 向量空间不混)
 
     # ---------- 分块 ----------

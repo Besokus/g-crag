@@ -323,7 +323,7 @@ def _embedding_target(total_chars: int) -> tuple[str, str, str]:
     """返回 (provider, collection, route)，保证本地模式不触碰云向量空间。"""
     if settings.EMB_PROVIDER == "bge":
         return "bge", settings.MILVUS_COLLECTION_BGE, "bge"
-    if total_chars > settings.DOC_SIZE_THRESHOLD:
+    if not settings.LOCAL_EMBEDDING_ENABLE or total_chars > settings.DOC_SIZE_THRESHOLD:
         return settings.EMB_PROVIDER, settings.MILVUS_COLLECTION, "cloud"
     return "bge", settings.MILVUS_COLLECTION_BGE, "bge"
 

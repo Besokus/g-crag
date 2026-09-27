@@ -356,23 +356,37 @@ async def build(src: Path, out: Path, *, embed, seed: int, per_type: int, n_unan
 
 # ---------------- import ----------------
 
-async def import_corpus(out: Path, *, doc_type: str, batch: int) -> dict:
+async def import_corpus(out: Path, *, doc_type: str, batch: int, concurrency: int) -> dict:
     """语料入库：服务层直接调用（不受接口限流），导入期间关闭自动建图，完成后重建 BM25。
 
     幂等：按文件名跳过已完成向量化的文档；已上传但未完成的继续解析/向量化。
     建图另用 scripts/rebuild_kg.py（受控并发 + 断点续跑）。
+    批量优化（仅本进程）：Milvus 插入不逐篇 flush（原实现每篇 flush 一次，约 5 秒/篇且产生大量小段），
+    全部完成后统一 flush；向量化按 concurrency 并发。
     """
+    import asyncio
     import io
 
     from sqlalchemy import select
     from starlette.datastructures import UploadFile
 
+    from pymilvus import Collection
+
+    from app.clients import milvus_client
     from app.config import settings
     from app.db.session import AsyncSessionLocal
     from app.models.document import Document
     from app.services import bm25_service, document_service
 
     settings.KG_AUTO_EXTRACT_ENABLE = False   # 只影响本进程：不为每篇文档起后台抽取任务
+
+    def _insert_no_flush(collection_name, vectors, texts, doc_ids, doc_names, chunk_idxs) -> int:
+        milvus_client._connect()
+        pks = [f"{doc_ids[i]}_{chunk_idxs[i]}" for i in range(len(vectors))]
+        Collection(collection_name).insert([pks, list(vectors), list(texts), list(doc_ids),
+                                            list(doc_names), list(chunk_idxs)])
+        return len(vectors)
+    milvus_client.insert_chunks = _insert_no_flush
     files = sorted((out / "corpus").glob("*.txt"))
     async with AsyncSessionLocal() as db:
         existing = {d.doc_name: d for d in (await db.execute(select(Document))).scalars().all()}
@@ -399,11 +413,24 @@ async def import_corpus(out: Path, *, doc_type: str, batch: int) -> dict:
         async with AsyncSessionLocal() as db:
             await document_service.parse_documents(db, pending_parse[i:i + 20])
     fails: list[str] = []
-    for i in range(0, len(pending_vec), 20):
-        async with AsyncSessionLocal() as db:
-            r = await document_service.vectorize_documents(db, pending_vec[i:i + 20])
-        fails.extend(r["failList"])
-        print(f"[import] 已向量化 {min(i + 20, len(pending_vec))}/{len(pending_vec)}", flush=True)
+    sem = asyncio.Semaphore(max(1, concurrency))
+    done = 0
+
+    async def _vec(did: str) -> None:
+        nonlocal done
+        async with sem:
+            try:
+                async with AsyncSessionLocal() as db:
+                    await document_service.vectorize_document(db, did)
+            except Exception as e:
+                fails.append(f"{did}({type(e).__name__}: {e})"[:300])
+            done += 1
+            if done % 50 == 0 or done == len(pending_vec):
+                print(f"[import] 已向量化 {done}/{len(pending_vec)}", flush=True)
+    await asyncio.gather(*(_vec(d) for d in pending_vec))
+    milvus_client._connect()   # 没有待向量化文档时本进程尚未连接 Milvus
+    for name, _dim in milvus_client.document_collections():
+        Collection(name).flush()
     async with AsyncSessionLocal() as db:
         n_bm25 = await bm25_service.rebuild(db)
     return {"corpus": len(files), "uploaded": len(todo_upload), "vectorized": len(pending_vec) - len(fails),
@@ -428,7 +455,8 @@ def main() -> int:
     im = sub.add_parser("import", help="语料入库（上传→解析→向量化→重建 BM25）")
     im.add_argument("--out", type=Path, default=OUT_DEFAULT)
     im.add_argument("--doc-type", default="新闻")
-    im.add_argument("--batch", type=int, default=5)
+    im.add_argument("--batch", type=int, default=5, help="每次上传的文件数（服务层上限 5）")
+    im.add_argument("--concurrency", type=int, default=4, help="向量化并发数")
     args = ap.parse_args()
 
     if args.cmd == "build":
@@ -447,7 +475,8 @@ def main() -> int:
     if args.cmd == "import":
         import asyncio
         sys.path.insert(0, "/app")
-        rep = asyncio.run(import_corpus(args.out, doc_type=args.doc_type, batch=args.batch))
+        rep = asyncio.run(import_corpus(args.out, doc_type=args.doc_type, batch=args.batch,
+                                        concurrency=args.concurrency))
         print(("IMPORT_OK " if not rep["vectorizeFailed"] else "IMPORT_PARTIAL ") + json.dumps(rep, ensure_ascii=False))
         return 0 if not rep["vectorizeFailed"] else 1
     return 2

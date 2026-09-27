@@ -1,8 +1,12 @@
 """Neo4j 异步驱动封装（知识图谱：设备-故障-处置 多跳推理）。
 
-节点 :Entity {name}；统一有向关系 :REL {type, doc_id, doc_name}（type 承载语义：
-发生/表现为/处置方法/属于…）。固定关系类型保证多跳 [:REL*1..N] 通用查询，
+节点 :Entity {name, type, degree}；统一有向关系 :REL {type, doc_id, doc_name, doc_ids, chunk_ids}
+（type 承载语义：发生/表现为/处置方法/属于…）。固定关系类型保证多跳 [:REL*1..N] 通用查询，
 避免 Cypher 关系类型不能参数化、中文关系类型不优雅的问题。
+
+G-CRAG（《设计文档》§16.7）：同一 (s, r, o) 边可来自多篇文档、多个 chunk，来源记在
+doc_ids / chunk_ids 列表（chunk_ids 为空的边不参与图谱定位证据）；doc_id / doc_name 保留首个来源，
+兼容旧读取代码。实体 type 来自领域包 schema；degree 为无向度数，用于枢纽实体判断。
 """
 from neo4j import AsyncGraphDatabase
 
@@ -52,34 +56,82 @@ async def ensure_constraint():
         await s.run("CREATE INDEX entity_name IF NOT EXISTS FOR (n:Entity) ON (n.name)")
 
 
+_UPSERT_CYPHER = """
+UNWIND $rows AS t
+MERGE (a:Entity {name: t.s})
+  ON CREATE SET a.type = t.s_type
+  ON MATCH SET a.type = CASE WHEN coalesce(a.type, '') = '' THEN t.s_type ELSE a.type END
+MERGE (b:Entity {name: t.o})
+  ON CREATE SET b.type = t.o_type
+  ON MATCH SET b.type = CASE WHEN coalesce(b.type, '') = '' THEN t.o_type ELSE b.type END
+MERGE (a)-[r:REL {type: t.r}]->(b)
+  ON CREATE SET r.doc_id = $doc_id, r.doc_name = $doc_name,
+                r.doc_ids = [$doc_id],
+                r.chunk_ids = CASE WHEN t.chunk_id = '' THEN [] ELSE [t.chunk_id] END
+  ON MATCH SET  r.doc_ids = CASE WHEN $doc_id IN coalesce(r.doc_ids, [r.doc_id])
+                                 THEN coalesce(r.doc_ids, [r.doc_id])
+                                 ELSE coalesce(r.doc_ids, [r.doc_id]) + $doc_id END,
+                r.chunk_ids = CASE WHEN t.chunk_id = '' OR t.chunk_id IN coalesce(r.chunk_ids, [])
+                                   THEN coalesce(r.chunk_ids, [])
+                                   ELSE coalesce(r.chunk_ids, []) + t.chunk_id END
+"""
+
+
 async def upsert_triples(triples: list[dict], doc_id: str, doc_name: str) -> int:
-    """批量 MERGE 写入三元组（幂等，重复抽取不产生重复边）。同时落 Entity.type 供 3D 着色。"""
+    """批量 MERGE 写入三元组（幂等，重复抽取不产生重复边），维护来源列表并刷新端点度数。"""
     if not triples:
         return 0
+    rows = [{"s": t["s"], "r": t["r"], "o": t["o"],
+             "s_type": t.get("s_type") or "", "o_type": t.get("o_type") or "",
+             "chunk_id": t.get("chunk_id") or ""} for t in triples]
     async with _get().session() as s:
-        for t in triples:
-            await s.run(
-                """
-                MERGE (a:Entity {name: $s})
-                  ON CREATE SET a.type = $s_type
-                  ON MATCH SET a.type = coalesce(a.type, $s_type)
-                MERGE (b:Entity {name: $o})
-                  ON CREATE SET b.type = $o_type
-                  ON MATCH SET b.type = coalesce(b.type, $o_type)
-                MERGE (a)-[r:REL {type: $r}]->(b)
-                  ON CREATE SET r.doc_id = $doc_id, r.doc_name = $doc_name
-                """,
-                s=t["s"], r=t["r"], o=t["o"],
-                s_type=t.get("s_type", "Equipment"), o_type=t.get("o_type", "Equipment"),
-                doc_id=doc_id, doc_name=doc_name,
-            )
+        for i in range(0, len(rows), 500):
+            await s.run(_UPSERT_CYPHER, rows=rows[i:i + 500], doc_id=doc_id, doc_name=doc_name)
+    await refresh_degree({n for t in rows for n in (t["s"], t["o"])})
     return len(triples)
 
 
-async def delete_by_doc(doc_id: str) -> None:
-    """删除某文档产生的边（重新抽取前清旧）。"""
+async def refresh_degree(names: set[str] | None = None) -> None:
+    """刷新实体无向度数 n.degree。names=None 刷新全图（建图完成后）；否则只刷新给定实体
+    （新增/删除边只会改变其端点的度数）。"""
     async with _get().session() as s:
-        await s.run("MATCH (:Entity)-[r:REL {doc_id: $doc_id}]->() DELETE r", doc_id=doc_id)
+        if names is None:
+            await s.run("MATCH (n:Entity) SET n.degree = COUNT { (n)--() }")
+            return
+        await s.run(
+            "UNWIND $names AS nm MATCH (n:Entity {name: nm}) SET n.degree = COUNT { (n)--() }",
+            names=list(names),
+        )
+
+
+async def delete_by_doc(doc_id: str, chunk_ids: list[str] | None = None) -> None:
+    """文档删除联动：从边的来源列表中移除该文档（及其 chunk），来源清空的边才删除。
+
+    原实现按首个来源 r.doc_id 整边删除，会误删其他文档也支撑的边（《设计文档》§17）。
+    删除后刷新受影响端点的度数；来源已清空且孤立的实体节点一并删除。
+    """
+    async with _get().session() as s:
+        result = await s.run(
+            """
+            MATCH (a:Entity)-[r:REL]->(b:Entity)
+            WHERE $doc_id IN coalesce(r.doc_ids, [r.doc_id])
+            WITH a, b, r, [d IN coalesce(r.doc_ids, [r.doc_id]) WHERE d <> $doc_id] AS docs
+            SET r.doc_ids = docs,
+                r.chunk_ids = [c IN coalesce(r.chunk_ids, []) WHERE NOT c IN $chunk_ids],
+                r.doc_id = CASE WHEN r.doc_id = $doc_id THEN coalesce(head(docs), '') ELSE r.doc_id END
+            WITH a, b, r, docs
+            FOREACH (_ IN CASE WHEN size(docs) = 0 THEN [1] ELSE [] END | DELETE r)
+            RETURN collect(DISTINCT a.name) + collect(DISTINCT b.name) AS touched
+            """,
+            doc_id=doc_id, chunk_ids=list(chunk_ids or []),
+        )
+        rec = await result.single()
+        touched = set(rec["touched"]) if rec and rec["touched"] else set()
+        if touched:
+            await s.run("UNWIND $names AS nm MATCH (n:Entity {name: nm}) WHERE NOT (n)--() DELETE n",
+                        names=list(touched))
+    if touched:
+        await refresh_degree(touched)
 
 
 async def count_rel_edges() -> int:
@@ -95,7 +147,8 @@ async def count_by_doc(doc_id: str) -> int:
     try:
         async with _get().session() as s:
             result = await s.run(
-                "MATCH (:Entity)-[r:REL {doc_id: $doc_id}]->() RETURN count(r) AS c",
+                "MATCH (:Entity)-[r:REL]->() WHERE $doc_id IN coalesce(r.doc_ids, [r.doc_id]) "
+                "RETURN count(r) AS c",
                 doc_id=doc_id,
             )
             record = await result.single()

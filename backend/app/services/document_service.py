@@ -412,11 +412,12 @@ async def delete_document(db: AsyncSession, doc_id: str,
         milvus_client.delete_by_doc(doc_id)
     except Exception as e:
         degraded("milvus_delete", e)
-    # 联动删知识图谱：MySQL 三元组 + Neo4j 边
+    # 联动删知识图谱：MySQL 三元组 + Neo4j 边（只移除本文档的来源，其他文档支撑的边保留）
     await db.execute(delete(KgTriple).where(KgTriple.doc_id == doc_id))
     try:
         from app.clients import neo4j_client
-        await neo4j_client.delete_by_doc(doc_id)
+        chunk_ids = (await db.execute(select(Chunk.id).where(Chunk.doc_id == doc_id))).scalars().all()
+        await neo4j_client.delete_by_doc(doc_id, list(chunk_ids))
     except Exception as e:
         degraded("neo4j_delete", e)
     await db.execute(delete(Chunk).where(Chunk.doc_id == doc_id))

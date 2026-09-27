@@ -234,12 +234,8 @@ async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None 
                         s_raw=tp["s_raw"], o_raw=tp["o_raw"], provenance=tp["provenance"]))
     await db.commit()
 
-    # 写 Neo4j（MERGE 幂等，仅新增边，不去旧；同时推断并落 Entity.type 供 3D 着色）
+    # 写 Neo4j（MERGE 幂等，仅新增边，不去旧；来源 doc_ids/chunk_ids 列表、实体类型取领域包 schema）
     if new_triples:
-        from app.clients.neo4j_client import _infer_type
-        for tp in new_triples:
-            tp["s_type"] = tp.get("s_type") or _infer_type(tp["s"], tp["r"], as_subject=True)
-            tp["o_type"] = tp.get("o_type") or _infer_type(tp["o"], tp["r"], as_subject=False)
         try:
             await neo4j_client.upsert_triples(new_triples, doc_id, doc.doc_name)
         except Exception as e:

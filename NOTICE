@@ -1,0 +1,36 @@
+G-CRAG —— 基于知识图谱与纠错机制的检索增强智能问答系统
+========================================================
+
+本项目是以下作品的衍生作品（adaptation）：
+
+  原作品：电网运维 RAG 智能问答系统（grid-qa）
+  原作者：zhyese（及 git 历史中记录的其他贡献者）
+  原仓库：https://github.com/zhyese/grid-qa
+  许可证：Creative Commons Attribution-NonCommercial 4.0 International（CC BY-NC 4.0）
+          https://creativecommons.org/licenses/by-nc/4.0/legalcode
+          中文：https://creativecommons.org/licenses/by-nc/4.0/legalcode.zh-Hans
+
+依据原作品许可证，本衍生作品同样以 CC BY-NC 4.0 发布（见 LICENSE），
+禁止任何商业使用。原作者未对本衍生作品提供任何背书。
+
+本项目保留了原作品的完整 git 提交历史，原作者与各贡献者的署名以提交记录为准。
+
+对原作品所做的修改
+------------------
+（随开发进度更新；设计依据见 docs/adr/ 与 docs/g-crag/）
+
+- 定位调整：由电网运维专用问答系统改造为通用知识图谱问答系统，
+  领域知识抽离为可插拔的"领域包"（domain_packs/）。
+- 新增 G-CRAG 纠错：检索分级为 ambiguous/incorrect 时，由知识图谱多跳遍历
+  定位证据（图谱定位证据），再以原有的 LLM 改写重检索兜底。
+- 知识图谱三元组新增出处 chunk 关联（chunk_id）及出处校验。
+- 修复原有纠错的分级信号缺陷：rerank 实际调用失败时，分级读取的是配置开关而非
+  本次调用结果，导致误判。
+- 新增实体链接策略链（词典匹配 + 实体向量召回）。
+- LLM provider 合并为通用 OpenAI 兼容实现。
+- 裁剪电网业务功能、Agent 与 MCP、知识治理与数据飞轮模块及相关服务。
+- 新增基于 CRUD-RAG 的对照评测与 GcragCompare 对照页。
+- 部署编排裁剪为 9 个服务；MinIO 镜像改用 pgsty/minio；构建代理、HF 缓存、
+  Neo4j 宿主端口改为可配置；修复定时备份卸载在线 collection 的缺陷。
+
+第三方组件（Milvus、Neo4j、各云端模型 API 等）遵循其各自的许可证与服务条款。

@@ -47,6 +47,17 @@ from app.models.doc_collab import (  # noqa: F401  文档协作批注+电子签�
 from app.models.drill import DrillRun, DrillScenario  # noqa: F401  （N5）故障演练沙箱
 from app.models.notification import Notification  # noqa: F401  通知中心（缺此行→表不建→notify 撞 Table doesn't exist）
 
+# 兜底：自动 import app/models 下全部模块，保证所有模型表都注册到 Base.metadata。
+# 原先依赖上面的手写列表 + 启动时其他模块顺带 import；G-CRAG 裁剪后台任务后，evidence_gap 等
+# 只被延迟 import 的模型在全新部署时不会建表（2026-09-27 发现）。
+import importlib as _importlib  # noqa: E402
+import pkgutil as _pkgutil  # noqa: E402
+
+import app.models as _models_pkg  # noqa: E402
+
+for _m in _pkgutil.iter_modules(_models_pkg.__path__):
+    _importlib.import_module(f"app.models.{_m.name}")
+
 
 # 现有表加列的幂等迁移（create_all 只建不 ALTER；老库靠这里补列，列已存在则忽略 1060 错误）。
 # 格式：(表, 列, 类型定义)。新增结构感知分块 / 反馈闭环 / 设备台账字段。

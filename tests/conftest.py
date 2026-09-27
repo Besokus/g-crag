@@ -39,6 +39,28 @@ def _reset_quality_bus_subscribers():
         pass
 
 
+def _use_pack(monkeypatch, tmp_path, name):
+    from app.core import domain_pack
+    from app.services import term_service
+
+    monkeypatch.setattr(domain_pack.settings, "DOMAIN_PACK", name)
+    monkeypatch.setattr(term_service, "_BACKEND_ROOT", tmp_path)
+    domain_pack.get_pack.cache_clear()
+    term_service._load_terms.cache_clear()
+    return domain_pack.get_pack()
+
+
+@pytest.fixture
+def general_pack(monkeypatch, tmp_path):
+    """显式使用通用领域包（不依赖部署 .env 里的 DOMAIN_PACK）。"""
+    from app.core import domain_pack
+    from app.services import term_service
+
+    yield _use_pack(monkeypatch, tmp_path, "general")
+    domain_pack.get_pack.cache_clear()
+    term_service._load_terms.cache_clear()
+
+
 @pytest.fixture
 def grid_pack(monkeypatch, tmp_path):
     """切换到电网领域包（用例依赖电网别名/关系时用）；词表编辑写到临时目录。"""

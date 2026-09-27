@@ -10,6 +10,13 @@ from app.services import kg_service as svc
 from app.services.kg_normalize import canonical_entity, canonical_relation
 
 
+@pytest.fixture(autouse=True)
+def _default_general(request, monkeypatch, tmp_path):
+    """默认按通用包执行；显式要求 grid_pack 的用例由该夹具切换。"""
+    if "grid_pack" not in request.fixturenames:
+        request.getfixturevalue("general_pack")
+
+
 def _tp(s, r, o, chunk_no, batch, **kw):
     return {"s": s, "r": r, "o": o, "chunk_no": chunk_no, "_batch": batch, **kw}
 

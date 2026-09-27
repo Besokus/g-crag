@@ -3,6 +3,7 @@
 图查询与多跳推理走 Neo4j（影响链/枢纽分析）；Neo4j 未启动时 get_graph 回退 MySQL 一跳查询，
 保证图谱页不崩。统计仍用 MySQL 三元组表。
 """
+import contextlib
 import json
 import re
 
@@ -178,11 +179,12 @@ def _normalize_triples(triples: list[dict]) -> list[dict]:
     return out
 
 
-async def _extract_from_chunks(provider, chunks: list) -> list[dict]:
+async def _extract_from_chunks(provider, chunks: list, stats: dict | None = None) -> list[dict]:
     """分批调 LLM 抽取（领域包 schema 约束 prompt，批内编号 [1]…）→ 解析为原始三元组。单批失败降级。
 
     chunks：(chunk_id, text) 列表；也接受纯文本列表（无 chunk_id，出处校验一律置空）。
     每条原始三元组附带 `_batch`（该批的 (chunk_id, text)），供 _normalize_triples 做出处校验。
+    stats：可选，累计 {"batches": 总批数, "failed_batches": 失败批数}（重建脚本据此判断是否需重试）。
     """
     from app.core.domain_pack import get_pack
     pack = get_pack()
@@ -190,6 +192,8 @@ async def _extract_from_chunks(provider, chunks: list) -> list[dict]:
     all_triples: list[dict] = []
     for i in range(0, len(pairs), _BATCH):
         batch = pairs[i:i + _BATCH]
+        if stats is not None:
+            stats["batches"] = stats.get("batches", 0) + 1
         text = "\n\n".join(f"[{n}] {t}" for n, (_cid, t) in enumerate(batch, start=1))
         try:
             ans = await provider.chat(
@@ -200,12 +204,19 @@ async def _extract_from_chunks(provider, chunks: list) -> list[dict]:
                 tp["_batch"] = batch
                 all_triples.append(tp)
         except Exception as e:
+            if stats is not None:
+                stats["failed_batches"] = stats.get("failed_batches", 0) + 1
             degraded("kg_extract_batch", e)
     return all_triples
 
 
-async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None = None) -> dict:
-    """对某文档分块批量抽取三元组，增量写 MySQL + Neo4j（不清旧，仅追加新条目）。"""
+async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None = None,
+                          *, write_lock: "asyncio.Lock | None" = None) -> dict:
+    """对某文档分块批量抽取三元组，增量写 MySQL + Neo4j（不清旧，仅追加新条目）。
+
+    write_lock：并发建图时传入同一把锁，LLM 抽取并发、写库阶段串行（避免 Neo4j 并发 MERGE
+    同一实体节点时死锁）。单次调用不需要。
+    """
     doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
     if not doc:
         raise BizError("文档不存在", 404)
@@ -216,9 +227,28 @@ async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None 
         raise BizError("文档尚未解析，请先解析", 400)
 
     provider = get_llm_provider(model_type)
-    raw = await _extract_from_chunks(provider, [(c.id, c.content) for c in rows])
+    stats: dict = {}
+    raw = await _extract_from_chunks(provider, [(c.id, c.content) for c in rows], stats)
     triples = _normalize_triples(raw)
+    async with (write_lock or contextlib.nullcontext()):
+        new_triples, neo4j_ok = await _save_triples(db, doc, triples)
 
+    try:
+        from app.core import metrics
+        total = (await db.execute(select(func.count()).select_from(KgTriple))).scalar() or 0
+        metrics.KG_EXTRACT.inc()
+        metrics.KB_TRIPLES.set(total)
+    except Exception:
+        pass
+    prov = {k: sum(1 for t in triples if t["provenance"] == k) for k in ("verified", "rematched", "none")}
+    return {"tripleCount": len(triples), "newCount": len(new_triples), "provenance": prov,
+            "neo4jOk": neo4j_ok, "failedBatches": stats.get("failed_batches", 0),
+            "docName": doc.doc_name, "sample": triples[:30]}
+
+
+async def _save_triples(db: AsyncSession, doc: Document, triples: list[dict]) -> tuple[list[dict], bool]:
+    """写库阶段：去重后追加到 MySQL，再 MERGE 到 Neo4j；返回 (实际新增的三元组, Neo4j 是否写入成功)。"""
+    doc_id = doc.id
     # ★ 增量追加：查已有三元组，只插入新条目（不清旧）；去重键含出处 chunk（§16.7）
     existing = (await db.execute(
         select(KgTriple.subject, KgTriple.relation, KgTriple.object, KgTriple.chunk_id)
@@ -235,22 +265,14 @@ async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None 
     await db.commit()
 
     # 写 Neo4j（MERGE 幂等，仅新增边，不去旧；来源 doc_ids/chunk_ids 列表、实体类型取领域包 schema）
+    neo4j_ok = True
     if new_triples:
         try:
             await neo4j_client.upsert_triples(new_triples, doc_id, doc.doc_name)
         except Exception as e:
+            neo4j_ok = False
             degraded("kg_neo4j_write", e)
-
-    try:
-        from app.core import metrics
-        total = (await db.execute(select(func.count()).select_from(KgTriple))).scalar() or 0
-        metrics.KG_EXTRACT.inc()
-        metrics.KB_TRIPLES.set(total)
-    except Exception:
-        pass
-    prov = {k: sum(1 for t in triples if t["provenance"] == k) for k in ("verified", "rematched", "none")}
-    return {"tripleCount": len(triples), "newCount": len(new_triples), "provenance": prov,
-            "docName": doc.doc_name, "sample": triples[:30]}
+    return new_triples, neo4j_ok
 
 
 async def _get_graph_mysql(

@@ -76,15 +76,6 @@ async def lifespan(app: FastAPI):
 
     await _wait_for_startup_dependencies()
 
-    # Nacos 配置覆盖（若 CONFIG_SOURCE=nacos，在连接任何服务前拉取覆盖 .env）
-    try:
-        from app.clients.nacos_client import apply_overrides
-        n = await apply_overrides()
-        if n:
-            print(f"[nacos] 已从配置中心覆盖 {n} 个配置项")
-    except Exception as e:
-        print(f"[nacos] 配置覆盖跳过：{e}")
-
     from app.db.init_db import init_db
 
     await init_db()  # 建表 + 初始管理员
@@ -102,15 +93,6 @@ async def lifespan(app: FastAPI):
         await _retry_startup_component("Milvus", ensure_collections, threaded=True)
     except Exception as e:
         degraded("milvus_ensure_collections", e, "Milvus 未启动？跳过 collection 初始化")
-
-    # N1：确保记忆 collection（memory_collection）存在
-    if getattr(settings, "MEMORY_ENABLE", True):
-        try:
-            from app.clients.milvus_client import ensure_memory_collection
-            await _retry_startup_component("Milvus memory", ensure_memory_collection, threaded=True)
-            print("[memory] Milvus memory_collection 已就绪")
-        except Exception as e:
-            degraded("milvus_memory_collection", e, "记忆 collection 初始化跳过")
 
     # 预热本地 bge 模型：首次加载需从 HF 下载(经代理 ~80s)，懒加载会让后端启动后
     # 首个问答触发该延迟(用户体感“同一问题偶尔 100s”)。提前在启动期加载进内存，
@@ -136,21 +118,6 @@ async def lifespan(app: FastAPI):
         print(f"[otel] 已初始化，采样率={settings.OTEL_SAMPLE_RATE}，端点={settings.OTEL_ENDPOINT}")
     except Exception as e:
         print(f"[otel] 初始化跳过：{e}")
-
-    # N2：加载 MCP registry（发现外部 MCP server → 注册进 ToolRegistry）
-    try:
-        from app.mcp.registry import mcp_registry
-        await mcp_registry.load_from_config()
-        n = mcp_registry.server_count()
-        if n:
-            print(f"[mcp] 已加载 {n} 个外部 MCP server")
-            # 发现外部 MCP 工具 → 注册进 ToolRegistry
-            from app.services.agent_tools import register_mcp_tools
-            tool_count = await register_mcp_tools()
-            if tool_count:
-                print(f"[mcp] 已注册 {tool_count} 个外部 MCP 工具")
-    except Exception as e:
-        print(f"[mcp] registry 加载跳过：{e}")
 
     # 监控：预注册业务指标 0 值序列(让事件驱动指标事件发生前就“在场”)
     try:
@@ -207,42 +174,6 @@ async def lifespan(app: FastAPI):
                     print(f"[cache] golden 预热 {m} 条")
         except Exception as e:
             print(f"[cache] 预热跳过：{e}")
-    # 操作日志自动归档：每日把超保留期的日志导出 jsonl 再删（BRD §4.5.2）
-    if getattr(settings, "LOG_ARCHIVE_ENABLE", True):
-        try:
-            from app.services.log_archive_service import archive_loop
-            app.state.log_archive_task = asyncio.create_task(archive_loop())
-            print("[log-archive] 日志归档后台任务已启动")
-        except Exception as e:
-            print(f"[log-archive] 启动跳过：{e}")
-    # 三合一全量定时备份：每 3h（MySQL+Redis+Milvus）
-    _backup_hours = float(getattr(settings, "BACKUP_CRON_HOURS", 3))
-    if _backup_hours > 0:
-        try:
-            from app.services.backup_service import backup_all_loop
-            app.state.backup_all_task = asyncio.create_task(backup_all_loop(_backup_hours))
-            print(f"[backup] 定时全量备份后台任务已启动（每 {_backup_hours}h）")
-        except Exception as e:
-            print(f"[backup] 定时备份启动跳过：{e}")
-    # 所有 provider、MCP 工具和运行时配置就绪后再消费积压任务，避免启动窗口内
-    # 的主动诊断拿到不完整工具集。任务/事件先落 MySQL，进程重启后可恢复。
-    if getattr(settings, "TASK_WORKERS_ENABLE", True):
-        try:
-            from app.tasks.lifecycle import start_background_workers
-
-            await start_background_workers(app)
-            print("[task-center] realtime/default/low worker 与事件 dispatcher 已启动")
-        except Exception as e:
-            degraded("task_center_start", e, "持久化任务 worker 启动失败")
-    # 知识自进化定时扫描（周期 KNOWLEDGE_EVOLUTION_CRON_HOURS，<=0 关闭）
-    try:
-        from app.services.knowledge_evolution_service import evolution_cron_loop
-        from app.config import settings as _settings
-        if float(getattr(_settings, "KNOWLEDGE_EVOLUTION_CRON_HOURS", 24)) > 0:
-            app.state.evolution_cron_task = asyncio.create_task(evolution_cron_loop("default"))
-            print("[evolution] 知识自进化定时扫描后台任务已启动")
-    except Exception as e:
-        print(f"[evolution] 定时扫描启动跳过：{e}")
     # 证据补全定时深度补全+落库（周期 EVIDENCE_GAP_DEEP_INTERVAL 秒，<=0 关闭）
     try:
         from app.services.evidence_gap_service import deep_cron_loop
@@ -252,26 +183,6 @@ async def lifespan(app: FastAPI):
             print("[evidence-gap] 证据补全定时深度补全已启动")
     except Exception as e:
         print(f"[evidence-gap] 定时补全启动跳过：{e}")
-    # 坏case修复率定时聚合（周期 FIX_RATE_CRON_MINUTES，FIX_RATE_ENABLE=False 或<=0 关闭）
-    try:
-        from app.services.feedback_fix_rate_service import fix_rate_cron_loop
-        from app.config import settings as _settings
-        if bool(getattr(_settings, "FIX_RATE_ENABLE", True)) and float(getattr(_settings, "FIX_RATE_CRON_MINUTES", 30)) > 0:
-            app.state.fix_rate_cron_task = asyncio.create_task(fix_rate_cron_loop("default"))
-            print("[fix-rate] 坏case修复率定时聚合后台任务已启动")
-    except Exception as e:
-        print(f"[fix-rate] 修复率定时聚合启动跳过：{e}")
-    # N1 记忆衰减+软删物理删除 周期 loop（decay() 需 cron 触发；MEMORY_DECAY_CRON_HOURS<=0 关闭）
-    try:
-        from app.services.agent_memory_service import decay_loop
-        from app.config import settings as _settings
-        if float(getattr(_settings, "MEMORY_DECAY_CRON_HOURS", 24)) > 0:
-            app.state.memory_decay_task = asyncio.create_task(
-                decay_loop(float(_settings.MEMORY_DECAY_CRON_HOURS))
-            )
-            print(f"[memory] 记忆衰减后台任务已启动（每 {_settings.MEMORY_DECAY_CRON_HOURS}h）")
-    except Exception as e:
-        print(f"[memory] 记忆衰减 loop 启动跳过：{e}")
     # KG 每日对账（MySQL 镜像 vs Neo4j 边数；KG_RECONCILE_CRON_HOURS<=0 关闭）
     try:
         from app.services.kg_reconcile_service import reconcile_loop
@@ -283,26 +194,6 @@ async def lifespan(app: FastAPI):
             print(f"[kg-reconcile] KG 对账后台任务已启动（每 {_settings.KG_RECONCILE_CRON_HOURS}h）")
     except Exception as e:
         print(f"[kg-reconcile] 对账 loop 启动跳过：{e}")
-    # N7 报告定时自动生成（OPS_REPORT_CRON_HOURS<=0 关闭；完成通知 admin+editor）
-    try:
-        from app.config import settings as _settings
-        _rc = float(getattr(_settings, "OPS_REPORT_CRON_HOURS", 0))
-        if getattr(_settings, "OPS_REPORT_ENABLE", False) and _rc > 0:
-            from app.services.ops_report_service import auto_report_loop
-            app.state.ops_report_cron_task = asyncio.create_task(auto_report_loop(_rc))
-            print(f"[ops-report] 定时报告后台任务已启动（每 {_rc}h）")
-    except Exception as e:
-        print(f"[ops-report] 定时报告 loop 启动跳过：{e}")
-    # N5 演练超时结算 sweep（无人轮询的 running 演练后台兜底 finish；<=0 关闭）
-    try:
-        from app.config import settings as _settings
-        _si = float(getattr(_settings, "DRILL_SWEEP_INTERVAL", 300))
-        if getattr(_settings, "DRILL_SANDBOX_ENABLE", False) and _si > 0:
-            from app.services.drill_service import sweep_loop
-            app.state.drill_sweep_task = asyncio.create_task(sweep_loop(_si))
-            print(f"[drill] 超时结算 sweep 已启动（每 {_si}s）")
-    except Exception as e:
-        print(f"[drill] sweep loop 启动跳过：{e}")
     # eval_matrix 夜间定时评测（EVAL_MATRIX_CRON_HOURS<=0 关闭）
     try:
         from app.config import settings as _settings
@@ -315,12 +206,6 @@ async def lifespan(app: FastAPI):
         print(f"[eval-matrix] 定时评测 loop 启动跳过：{e}")
     # ---- 关闭 ----
     yield
-    try:
-        from app.tasks.lifecycle import stop_background_workers
-
-        await stop_background_workers(app)
-    except Exception as e:
-        degraded("task_center_stop", e)
     _task = getattr(app.state, "component_health_task", None)
     if _task:
         _task.cancel()
@@ -336,32 +221,15 @@ async def lifespan(app: FastAPI):
     _cache_metrics = getattr(app.state, "cache_metrics_task", None)
     if _cache_metrics:
         _cache_metrics.cancel()
-    _log_archive = getattr(app.state, "log_archive_task", None)
-    if _log_archive:
-        _log_archive.cancel()
-    _backup_all = getattr(app.state, "backup_all_task", None)
-    if _backup_all:
-        _backup_all.cancel()
-    _evo_cron = getattr(app.state, "evolution_cron_task", None)
-    if _evo_cron:
-        _evo_cron.cancel()
     _gap_cron = getattr(app.state, "evidence_gap_cron_task", None)
     if _gap_cron:
         _gap_cron.cancel()
-    # M3：坏case修复率 cron 也需 cancel（getattr 防 AttributeError，未启用时不存在该属性）
-    _fix_cron = getattr(app.state, "fix_rate_cron_task", None)
-    if _fix_cron:
-        _fix_cron.cancel()
-    # N1 记忆衰减 loop 也需 cancel
-    _memory_decay = getattr(app.state, "memory_decay_task", None)
-    if _memory_decay:
-        _memory_decay.cancel()
     # KG 对账 loop 也需 cancel
     _kg_reconcile = getattr(app.state, "kg_reconcile_task", None)
     if _kg_reconcile:
         _kg_reconcile.cancel()
-    # 报告 cron / 演练 sweep / eval_matrix cron 也需 cancel
-    for _attr in ("ops_report_cron_task", "drill_sweep_task", "eval_matrix_cron_task"):
+    # eval_matrix cron 也需 cancel
+    for _attr in ("eval_matrix_cron_task",):
         _t = getattr(app.state, _attr, None)
         if _t:
             _t.cancel()
@@ -502,58 +370,22 @@ async def health():
 
 
 # ---- 路由挂载 ----
+# G-CRAG 只挂主链路路由（ADR 0003）；业务功能 / Agent / MCP / 数据飞轮 / 平台杂项的路由不再注册，代码暂留
 from app.routers import (  # noqa: E402
     document,
-    ops_workbench,
-    domain,
     kg,
-    knowledge_governance,
-    knowledge_evolution,
-    integrations,
-    memory,
-    notification,
     qa,
-    quality_event,
-    realtime_event,
     retrieval,
     retrieval_tune_router,
     system,
-    task_center,
-    twin,
 )
-from app.mcp.server import router as mcp_router  # noqa: E402
 
 app.include_router(system.router, prefix=settings.API_PREFIX)
-app.include_router(ops_workbench.router, prefix=settings.API_PREFIX)
 app.include_router(document.router, prefix=settings.API_PREFIX)
 app.include_router(retrieval.router, prefix=settings.API_PREFIX)
 app.include_router(retrieval_tune_router.router, prefix=settings.API_PREFIX)
 app.include_router(qa.router, prefix=settings.API_PREFIX)
 app.include_router(kg.router, prefix=settings.API_PREFIX)
-app.include_router(domain.router, prefix=settings.API_PREFIX)
-app.include_router(memory.router, prefix=settings.API_PREFIX)
-app.include_router(notification.router, prefix=settings.API_PREFIX)
-app.include_router(twin.router, prefix=settings.API_PREFIX)
-app.include_router(task_center.router, prefix=settings.API_PREFIX)
-app.include_router(quality_event.router, prefix=settings.API_PREFIX)
-app.include_router(realtime_event.router, prefix=settings.API_PREFIX)
-app.include_router(knowledge_governance.router, prefix=settings.API_PREFIX)
-app.include_router(knowledge_evolution.router, prefix=settings.API_PREFIX)
-app.include_router(integrations.router, prefix=settings.API_PREFIX)
-app.include_router(mcp_router, prefix=settings.API_PREFIX)
-if settings.WORKFLOW_ENABLE:  # 可视化工作流编排（关=现状不注册，零开销）
-    from app.routers import workflow as workflow_router  # noqa: E402
-    app.include_router(workflow_router.router, prefix=settings.API_PREFIX)
-if settings.OPS_REPORT_ENABLE:  # N7 运维报告智能生成（关=现状不注册）
-    from app.routers import ops_report  # noqa: E402
-    app.include_router(ops_report.router, prefix=settings.API_PREFIX)
-if settings.DOC_COLLAB_ENABLE:  # 文档协作批注+电子签批（关=现状不注册）
-    from app.routers import doc_collab  # noqa: E402
-    app.include_router(doc_collab.router, prefix=settings.API_PREFIX)
-if settings.DRILL_SANDBOX_ENABLE:  # N5 故障仿真演练沙箱（关=现状不注册）
-    from app.routers import drill  # noqa: E402
-    app.include_router(drill.router, prefix=settings.API_PREFIX)
-
 
 # ---- 全局异常：BizError -> 统一 {code, message, data}（HTTP 恒 200，业务码放 body）----
 @app.exception_handler(BizError)

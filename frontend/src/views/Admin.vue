@@ -5,22 +5,17 @@
       <button class="tab" :class="{ active: tab === 'log' }" @click="tab = 'log'">📋 操作日志</button>
       <button class="tab" :class="{ active: tab === 'alert' }" @click="loadAlerts(); tab = 'alert'" v-if="can('alert:read')">🚨 告警 <span v-if="alerts.total" class="badge badge-danger">{{ alerts.total }}</span></button>
       <button class="tab" :class="{ active: tab === 'config' }" @click="tab = 'config'" v-if="can('system:config')">⚙️ 系统配置</button>
-      <button class="tab" :class="{ active: tab === 'optimizer' }" @click="loadOptimizer(); tab = 'optimizer'" v-if="can('optimizer:manage')">📈 优化建议</button>
       <button class="tab" :class="{ active: tab === 'rewrite' }" @click="loadRewrite(); tab = 'rewrite'" v-if="can('optimizer:manage')">🔧 Query改写</button>
       <button class="tab" :class="{ active: tab === 'evidence' }" @click="loadEvidenceGaps(); tab = 'evidence'" v-if="can('evidence:manage')">📝 证据补全</button>
       <button class="tab" :class="{ active: tab === 'cost' }" @click="loadCostReport(); tab = 'cost'" v-if="can('metric:read')">💰 成本</button>
-      <button class="tab" :class="{ active: tab === 'quality' }" @click="loadQuality(); tab = 'quality'" v-if="can('system:config')">📚 知识库质量</button>
       <button class="tab" :class="{ active: tab === 'eval' }" @click="loadEval(); tab = 'eval'" v-if="can('metric:read')">📊 评测趋势</button>
       <button class="tab" :class="{ active: tab === 'abtest' }" @click="loadABTest(); tab = 'abtest'" v-if="can('system:config')">🧪 A/B测试</button>
       <button class="tab" :class="{ active: tab === 'evalmatrix' }" @click="loadEvalMatrix(); tab = 'evalmatrix'" v-if="can('system:config')">🧮 评测矩阵</button>
       <button class="tab" :class="{ active: tab === 'tune' }" @click="loadTuneReport(); tab = 'tune'" v-if="can('system:config')">🎯 检索调参</button>
       <button class="tab" :class="{ active: tab === 'users' }" @click="loadUsers(); tab = 'users'" v-if="can('user:manage')">👥 用户管理</button>
-      <button class="tab" :class="{ active: tab === 'persona' }" @click="loadPersonas(); tab = 'persona'" v-if="can('system:config')">🧩 Persona</button>
-      <button class="tab" :class="{ active: tab === 'backup' }" @click="loadBackups(); tab = 'backup'" v-if="can('system:config')">💾 备份恢复</button>
       <button class="tab" :class="{ active: tab === 'terms' }" @click="loadTerms(); tab = 'terms'" v-if="can('system:config')">📖 词表管理</button>
       <button class="tab" :class="{ active: tab === 'srules' }" @click="loadSrules(); tab = 'srules'" v-if="can('system:config')">🏷️ 语义规则</button>
       <button class="tab" :class="{ active: tab === 'prompt' }" @click="loadPrompt(); tab = 'prompt'" v-if="can('system:config')">📝 Prompt模板</button>
-      <button class="tab" :class="{ active: tab === 'memory' }" @click="loadMemories(); tab = 'memory'" v-if="can('system:config')">🧠 记忆</button>
     </div>
 
     <!-- 反馈管理 -->

@@ -2,8 +2,8 @@
   <div class="app-layout">
     <aside class="sidebar" :class="{ collapsed, 'mobile-open': mobileOpen }">
       <div class="brand">
-        <div class="brand-logo">电网</div>
-        <div class="brand-text">运维 RAG<small>智能问答系统</small></div>
+        <div class="brand-logo">G</div>
+        <div class="brand-text">G-CRAG<small>图谱纠错智能问答</small></div>
       </div>
       <nav class="nav-list">
         <div class="nav-section">工作台</div>
@@ -34,29 +34,7 @@
         </div>
         <div class="topbar-spacer"></div>
         <slot name="actions" />
-        <!-- 通知中心：铃铛 + 未读徽章 + 下拉面板（WS 在线推送 + 轮询兜底） -->
-        <div class="notify-wrap" v-if="auth.token">
-          <button class="icon-btn" style="position:relative" @click="toggleNotify" title="通知中心">
-            🔔
-            <span class="notify-badge" v-if="unreadCount > 0">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
-          </button>
-          <div class="notify-panel" v-if="notifyOpen">
-            <div class="notify-head">
-              <b>通知</b>
-              <button class="btn btn-ghost btn-sm" v-if="unreadCount > 0" @click="handleReadAll">全部已读</button>
-            </div>
-            <div v-if="!notifyList.length" class="notify-empty">暂无通知</div>
-            <div v-for="n in notifyList" :key="n.id" class="notify-item" :class="{ unread: !n.read }"
-                 @click="handleNotifyClick(n)">
-              <div class="notify-title">
-                <span class="notify-dot" v-if="!n.read"></span>{{ n.title }}
-              </div>
-              <div class="notify-body" v-if="n.body">{{ n.body }}</div>
-              <div class="notify-time">{{ n.createdAt?.slice(5, 16).replace('T', ' ') }}</div>
-            </div>
-          </div>
-        </div>
-        <div class="topbar-user" style="cursor:pointer" @click="router.push('/profile')" title="个人资料 · 改密码">
+        <div class="topbar-user">
           <div class="avatar">{{ (auth.username || 'U')[0].toUpperCase() }}</div>
           <span>{{ auth.username }} <span class="muted">· {{ ROLE_LABEL[auth.role] || auth.role }}</span></span>
         </div>
@@ -75,7 +53,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { useDark, useToggle } from '@vueuse/core'
 import { useAuthStore } from '../stores/auth'
 import { hasPerm, ROLE_LABEL } from '../utils/perm'
-import { getNotifications, getUnreadCount, markAllNotificationsRead, markNotificationRead } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -92,44 +69,17 @@ function toggleSidebar() {
   localStorage.setItem('nav-collapsed', collapsed.value ? '1' : '0')
 }
 
-const title = computed(() => route.meta.title || '电网运维 RAG')
+const title = computed(() => route.meta.title || 'G-CRAG')
 const sub = computed(() => route.meta.sub || '')
 
 const navItems = computed(() => {
   const items = [
     { to: '/chat', icon: '💬', label: '智能问答' },
-    { to: '/diagnose', icon: '🩺', label: '故障诊断' },
-    { to: '/operations', icon: '⚡', label: '主动运维' },
-    { to: '/ops-workbench', icon: '🗂️', label: '运维工作台' },
     { to: '/documents', icon: '📄', label: '知识库' },
-    { to: '/dashboard', icon: '📊', label: '统计看板' },
     { to: '/kg', icon: '🧠', label: '知识图谱' },
-    { to: '/kg-3d', icon: '🌐', label: '3D图谱' },
-    { to: '/twin', icon: '🏭', label: '数字孪生' },
-    { to: '/ticket', icon: '📋', label: '两票管理' },
   ]
-  if (hasPerm(auth.role, 'doc:manage')) {
-    items.splice(4, 0, { to: '/knowledge-governance', icon: '🧭', label: '知识治理' })
-    items.splice(5, 0, { to: '/knowledge-evolution', icon: '🧬', label: '知识自进化' })
-  }
-  if (hasPerm(auth.role, 'workflow:read')) {
-    items.push({ to: '/workflow', icon: '🧩', label: '工作流编排' })
-  }
-  if (hasPerm(auth.role, 'report:read')) {
-    items.push({ to: '/ops-report', icon: '📝', label: '运维报告' })
-  }
-  if (hasPerm(auth.role, 'doc:read')) {
-    items.push({ to: '/doc-collab', icon: '🗒️', label: '文档协作' })
-  }
-  if (hasPerm(auth.role, 'drill:read')) {
-    items.push({ to: '/drill', icon: '🧯', label: '演练沙箱' })
-  }
   if (hasPerm(auth.role, 'metric:read')) {
-    items.push({ to: '/prediction', icon: '🔮', label: '故障预测' })
     items.push({ to: '/trace', icon: '⏱', label: '链路诊断' })
-  }
-  if (hasPerm(auth.role, 'audit:read')) {
-    items.push({ to: '/quality-events', icon: '🚨', label: '质量事件' })
   }
   if (hasPerm(auth.role, 'system:config')) {
     items.push({ to: '/retrieval-debug', icon: '🔬', label: '检索调试' })
@@ -155,70 +105,6 @@ function onNotify(e) {
 onMounted(() => window.addEventListener('app:notify', onNotify))
 onUnmounted(() => window.removeEventListener('app:notify', onNotify))
 
-// ===== 通知中心：未读徽章 + WS 在线推送 + 轮询兜底 =====
-const notifyOpen = ref(false)
-const unreadCount = ref(0)
-const notifyList = ref([])
-let notifyWs = null
-let notifyPoll = null
-
-async function refreshUnread() {
-  try { unreadCount.value = (await getUnreadCount()).data?.count || 0 } catch (e) { /* 忽略 */ }
-}
-async function loadNotifyList() {
-  try { notifyList.value = (await getNotifications(false, 20)).data || [] } catch (e) { /* 忽略 */ }
-}
-function toggleNotify() {
-  notifyOpen.value = !notifyOpen.value
-  if (notifyOpen.value) loadNotifyList()
-}
-async function handleNotifyClick(n) {
-  if (!n.read) {
-    try {
-      await markNotificationRead(n.id)
-      n.read = true
-      unreadCount.value = Math.max(0, unreadCount.value - 1)
-    } catch (e) { /* 忽略 */ }
-  }
-  if (n.link) { notifyOpen.value = false; router.push(n.link) }
-}
-async function handleReadAll() {
-  try {
-    await markAllNotificationsRead()
-    unreadCount.value = 0
-    loadNotifyList()
-  } catch (e) { /* 忽略 */ }
-}
-function connectNotifyWs() {
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  try {
-    notifyWs = new WebSocket(`${proto}://${location.host}/api/notifications/ws?token=${encodeURIComponent(auth.token || '')}`)
-    notifyWs.onmessage = (e) => {
-      try {
-        const ev = JSON.parse(e.data)
-        if (ev.type === 'notification' && ev.data) {
-          notifyList.value = [ev.data, ...notifyList.value].slice(0, 20)
-          unreadCount.value += 1
-          // 顶部 toast 即时提醒（复用全局提示位）
-          notifyMsg.value = `🔔 ${ev.data.title || '新通知'}`
-          clearTimeout(notifyTimer)
-          notifyTimer = setTimeout(() => (notifyMsg.value = ''), 3200)
-        }
-      } catch (err) { /* skip */ }
-    }
-    notifyWs.onclose = () => { /* 断连由 30s 轮询兜底 */ }
-  } catch (e) { /* WS 不可用走轮询 */ }
-}
-onMounted(() => {
-  refreshUnread()
-  loadNotifyList()
-  connectNotifyWs()
-  notifyPoll = setInterval(refreshUnread, 30000)  // WS 断连兜底
-})
-onUnmounted(() => {
-  if (notifyWs) { try { notifyWs.close() } catch (e) { /* skip */ } }
-  if (notifyPoll) clearInterval(notifyPoll)
-})
 </script>
 
 <style scoped>
@@ -228,23 +114,4 @@ onUnmounted(() => {
   border-radius: 8px; font-size: 14px; z-index: 9999;
   box-shadow: 0 6px 20px rgba(0,0,0,.25);
 }
-.notify-wrap { position: relative; }
-.notify-badge {
-  position: absolute; top: -4px; right: -6px; background: var(--danger, #e74c3c); color: #fff;
-  font-size: 10px; line-height: 1; padding: 3px 5px; border-radius: 8px; font-weight: 700;
-}
-.notify-panel {
-  position: absolute; right: 0; top: 44px; width: 340px; max-height: 420px; overflow-y: auto;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-  box-shadow: var(--shadow, 0 8px 24px rgba(0,0,0,.12)); z-index: 200; padding: 8px;
-}
-.notify-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 8px 8px; }
-.notify-empty { text-align: center; color: var(--text-soft); padding: 28px 0; font-size: 13px; }
-.notify-item { padding: 8px 10px; border-radius: 8px; cursor: pointer; }
-.notify-item:hover { background: var(--surface-2, rgba(0,0,0,.04)); }
-.notify-item.unread { background: var(--primary-soft, rgba(59,130,246,.08)); }
-.notify-title { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
-.notify-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--danger, #e74c3c); flex: none; }
-.notify-body { font-size: 12px; color: var(--text-soft); margin-top: 3px; }
-.notify-time { font-size: 11px; color: var(--text-muted, #999); margin-top: 2px; }
 </style>

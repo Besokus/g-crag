@@ -111,8 +111,6 @@
               <a v-if="m.content && !m.streaming" class="ev-btn" @click="showEvidence(m)">🔍 证据溯源</a>
               <a v-if="m.trace" class="ev-btn" @click="m._linkOpen = !m._linkOpen">📊 链路耗时</a>
               <a v-if="m.content && !m.streaming && (m.confidence==='medium'||m.confidence==='refused')" class="ev-btn" @click="reportGap(m)">⚠️ 上报证据不足</a>
-              <a v-if="m.content && !m.streaming" class="ev-btn" @click="actToReport(m)" title="以此问答为线索生成运维报告">📝 生成报告</a>
-              <a v-if="m.content && !m.streaming" class="ev-btn" @click="actToTicket(m)" title="以答案要点起草两票">📋 转两票</a>
               <a v-if="m.content && !m.streaming && ttsSupported" class="ev-btn" @click="toggleTts(m)">{{ m._ttsOn ? '⏹ 停止' : '🔊 朗读' }}</a>
             </div>
             <!-- 证据溯源弹窗 -->
@@ -188,7 +186,6 @@
 
 <script setup>
 import { ref, reactive, onMounted, nextTick, computed } from 'vue'
-import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import AgentTrace from '../components/AgentTrace.vue'
 import QaTraceChart from '../components/QaTraceChart.vue'
@@ -232,7 +229,6 @@ function renderMd(text) {
 }
 
 const auth = useAuthStore()
-const router = useRouter()
 const msgListEl = ref(null)
 const query = ref('')
 const modelType = ref('')
@@ -268,8 +264,6 @@ const quickQuestions = [
 function quickAsk(q) { query.value = q; ask() }
 
 // ===== 行动入口：问答 → 报告/两票（页面互跳，参数随行）=====
-function actToReport(m) { router.push({ path: '/ops-report', query: { type: 'fault', device: (m.query || '').slice(0, 40) } }) }
-function actToTicket(m) { router.push({ path: '/ticket', query: { task: (m.query || '').slice(0, 60) } }) }
 
 // ===== 语音输入（浏览器 Web Speech API，Chrome/Edge 原生，零后端依赖）=====
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition

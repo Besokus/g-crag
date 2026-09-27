@@ -1,6 +1,6 @@
-# 电网运维 RAG 智能问答系统 - 全栈编排
-# S1: mysql + minio | S5: + etcd + milvus-minio + milvus | S11: + backend + frontend
-# 一键启动: docker compose up -d --build
+# G-CRAG 全栈编排（fork 自 zhyese/grid-qa，裁剪为 9 个服务，见 docs/adr/0003）
+# mysql + minio | etcd + milvus-minio + milvus | redis + neo4j | backend + frontend
+# 一键启动: docker compose -p gcrag-general up -d --build
 
 services:
   # ---------- MySQL：结构化元数据 ----------
@@ -31,7 +31,7 @@ services:
 
   # ---------- MinIO：源文档对象存储 ----------
   minio:
-    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e   # pin-digest（原 minio/minio:latest）
+    image: pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372   # pin-digest；官方 minio/minio 已停止在 Docker Hub 发布，改用 Pigsty 维护的兼容分支
     container_name: grid-minio
     restart: unless-stopped
     environment:
@@ -71,7 +71,7 @@ services:
 
   # ---------- Milvus 专用对象存储 ----------
   milvus-minio:
-    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e   # pin-digest（原 minio/minio:latest）
+    image: pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372   # pin-digest；官方 minio/minio 已停止在 Docker Hub 发布，改用 Pigsty 维护的兼容分支
     container_name: grid-milvus-minio
     restart: unless-stopped
     environment:
@@ -141,8 +141,8 @@ services:
       NEO4J_internal_dbms_tx__log_fail__on__corrupted__log__files: "false"
       NEO4J_db_recovery_fail__on__missing__files: "false"
     ports:
-      - "7474:7474"   # Neo4j Browser
-      - "7687:7687"   # Bolt 协议
+      - "${NEO4J_HTTP_PORT:-7474}:7474"   # Neo4j Browser（宿主端口可在 .env 覆盖，避免与其他本地 Neo4j 冲突）
+      - "${NEO4J_BOLT_PORT:-7687}:7687"   # Bolt 协议
     volumes:
       - ./data/neo4j:/data
     healthcheck:
@@ -153,50 +153,13 @@ services:
       retries: 5
       start_period: 60s
 
-  # ---------- Ollama：本地应急 LLM（云端 qwen/deepseek/doubao 全部不可用时的兜底，非强依赖）----------
-  # LLM_FALLBACK_CHAIN 末位新增 ollama；首次启动自动拉取模型（7B q4 量化，约 4.5GB，CPU 可推理）。
-  # mem_limit/cpus 防止真实触发兜底、开始推理时把 mysql/milvus/redis/neo4j 挤爆(OOM/CPU 饥饿)；
-  # 按部署机器实际配置调整数值。
-  ollama:
-    image: ollama/ollama@sha256:1685741456770df6e3cceb2a945a5f75e020f658d1701509668d6f4688f1dd3f   # pin-digest（原 ollama/ollama:latest）
-    container_name: grid-ollama
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    volumes:
-      - ./data/ollama:/root/.ollama
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - "ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-qwen2.5:7b-instruct-q4_K_M} && wait"
-    mem_limit: 10g
-    cpus: 4
-
-  # ---------- Nacos：配置中心（可选，CONFIG_SOURCE=nacos 时启用；默认 env 不依赖）----------
-  # 启动: docker compose up -d nacos ；管理台 http://localhost:8848/nacos (默认 nacos/nacos)
-  nacos:
-    image: nacos/nacos-server:v2.4.3
-    container_name: grid-nacos
-    restart: unless-stopped
-    environment:
-      MODE: standalone
-      # 容器内 InetUtils.refreshIp NPE（枚举不到可用 IP）→ 显式指定服务 IP（2026-09-03）
-      NACOS_SERVER_IP: 172.18.0.20
-    ports:
-      - "8848:8848"
-      - "9848:9848"
-    volumes:
-      - ./data/nacos:/home/nacos/data
-    networks:
-      default:
-        ipv4_address: 172.18.0.20
-
   # ---------- 后端 ----------
   backend:
     build:
       context: ./backend
       args:
-        - HTTP_PROXY=http://host.docker.internal:7897
-        - HTTPS_PROXY=http://host.docker.internal:7897
+        - HTTP_PROXY=${BUILD_PROXY:-}   # 默认直连（apt/pip 走阿里云镜像）；需代理时在 .env 设 BUILD_PROXY
+        - HTTPS_PROXY=${BUILD_PROXY:-}
         - BGE_PRELOAD=false
     container_name: grid-backend
     restart: unless-stopped
@@ -213,9 +176,6 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
-      # 弱依赖：本地兜底 LLM，起了就行（镜像无 curl/wget 可做探活）
-      ollama:
-        condition: service_started
     environment:
       # 容器内用 service name + 内部端口连接（覆盖 .env 的 localhost）
       DATABASE_URL: mysql+aiomysql://grid:grid123456@mysql:3306/grid_qa?charset=utf8mb4
@@ -223,20 +183,11 @@ services:
       MINIO_ENDPOINT: minio:9000
       MILVUS_HOST: milvus
       NEO4J_URI: bolt://neo4j:7687
-      # 容器内 localhost 指自身，OTLP 走 compose 服务名（langfuse 内部 3000→宿主 3001）；
-      # 用 OTEL_EXPORTER_OTLP_ENDPOINT，代码会自动拼 /v1/traces（OTEL_ENDPOINT 不会拼→404）
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://langfuse:3000/api/public/otel
-      LANGFUSE_PUBLIC_KEY: pk-lf-751194e4-12a2-407b-b54f-f153b02c79be
-      LANGFUSE_SECRET_KEY: sk-lf-6396f6d5-d0e5-424d-af6e-363f3368ae57
-      MCP_SERVERS: '[{"name":"mock_scada","url":"http://mock-scada:9100"}]'   # N2 启动发现 mock SCADA → 注册 query_telemetry 到 agent ToolRegistry
-      # 问答→行动闭环（create_ticket/submit_ticket 工具 + ops_planner persona + 工单流转事件）；关=现状
-      TICKET_ACTION_LOOP_ENABLE: "true"
+      # G-CRAG：langfuse / mock-scada / 工单与主动运维已裁剪（ADR 0003），不再注入 OTLP、MCP 与业务闭环开关
+      MCP_SERVERS: '[]'
+      MCP_EXTERNAL_ENABLED: "false"
       # 链路节点详情（瀑布图 attrs：参数/prompt 采集；关=现状只记耗时；纯观测不进缓存版本）
       QA_TRACE_DETAIL_ENABLE: "true"
-      # 主动运维闭环补全（结构化根因 + 遥测证据 + 闭环回填）；关=现状
-      PROACTIVE_SCHEMA_V2_ENABLE: "true"
-      PROACTIVE_TELEMETRY_ENABLE: "true"
-      PROACTIVE_FEEDBACK_ENABLE: "true"
       # 容器直连外网：云API(dashscope/deepseek/doubao 国内可达) + bge 走 hf-mirror 国内镜像。
       # 注：宿主机代理 7897 仅监听 127.0.0.1（未开 Allow LAN），容器经 host.docker.internal 连不上，
       # 故不设 HTTPS_PROXY——否则 httpx/requests 把所有出站（含 hf-mirror、云API）都发往不可达代理。
@@ -251,30 +202,15 @@ services:
       - grid-backend-data:/app/data   # 持久化 data/（运行日志 + 数据备份 .sql），容器重建不丢
       - ./scripts:/app/scripts:ro     # eval_matrix API 触发的 CLI 工具（只读；工具目录非源码热载）
       - ./reports:/app/reports        # 评测矩阵报告落宿主 reports/（系统管理-评测矩阵可浏览）
-      - C:/Users/Administrator/.cache/huggingface/hub:/root/.cache/huggingface/hub:ro   # 宿主机 bge 缓存（离线加载，免下载）
-
-  # ---------- Mock SCADA MCP Server（N2 MCP 总线外部 SCADA 数据源，侧车）----------
-  # 复用 backend 镜像跑 mock_scada_server（真实 SCADA 接入时换连接器即可）。
-  # backend 经 MCP_SERVERS=http://mock-scada:9100 发现并注册 query_telemetry 等工具到 agent ToolRegistry。
-  mock-scada:
-    image: rag-backend:latest
-    build:
-      context: ./backend
-      args:
-        - BGE_PRELOAD=false
-    container_name: grid-mock-scada
-    restart: unless-stopped
-    command: python -m app.mcp.mock_scada_server
-    ports:
-      - "9100:9100"
+      - ${HF_CACHE_DIR:-./data/hf-cache}:/root/.cache/huggingface/hub:ro   # 宿主机 bge 缓存（离线加载）；G-CRAG 只用云端 embedding，默认挂空目录
 
   # ---------- 前端（nginx）----------
   frontend:
     build:
       context: ./frontend
       args:
-        - HTTP_PROXY=http://host.docker.internal:7897
-        - HTTPS_PROXY=http://host.docker.internal:7897
+        - HTTP_PROXY=${BUILD_PROXY:-}   # 默认直连（apt/pip 走阿里云镜像）；需代理时在 .env 设 BUILD_PROXY
+        - HTTPS_PROXY=${BUILD_PROXY:-}
     container_name: grid-frontend
     restart: unless-stopped
     depends_on:
@@ -282,151 +218,7 @@ services:
     ports:
       - "5173:80"
 
-  # ---------- Prometheus 指标采集 ----------
-  # 注：采集本地 uvicorn(host.docker.internal:8001)，不依赖 backend 容器
-  prometheus:
-    image: prom/prometheus@sha256:c6b27ea434f8389bfe233fbc7be381cf50587c286e871bc842008f5a1b1908a7   # pin-digest（原 prom/prometheus:latest）
-    container_name: grid-prometheus
-    restart: unless-stopped
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./data/prometheus:/prometheus
-
-  # ---------- Grafana 可视化仪表盘（好看的开箱监控界面）----------
-  grafana:
-    image: grafana/grafana@sha256:121a7a9ece6dc10b969f1f96eed64b4f07dfac0d0b8abc070f7cb83bbde86f63   # pin-digest（原 grafana/grafana:latest）
-    container_name: grid-grafana
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
-    volumes:
-      - ./data/grafana:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-    depends_on:
-      - prometheus
-
-  # ---------- Langfuse：LLM trace 可视化（N4）----------
-  langfuse:
-    # 钉到 v3 大版本（:latest 会静默升到新大版本导致再次缺依赖崩溃）
-    image: langfuse/langfuse@sha256:60a668b1dd06e2d9a034ba8b2ed5e84303e66c6202d76b288020059a755fd037   # pin-digest（原 langfuse/langfuse:3）
-    container_name: grid-langfuse
-    restart: unless-stopped
-    depends_on:
-      - postgres-langfuse
-      - clickhouse
-      - redis
-    environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@postgres-langfuse:5432/langfuse
-      # Langfuse v3 强依赖 ClickHouse(主存储) + Redis(队列)，缺任一启动即失败
-      # 3.x 要求显式 CLICKHOUSE_USER/PASSWORD（不只看 URL），与 clickhouse 容器账号对齐
-      # 单节点 ClickHouse：CLICKHOUSE_CLUSTER_ENABLED=false 关闭 ON CLUSTER 迁移（免 keeper/集群）
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:langfuse@clickhouse:9000/langfuse
-      CLICKHOUSE_USER: langfuse
-      CLICKHOUSE_PASSWORD: langfuse
-      CLICKHOUSE_DB: langfuse
-      CLICKHOUSE_CLUSTER_ENABLED: "false"
-      CLICKHOUSE_MIGRATE: "true"
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      REDIS_AUTH: "grid-langfuse-pass"
-      # 该 v3 构建把 S3 事件上传桶名设为必填；先给占位值，事件上传可后续接 MinIO
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
-      # 媒体上传也走同一个 MinIO bucket
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse-events
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-langfuse-secret-2026}
-      NEXTAUTH_URL: http://localhost:3001
-      SALT: ${LANGFUSE_SALT:-langfuse-salt-2026}
-      NEXT_PUBLIC_SIGNUP_DISABLED: "false"
-    ports:
-      - "3001:3000"   # Langfuse UI（避开 Grafana 的 3000）
-    volumes:
-      - ./data/langfuse:/data
-
-  # ---------- Langfuse 专用 PostgreSQL ----------
-  postgres-langfuse:
-    image: postgres:15-alpine
-    container_name: grid-langfuse-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse
-      POSTGRES_DB: langfuse
-    volumes:
-      - ./data/langfuse-db:/var/lib/postgresql/data
-
-  # ---------- Langfuse 专用 ClickHouse（v3 主存储，仅 langfuse 内部访问，不暴露端口）----------
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
-    container_name: grid-langfuse-clickhouse
-    restart: unless-stopped
-    environment:
-      CLICKHOUSE_DB: langfuse
-      CLICKHOUSE_USER: langfuse
-      CLICKHOUSE_PASSWORD: langfuse
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    volumes:
-      - clickhouse-data:/var/lib/clickhouse
-
-
-  # ---------- Langfuse Worker（v3 事件处理：消费 Redis 队列 → 写 S3 + ClickHouse）----------
-  langfuse-worker:
-    image: langfuse/langfuse-worker@sha256:138a5b510cd76262a2abb02af1ddc563105013fdc9a62e63ccce526140ad05ba   # pin-digest（原 langfuse/langfuse-worker:3）
-    container_name: grid-langfuse-worker
-    restart: unless-stopped
-    depends_on:
-      - postgres-langfuse
-      - clickhouse
-      - redis
-      - langfuse
-    environment:
-      DATABASE_URL: postgresql://langfuse:langfuse@postgres-langfuse:5432/langfuse
-      CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse:langfuse@clickhouse:9000/langfuse
-      CLICKHOUSE_USER: langfuse
-      CLICKHOUSE_PASSWORD: langfuse
-      CLICKHOUSE_DB: langfuse
-      CLICKHOUSE_CLUSTER_ENABLED: "false"
-      CLICKHOUSE_MIGRATE: "false"
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-      REDIS_AUTH: "grid-langfuse-pass"
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse-events
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: us-east-1
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-langfuse-secret-2026}
-      SALT: ${LANGFUSE_SALT:-langfuse-salt-2026}
-    command: ["node", "--max-old-space-size=1024", "/app/worker/dist/index.js"]
-
 volumes:
   mysql-data:
   grid-backend-data:
-  clickhouse-data:
 

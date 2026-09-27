@@ -20,4 +20,9 @@ class KgTriple(Base):
     object: Mapped[str] = mapped_column(String(256), nullable=False, index=True)    # 客体（故障/处置/参数...）
     doc_id: Mapped[str] = mapped_column(String(64), index=True, default="")         # 来源文档 id
     doc_name: Mapped[str] = mapped_column(String(256), default="")                  # 来源文档名
+    # 出处 chunk（ADR 0004）：空串=只有文档级关联，不参与图谱定位证据
+    chunk_id: Mapped[str] = mapped_column(String(64), index=True, default="")
+    s_raw: Mapped[str] = mapped_column(String(256), default="")                     # 归一化前的主体原文写法
+    o_raw: Mapped[str] = mapped_column(String(256), default="")                     # 归一化前的客体原文写法
+    provenance: Mapped[str] = mapped_column(String(16), default="none")             # verified|rematched|none
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

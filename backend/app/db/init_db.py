@@ -105,6 +105,11 @@ _COLUMN_MIGRATIONS = [
     ("agent_memory", "write_mode", "VARCHAR(32) NOT NULL DEFAULT 'legacy'"),
     # P4-⑭ 多轮摘要（conversation_summary 首次接线；老库幂等补列）
     ("conversations", "summary", "TEXT NULL"),
+    # G-CRAG M5：三元组出处 chunk（ADR 0004，《设计文档》§16.7）
+    ("kg_triples", "chunk_id", "VARCHAR(64) NOT NULL DEFAULT ''"),
+    ("kg_triples", "s_raw", "VARCHAR(256) NOT NULL DEFAULT ''"),
+    ("kg_triples", "o_raw", "VARCHAR(256) NOT NULL DEFAULT ''"),
+    ("kg_triples", "provenance", "VARCHAR(16) NOT NULL DEFAULT 'none'"),
 ]
 
 _INDEX_MIGRATIONS = [
@@ -135,6 +140,7 @@ _INDEX_MIGRATIONS = [
         "ix_proactive_run_ticket_status",
         "INDEX `ix_proactive_run_ticket_status` (`tenant_id`, `ticket_status`)",
     ),
+    ("kg_triples", "ix_kg_triples_chunk_id", "INDEX `ix_kg_triples_chunk_id` (`chunk_id`)"),
 ]
 
 

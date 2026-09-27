@@ -4,56 +4,56 @@ LLM 自由抽取会产生两类噪声：
 - 同义实体分裂："主变/主变压器/#1主变/1号主变" 成 4 个节点，多跳推理断链
 - 关系发散："是/有/关于/涉及" 等无语义关系，图谱 schema 不收敛
 
-收敛策略：
-- canonical_entity：去编号前缀（#1/1号/一、）+ 复用 term_service 别名归一（主变→主变压器）
-- canonical_relation：关系映射到白名单，无法映射归为"相关"（保留连通性，不丢边）
+收敛策略（规则全部来自当前领域包，《设计文档》§3.3"实体归一化"扩展点）：
+- canonical_entity：normalize.yaml 的 patterns（正则，如电网包的编号前缀剥离）→ mappings（精确映射）
+  → term_service 别名归一（aliases.json，主变→主变压器）
+- canonical_relation：schema.yaml 白名单原样保留；否则按 normalize.yaml 的 relation_aliases 子串匹配到
+  标准关系；仍无法映射归为 fallback_relation（默认"相关"，保留连通性，不丢边）
 """
 import re
+from functools import lru_cache
 
+from app.core.domain_pack import get_pack
 from app.services.term_service import normalize as term_normalize
 
-# 关系 schema 白名单（电网运维核心语义）—— 标准: (别名...)
-_REL_SCHEMA = {
-    "发生": ("发生", "出现", "产生"),
-    "表现为": ("表现为", "症状", "现象是", "表现为"),
-    "处置方法": ("处置方法", "处理方法", "处置", "处理", "应对", "消除"),
-    "检修步骤": ("检修步骤", "检修", "维修", "检修方法", "处理步骤"),
-    "原因": ("原因", "因为", "导致", "引发", "由"),
-    "影响": ("影响", "波及", "后果", "危害"),
-    "预防": ("预防", "预防措施", "防范", "防止"),
-    "属于": ("属于", "归属", "是"),
-    "位于": ("位于", "安装在", "位置", "装设"),
-    "额定值": ("额定值", "额定", "参数", "容量"),
-    "预警阈值": ("预警阈值", "阈值", "报警值", "限值", "告警"),
-    "保护": ("保护", "保护范围", "动作于", "跳闸"),
-    "试验": ("试验", "检验", "测试", "校验"),
-}
-_REL_ALIAS = {alias: std for std, aliases in _REL_SCHEMA.items() for alias in aliases}
-_FALLBACK_REL = "相关"  # 兜底关系：无法归类但保留连通性
 
-_NO_PREFIX1 = re.compile(r"^[#＃]?\d+\s*号?")
-_NO_PREFIX2 = re.compile(r"^[一二三四五六七八九十0-9]+[、.\s]+")
+@lru_cache
+def _entity_patterns(pack_name: str) -> tuple:
+    return tuple((re.compile(p.regex), p.replace) for p in get_pack().normalize.patterns)
+
+
+def _relation_alias_table() -> list[tuple[str, str]]:
+    """(同义写法, 标准关系) 列表：先标准关系自身，再按白名单顺序展开同义写法。"""
+    pack = get_pack()
+    table = [(r, r) for r in pack.relations]
+    for std in pack.relations:
+        table.extend((alias, std) for alias in pack.normalize.relation_aliases.get(std, []))
+    return table
 
 
 def canonical_entity(name: str) -> str:
-    """实体消歧：去编号前缀 + 术语别名归一（复用 term_service）。"""
+    """实体消歧：领域包正则 + 精确映射 + 术语别名归一。"""
     if not name:
         return ""
+    pack = get_pack()
     s = name.strip()
-    s = _NO_PREFIX1.sub("", s)
-    s = _NO_PREFIX2.sub("", s)
-    s = term_normalize(s)  # 主变→主变压器 / SF6断路器 等领域归一
+    for pat, repl in _entity_patterns(pack.name):
+        s = pat.sub(repl, s)
+    s = pack.normalize.mappings.get(s.strip(), s)
+    s = term_normalize(s)
     return s.strip()
 
 
 def canonical_relation(rel: str) -> str:
-    """关系 schema 约束：映射到白名单标准关系，无法映射归为'相关'。"""
+    """关系 schema 约束：映射到领域包白名单中的标准关系，无法映射归为兜底关系。"""
+    pack = get_pack()
+    fallback = pack.normalize.fallback_relation
     if not rel:
-        return _FALLBACK_REL
+        return fallback
     r = rel.strip()
-    if r in _REL_SCHEMA:
+    if r in pack.relations:
         return r
-    for alias, std in _REL_ALIAS.items():
+    for alias, std in _relation_alias_table():
         if alias and alias in r:
             return std
-    return _FALLBACK_REL
+    return fallback

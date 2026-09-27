@@ -49,8 +49,10 @@ class NormalizePattern(BaseModel):
 
 
 class NormalizeRules(BaseModel):
-    mappings: dict[str, str] = Field(default_factory=dict)
-    patterns: list[NormalizePattern] = Field(default_factory=list)
+    mappings: dict[str, str] = Field(default_factory=dict)           # 实体：原名 → 标准名（精确匹配）
+    patterns: list[NormalizePattern] = Field(default_factory=list)   # 实体：正则替换，按顺序执行
+    relation_aliases: dict[str, list[str]] = Field(default_factory=dict)  # 关系：标准关系 → 同义写法
+    fallback_relation: str = "相关"                                   # 白名单外的关系归为此（保留连通性）
 
 
 class EntityLinkingConfig(BaseModel):
@@ -133,6 +135,13 @@ class DomainPack(BaseModel):
         if "text" not in {f for _, f, _, _ in string.Formatter().parse(v["extract"]) if f}:
             raise ValueError("prompts/extract.md 必须包含 {text}")
         return v
+
+    @model_validator(mode="after")
+    def _relation_aliases_in_whitelist(self):
+        bad = [r for r in self.normalize.relation_aliases if r not in self.relations]
+        if bad:
+            raise ValueError(f"normalize.yaml 的 relation_aliases 含白名单外的关系 {bad}")
+        return self
 
     def render_prompt(self, key: str, **kwargs) -> str:
         """渲染 prompt；entity_types/relations/display_name 由领域包自动填充。"""

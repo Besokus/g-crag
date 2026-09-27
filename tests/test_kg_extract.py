@@ -8,6 +8,17 @@ from app.services import kg_service as svc
 pytestmark = pytest.mark.usefixtures("grid_pack")
 
 
+def _sro(triples):
+    return [(t["s"], t["r"], t["o"]) for t in triples]
+
+
+def test_parse_keeps_types_and_chunk_no():
+    ans = '[{"s":"主变","r":"原因","o":"过载","s_type":"设备","o_type":"异常","chunk_no":"2"},{"s":"a","r":"b","o":"c","chunk_no":"x"}]'
+    out = svc._parse_triples_v2(ans)
+    assert out[0]["s_type"] == "设备" and out[0]["chunk_no"] == 2
+    assert out[1]["chunk_no"] == 0 and out[1]["s_type"] == ""
+
+
 # ---------- _parse_triples_v2 ----------
 def test_parse_json_array():
     ans = '[{"s":"主变压器","r":"原因","o":"冷却系统故障"},{"s":"断路器","r":"试验","o":"回路电阻测试"}]'
@@ -18,7 +29,7 @@ def test_parse_json_array():
 def test_parse_array_with_garbage_around():
     ans = '说明文字 [{"s":"A","r":"发生","o":"B"}] 后缀'
     out = svc._parse_triples_v2(ans)
-    assert out == [{"s": "A", "r": "发生", "o": "B"}]
+    assert _sro(out) == [("A", "发生", "B")]
 
 
 def test_parse_bad_json_returns_empty():
@@ -29,7 +40,7 @@ def test_parse_bad_json_returns_empty():
 def test_parse_drops_invalid_items_keeps_valid():
     ans = '[{"s":"好","r":"原因","o":"的"},{"s":"","r":"x","o":"y"},{"s":"a","r":"b","o":"c"}]'
     out = svc._parse_triples_v2(ans)
-    assert out == [{"s": "好", "r": "原因", "o": "的"}, {"s": "a", "r": "b", "o": "c"}]
+    assert _sro(out) == [("好", "原因", "的"), ("a", "b", "c")]
 
 
 def test_parse_line_fallback():

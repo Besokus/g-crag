@@ -179,10 +179,7 @@ def _dump_milvus_sync() -> dict:
                 e["embedding"] = base64.b64encode(
                     np.asarray(emb, dtype=np.float32).tobytes()).decode()
         out[cname] = {"fields": fields, "count": len(ents), "entities": ents}
-        try:
-            col.release()
-        except Exception:
-            pass
+        # 不 release：在线检索/删除依赖 collection 常驻加载（release 后 delete_by_doc 报 collection not loaded）
     return out
 
 
@@ -223,10 +220,7 @@ def _restore_milvus_sync(data: dict) -> dict:
         if vecs:
             milvus_client.insert_chunks(cname, vecs, texts, doc_ids, doc_names, chunk_idxs)
             restored += len(vecs)
-        try:
-            col.release()
-        except Exception:
-            pass
+        # 不 release：在线检索/删除依赖 collection 常驻加载（release 后 delete_by_doc 报 collection not loaded）
     return {"vectors": restored}
 
 

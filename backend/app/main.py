@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.core.otel_genai import init_otel
         init_otel()
-        print(f"[otel] 已初始化，采样率={settings.OTEL_SAMPLE_RATE}，端点={settings.OTEL_ENDPOINT}")
+        print(f"[otel] 已初始化，采样率={settings.OTEL_SAMPLE_RATE}，端点={settings.OTEL_ENDPOINT or '未配置（不导出）'}")
     except Exception as e:
         print(f"[otel] 初始化跳过：{e}")
 

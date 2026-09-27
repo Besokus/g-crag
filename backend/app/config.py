@@ -319,7 +319,7 @@ class Settings(BaseSettings):
 
     # ---------- N4 LLM 全链路可观测性 ----------
     OTEL_SAMPLE_RATE: float = 1.0          # 采样率：开发期 1.0(100%)，上线后 0.1(10%) + 异常必采
-    OTEL_ENDPOINT: str = "http://localhost:3001/api/public/otel"  # Langfuse OTLP HTTP 端点
+    OTEL_ENDPOINT: str = ""   # OTLP HTTP 端点；空=不导出（G-CRAG 已裁剪 Langfuse，原默认 http://localhost:3001/api/public/otel）
     OTEL_SERVICE_NAME: str = "grid-qa-backend"  # OTel service.name 标识
     # langfuse OTLP 鉴权（Basic Auth，双双非空才带头；scripts/langfuse_bootstrap.py 或 UI 创建）
     LANGFUSE_PUBLIC_KEY: str = ""

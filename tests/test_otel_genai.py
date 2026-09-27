@@ -231,3 +231,16 @@ def test_coerce_attr_list():
 def test_coerce_attr_dict_to_string():
     result = otel_genai._coerce_attr({"key": "val"})
     assert isinstance(result, str)
+
+
+def test_init_otel_without_endpoint_creates_no_exporter(monkeypatch):
+    """G-CRAG 默认不配 OTLP 端点：不创建 exporter，避免后台线程反复连接失败刷日志。"""
+    from opentelemetry import trace as _trace
+    monkeypatch.setattr(otel_genai, "_initialized", False)
+    monkeypatch.setattr(otel_genai, "_sample_rate", 1.0)
+    for k in ("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_ENDPOINT"):
+        monkeypatch.setattr(otel_genai.settings, k, "")
+    before = _trace.get_tracer_provider()
+    otel_genai.init_otel()
+    assert otel_genai._initialized is True
+    assert _trace.get_tracer_provider() is before

@@ -92,6 +92,10 @@ def init_otel(endpoint: str | None = None, sample_rate: float | None = None) -> 
             if getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", "") else "")
         or settings.OTEL_ENDPOINT
     )
+    if not ep:
+        # 未配置任何 OTLP 接收端：只保留进程内 span（qa_trace 不依赖导出），不创建 exporter/后台发送线程
+        _initialized = True
+        return
     resource = Resource.create({
         "service.name": settings.OTEL_SERVICE_NAME,
         "service.version": settings.APP_VERSION,

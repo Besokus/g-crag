@@ -284,7 +284,9 @@ class Settings(BaseSettings):
     EVOLUTION_RETEST_ENABLE: bool = True   # 回测开关：run_scan 入口对 indexed 草稿重跑 member_queries 算 lift
     EVOLUTION_RETEST_AFTER_DAYS: int = 7   # 回测触发阈值：仅 indexed_at 早于 N 天的草稿参与回测（给回流留生效窗口）
     KNOWLEDGE_EVOLUTION_CRON_HOURS: float = 24.0  # <=0 关闭自动扫描
-    EVIDENCE_GAP_DEEP_INTERVAL: float = 180.0     # <=0 关闭自动深度补全
+    # <=0 关闭自动深度补全。G-CRAG 默认关：定时任务会让 LLM 生成 FAQ 并直接入库，正文可能夹带 LLM 过程独白，
+    # 且会把 LLM 生成内容混入评测语料、破坏可复现性（验收记录 M5）；缺口仍自动收集，可在管理页手动补全
+    EVIDENCE_GAP_DEEP_INTERVAL: float = 0.0
     EVIDENCE_GAP_DEEP_BATCH: int = 5
 
     # ---------- judge 聚合差评文档 → 治理 issue（B3 路径3，不动在线权重）----------

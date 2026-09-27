@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
     try:
         from app.services.evidence_gap_service import deep_cron_loop
         from app.config import settings as _settings
-        if float(getattr(_settings, "EVIDENCE_GAP_DEEP_INTERVAL", 180)) > 0:
+        if float(getattr(_settings, "EVIDENCE_GAP_DEEP_INTERVAL", 0)) > 0:
             app.state.evidence_gap_cron_task = asyncio.create_task(deep_cron_loop("default"))
             print("[evidence-gap] 证据补全定时深度补全已启动")
     except Exception as e:

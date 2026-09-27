@@ -391,7 +391,7 @@ async def batch_deep_and_sync(tenant: str = "default", limit: int = 5,
 async def deep_cron_loop(tenant: str = "default"):
     """定时深度补全+落库（lifespan 启动；周期=EVIDENCE_GAP_DEEP_INTERVAL 秒，<=0 关闭；批量=EVIDENCE_GAP_DEEP_BATCH）。"""
     from app.config import settings
-    interval = float(getattr(settings, "EVIDENCE_GAP_DEEP_INTERVAL", 180))
+    interval = float(getattr(settings, "EVIDENCE_GAP_DEEP_INTERVAL", 0))
     limit = int(getattr(settings, "EVIDENCE_GAP_DEEP_BATCH", 5))
     if interval <= 0:
         return

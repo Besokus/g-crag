@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     # 把单次总时长压到 ~8s。timeout/retry 防 deepseek 卡死/空 answer 拖到分钟级（OpenAI SDK 默认 600s/2次）。
     LLM_MAX_TOKENS: int = 768          # 单次生成上限（运维问答无需 2048 长篇）
     LLM_TIMEOUT: float = 30.0          # 单次请求超时（SDK 默认 600s 过大）
+    KG_EXTRACT_TIMEOUT: float = 120.0  # 建图抽取单批超时：一批 6 个 chunk、输出上限 4096 token，30s 常不够（M5 实测）
     LLM_MAX_RETRIES: int = 1           # 失败重试次数（默认 2 次指数退避，缩到 1 防尾部放大）
     # 模型路由（L0 fallback + L1 熔断 + L2 分档）：deepseek-v4-flash 实测返空 answer，
     # 原实现无 fallback 直接返空给用户。fallback 链按序切备；后台探活熔断故障 provider；

@@ -198,7 +198,7 @@ async def _extract_from_chunks(provider, chunks: list, stats: dict | None = None
         try:
             ans = await provider.chat(
                 [{"role": "user", "content": pack.render_prompt("extract", text=text)}],
-                temperature=0.1, max_tokens=4096,
+                temperature=0.1, max_tokens=4096, timeout=settings.KG_EXTRACT_TIMEOUT,
             )
             for tp in _parse_triples_v2(ans):
                 tp["_batch"] = batch

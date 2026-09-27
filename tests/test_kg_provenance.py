@@ -82,12 +82,14 @@ def test_prompt_numbers_chunks_and_renders_pack_schema():
     class _Prov:
         async def chat(self, msgs, **kw):
             seen["prompt"] = msgs[0]["content"]
+            seen["timeout"] = kw.get("timeout")
             return '[{"s":"华为","r":"发布","o":"Mate 60 Pro","s_type":"组织","o_type":"产品","chunk_no":1}]'
 
     raw = asyncio.run(svc._extract_from_chunks(_Prov(), BATCH[:2]))
     assert "[1] 华为在深圳" in seen["prompt"] and "[2] 发布会" in seen["prompt"]
     assert "人物、组织" in seen["prompt"] and "任职于" in seen["prompt"]
     assert raw[0]["chunk_no"] == 1 and raw[0]["_batch"] == BATCH[:2]
+    assert seen["timeout"] == svc.settings.KG_EXTRACT_TIMEOUT   # 建图用单独的长超时，不用问答的 LLM_TIMEOUT
 
 
 def test_general_relations_normalized_by_pack():

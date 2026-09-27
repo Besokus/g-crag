@@ -67,6 +67,12 @@ async def lifespan(app: FastAPI):
 
     setup_logging()
 
+    # 领域包：部署级生效，校验失败直接抛出（启动即失败，ADR 0005）
+    from app.core.domain_pack import get_pack
+    _pack = get_pack()
+    print(f"[domain-pack] 已加载 {_pack.name}（{_pack.display_name}）：{len(_pack.entity_types)} 类实体、"
+          f"{len(_pack.relations)} 种关系、{len(_pack.aliases)} 条别名")
+
     # 安全自检（占位密钥/默认口令 → WARN + grid_insecure_config 指标；不拦截只可见）
     try:
         from app.core.security_check import run_startup_check

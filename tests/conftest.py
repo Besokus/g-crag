@@ -39,6 +39,21 @@ def _reset_quality_bus_subscribers():
         pass
 
 
+@pytest.fixture
+def grid_pack(monkeypatch, tmp_path):
+    """切换到电网领域包（用例依赖电网别名/关系时用）；词表编辑写到临时目录。"""
+    from app.core import domain_pack
+    from app.services import term_service
+
+    monkeypatch.setattr(domain_pack.settings, "DOMAIN_PACK", "grid")
+    monkeypatch.setattr(term_service, "_BACKEND_ROOT", tmp_path)
+    domain_pack.get_pack.cache_clear()
+    term_service._load_terms.cache_clear()
+    yield domain_pack.get_pack()
+    domain_pack.get_pack.cache_clear()
+    term_service._load_terms.cache_clear()
+
+
 @pytest_asyncio.fixture
 async def test_db():
     """sqlite in-memory 单测会话（unit test 用；集成测试连真实 MySQL 不用它）。

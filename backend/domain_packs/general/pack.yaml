@@ -1,0 +1,19 @@
+# 通用领域包：CRUD-RAG 中文新闻主评测使用（ADR 0007）。字段含义见《设计文档》§3.2、§16.11
+name: general
+display_name: 通用
+entity_linking:
+  chain: [dictionary, embedding]
+  embedding_threshold: 0.75        # 需用标定集标定
+graph_evidence:
+  max_hops: 2
+  hub_degree: 30                   # 度数超过即为枢纽实体
+  start_hub_max_hops: 1            # 起点本身是枢纽实体时只扩展 1 跳
+  max_candidates: 30
+scorer:
+  name: dashscope_rerank
+  high: null                       # null = 使用该打分器的标定值（scorer_thresholds/<scorer>.yaml）
+  low: null
+chunking:
+  size: 500
+  overlap: 50
+doc_type_rules: []

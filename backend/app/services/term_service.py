@@ -1,15 +1,22 @@
-"""电网术语归一化：别名/错别字 → 标准术语。词表见 data/grid_terms.json。"""
+"""术语归一化：别名/错别字 → 标准术语。
+
+词表来自当前领域包的 aliases.json（《设计文档》§16.11）；后台编辑后整表写入
+data/terms/<pack>.json（数据卷持久化），此后以该文件为准。
+"""
 import json
 from functools import lru_cache
 from pathlib import Path
 
+_BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
 
 @lru_cache
 def _load_terms() -> dict:
-    p = Path(__file__).resolve().parent.parent / "data" / "grid_terms.json"
+    p = _terms_path()
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8"))
-    return {}
+    from app.core.domain_pack import get_pack
+    return dict(get_pack().aliases)
 
 
 def normalize(text: str) -> str:
@@ -38,7 +45,9 @@ def normalize(text: str) -> str:
 # ===== 词表管理（BRD §4.1.4 后台 CRUD）=====
 
 def _terms_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "data" / "grid_terms.json"
+    """后台编辑后的词表（按领域包分文件，避免切换领域包时串用）。"""
+    from app.config import settings
+    return _BACKEND_ROOT / "data" / "terms" / f"{settings.DOMAIN_PACK}.json"
 
 
 def list_terms() -> list[dict]:

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
 
     # ---------- 应用 ----------
-    APP_NAME: str = "电网运维 RAG 智能问答系统"
+    APP_NAME: str = "G-CRAG 图谱纠错智能问答"
     APP_VERSION: str = "0.1.0"
     BACKEND_HOST: str = "127.0.0.1"
     BACKEND_PORT: int = 8001   # 本机 8000 被 Manager.exe 占用，固定 8001
@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     STARTUP_DEPENDENCY_RETRIES: int = 0   # >0 时启动前等待 MySQL（单 Pod 演示模式）
     STARTUP_DEPENDENCY_INTERVAL: float = 2.0
     STARTUP_COMPONENT_RETRIES: int = 1    # >1 时 MinIO/Milvus 初始化失败会在启动期重试
+
+    # ---------- 领域包（ADR 0002、0005；《设计文档》§16.11）----------
+    DOMAIN_PACK: str = "general"             # 部署级生效：启动时加载并校验，失败即启动失败
+    DOMAIN_PACKS_DIR: str = "domain_packs"   # 相对 backend/（镜像内 /app）
 
     # ---------- MySQL ----------
     DATABASE_URL: str = (

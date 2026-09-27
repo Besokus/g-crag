@@ -1,5 +1,9 @@
-"""术语归一化单测。"""
+"""术语归一化单测（电网领域包的别名表）。"""
+import pytest
+
 from app.services.term_service import normalize
+
+pytestmark = pytest.mark.usefixtures("grid_pack")
 
 
 def test_alias_normalized():

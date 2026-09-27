@@ -1,0 +1,26 @@
+# 电网领域包：由 grid-qa 原有 schema、别名表、prompt 抽取而成，只用于演示与复盘（不进主评测，ADR 0007）
+name: grid
+display_name: 电网运维
+entity_linking:
+  chain: [dictionary, embedding]
+  embedding_threshold: 0.75
+graph_evidence:
+  max_hops: 2
+  hub_degree: 30
+  start_hub_max_hops: 1
+  max_candidates: 30
+scorer:
+  name: dashscope_rerank
+  high: null
+  low: null
+chunking:
+  size: 500
+  overlap: 50
+doc_type_rules:                    # 原 kb_seed/seed_kb.py 的文件名前缀
+  - {pattern: "^故障案例", doc_type: 故障案例}
+  - {pattern: "^操作规程", doc_type: 操作规程}
+  - {pattern: "^运维手册", doc_type: 运维手册}
+  - {pattern: "^安全规程", doc_type: 安全规程}
+  - {pattern: "^标准条文", doc_type: 标准条文}
+  - {pattern: "^检修规程", doc_type: 检修规程}
+  - {pattern: "^应急预案", doc_type: 应急预案}

@@ -19,14 +19,23 @@ SYSTEM_PROMPT = """你是电网运维专业问答助手，严格依据"参考资
 """
 
 
+def _pack_system_prompt() -> str:
+    """当前领域包的角色 prompt（prompts/system.md）；领域包不可用时退回 code 默认。"""
+    try:
+        from app.core.domain_pack import get_pack
+        return get_pack().render_prompt("system")
+    except Exception:
+        return SYSTEM_PROMPT
+
+
 def get_system_prompt() -> str:
-    """生效的 system prompt：管理员后台覆盖优先（config_service 热读缓存），否则 code 默认。"""
+    """生效的 system prompt：管理员后台覆盖优先（config_service 热读缓存），否则领域包默认。"""
     try:
         from app.services.config_service import rt_system_prompt
         v = rt_system_prompt()
-        return v if v else SYSTEM_PROMPT
+        return v if v else _pack_system_prompt()
     except Exception:
-        return SYSTEM_PROMPT
+        return _pack_system_prompt()
 
 
 def build_messages(query: str, contexts: list[dict]) -> list[dict]:

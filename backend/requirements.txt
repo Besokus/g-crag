@@ -38,6 +38,7 @@ jieba>=0.42
 # ===== 优化阶段：缓存/日志/测试/限流/监控/本地embedding =====
 redis>=5.0          # 异步热点问答缓存
 loguru>=0.7         # 结构化日志
+pyyaml>=6.0         # 领域包 pack.yaml / schema.yaml
 pytest>=8.0         # 测试
 pytest-asyncio>=0.24 # 异步队列/事件中心集成测试
 aiosqlite>=0.20      # CI 使用 SQLite 验证持久化任务与 Outbox

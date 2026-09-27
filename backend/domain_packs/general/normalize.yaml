@@ -1,0 +1,5 @@
+# 实体归一化规则：mappings 为精确映射（原名 → 标准名），patterns 为正则替换，按顺序执行
+mappings: {}
+patterns:
+  - regex: "^[“\"《]+|[”\"》]+$"   # 去掉首尾引号/书名号
+    replace: ""

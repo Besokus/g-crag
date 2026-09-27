@@ -1,5 +1,9 @@
-"""知识图谱实体消歧 + 关系 schema 约束单测（A5，纯逻辑）。"""
+"""知识图谱实体消歧 + 关系 schema 约束单测（A5，纯逻辑；用例基于电网领域包）。"""
+import pytest
+
 from app.services.kg_normalize import canonical_entity, canonical_relation
+
+pytestmark = pytest.mark.usefixtures("grid_pack")
 
 
 def test_entity_strip_number_prefix():

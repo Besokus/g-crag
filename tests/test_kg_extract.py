@@ -1,6 +1,11 @@
-"""KG 三元组抽取重写单测：解析 / 噪声过滤 / 归一去重 / e2e mock。"""
+"""KG 三元组抽取重写单测：解析 / 噪声过滤 / 归一去重 / e2e mock（用例基于电网领域包）。"""
 import asyncio
+
+import pytest
+
 from app.services import kg_service as svc
+
+pytestmark = pytest.mark.usefixtures("grid_pack")
 
 
 # ---------- _parse_triples_v2 ----------

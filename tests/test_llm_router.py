@@ -137,6 +137,7 @@ def test_resolve_chain_user_priority(monkeypatch):
     """用户显式选优先（排链头），fallback 链跟后，去重保序。"""
     from app.config import settings
     monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", "qwen,deepseek")   # 不依赖本地 .env
+    monkeypatch.setattr(settings, "LLM_ALLOW_USER_SELECT", True)
     chain = resolve_chain("deepseek")
     assert chain[0] == "deepseek"          # 用户选在前
     assert "qwen" in chain
@@ -220,3 +221,14 @@ def test_should_actively_probe_includes_cloud_providers():
     assert _should_actively_probe("qwen") is True
     assert _should_actively_probe("deepseek") is True
     assert _should_actively_probe("doubao") is True
+
+
+def test_user_selection_ignored_by_default(monkeypatch):
+    """默认只走兜底链：请求里的 modelType 不会绕过 Claude 去调用其他 provider。"""
+    from app.config import settings
+    from app.providers.factory import llm_cache_tag
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", "claude")
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "claude")
+    monkeypatch.setattr(settings, "LLM_ALLOW_USER_SELECT", False)
+    assert resolve_chain("qwen") == ["claude"]
+    assert llm_cache_tag("qwen").startswith("claude@")    # 缓存标签与实际模型一致

@@ -102,7 +102,8 @@ def resolve_chain(model_type: str | None = None) -> list[str]:
             seen.add(p)
             chain.append(p)
 
-    add(model_type)              # 1) 用户显式选优先
+    if settings.LLM_ALLOW_USER_SELECT:
+        add(model_type)          # 1) 用户显式选优先（默认关：所有 LLM 调用只走 LLM_FALLBACK_CHAIN）
     for p in _fallback_chain():  # 2) fallback 链
         add(p)
     return chain

@@ -19,3 +19,11 @@ LLM 渠道改为一个 Claude 代理（Anthropic Messages 协议，模型 claude
 - 是否发送 `temperature` 由 `CLAUDE_SEND_TEMPERATURE` 控制：claude-sonnet-4-6 接受（默认 true，建图抽取保持 0.1 低温度）；claude-opus-4-8 会拒绝，换用时须设为 false。
 - 答案缓存键原先在未指定模型时一律记作 `default`，换模型后仍会命中旧模型的答案；已改为 `provider@模型名`（见《设计文档》§17）。
 - 换模型改变了基线表现：不可答题 tu01 在 qwen 下编造答案，在 claude-opus-4-8 下正确拒答（Sonnet 下的表现以实测为准）。对照实验必须在同一模型下进行，报告中注明所用模型。
+
+## 修订（2026-09-29 晚）：所有 LLM 调用只走 Claude
+
+按成本要求，**所有 LLM 调用（问答生成、查询改写、建图抽取、评测判定、闭卷基线）都只走 Claude 代理**；阿里百炼只用于 Claude 不提供的能力：embedding、rerank 打分、OCR。
+
+- 新增 `LLM_ALLOW_USER_SELECT`（默认 false）：忽略请求中的 `modelType`，调用链只由 `LLM_FALLBACK_CHAIN`（= `claude`）决定；前端聊天页与图谱页去掉模型下拉框。
+- 评测判定模型由 qwen-max 改为 Claude（与生成同一模型）。同模型自评可能偏宽松：在已有两份判定的运行上，Claude 与 qwen-max 的一致率为 calib1 91.4%、test2 86.4%，分歧以"qwen 判错、Claude 判对"为主（13 条对 4 条）。报告以 Claude 判定为主，并给出该一致率与人工抽查一致率。
+

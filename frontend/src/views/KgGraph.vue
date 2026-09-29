@@ -27,9 +27,7 @@
           <option value="">选择文档抽取三元组…</option>
           <option v-for="d in docs" :key="d.docId" :value="d.docId">{{ d.docName }}（{{ d.status }}）</option>
         </select>
-        <select class="select" v-model="modelType" style="max-width:140px">
-          <option value="">默认模型</option><option value="qwen">通义千问</option><option value="deepseek">DeepSeek</option><option value="doubao">豆包</option>
-        </select>
+        <!-- 抽取模型由部署统一配置（只走 Claude），不提供按请求切换 -->
         <button class="btn btn-primary" @click="doExtract" :disabled="!selDoc || extracting">{{ extracting ? '抽取中…(LLM 分块)' : '抽取三元组' }}</button>
       </div>
       <div ref="graphEl" class="graph" v-if="graph.nodes.length">

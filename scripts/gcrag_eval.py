@@ -20,7 +20,7 @@ build 输出（默认 /app/gcrag_eval/general/）：
 
 评测（逻辑在 gcrag_eval_runner.py；产物在 /app/gcrag_eval/general/runs/<run_id>/）：
     ... gcrag_eval.py run --split calib --modes none --run-id calib1       # 按模式调 /qa/answer（noCache）
-    ... gcrag_eval.py judge --run-id calib1                               # 规则 + 判定模型（默认 qwen-max）
+    ... gcrag_eval.py judge --run-id calib1                               # 规则 + 判定模型（默认 Claude）
     ... gcrag_eval.py calibrate --run-id calib1                           # 用 none 模式结果扫描阈值
     ... gcrag_eval.py report --run-id test1                               # 指标表 report.md + metrics.json
 """
@@ -489,11 +489,13 @@ async def _eval_cmd(args) -> int:
         from app.providers.factory import _get_raw_provider
         prov = _get_raw_provider(args.judge_provider)
 
+        model = args.judge_model or getattr(prov, "model", "")
+
         async def chat(prompt: str) -> str:
             return await prov.chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=300,
-                                   model=args.judge_model)
-        counts = await R.judge(run_dir, questions, chat_fn=chat, judge_model=f"{args.judge_provider}:{args.judge_model}",
-                               concurrency=args.concurrency)
+                                   model=model)
+        counts = await R.judge(run_dir, questions, chat_fn=chat, judge_model=f"{args.judge_provider}:{model}",
+                               concurrency=args.concurrency, output=args.output)
         print("JUDGE_OK " + json.dumps(counts, ensure_ascii=False))
         return 0
     judgments = R.load_jsonl(run_dir / "judgments.jsonl")
@@ -566,8 +568,9 @@ def main() -> int:
     j = sub.add_parser("judge", help="判定 correct / wrong / refused")
     j.add_argument("--out", type=Path, default=OUT_DEFAULT)
     j.add_argument("--run-id", required=True)
-    j.add_argument("--judge-provider", default="qwen")
-    j.add_argument("--judge-model", default="qwen-max")
+    j.add_argument("--judge-provider", default="claude", help="默认 Claude：阿里百炼只用于 embedding/rerank/OCR")
+    j.add_argument("--judge-model", default="", help="空 = 该 provider 的默认模型")
+    j.add_argument("--output", default="judgments.jsonl", help="判定结果文件名（换判定模型对比时另存）")
     j.add_argument("--concurrency", type=int, default=4)
     c = sub.add_parser("calibrate", help="用标定集 none 模式结果扫描 (high, low)")
     c.add_argument("--out", type=Path, default=OUT_DEFAULT)

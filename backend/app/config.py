@@ -62,6 +62,9 @@ class Settings(BaseSettings):
 
     # ---------- 模型 Provider ----------
     LLM_PROVIDER: str = "deepseek"      # deepseek | qwen | doubao | claude
+    # 是否允许请求按 modelType 指定 LLM provider。默认关：所有 LLM 调用只走 LLM_FALLBACK_CHAIN
+    # （G-CRAG 部署只用 Claude；阿里百炼只用于 embedding / rerank / OCR）
+    LLM_ALLOW_USER_SELECT: bool = False
     EMB_PROVIDER: str = "qwen"          # qwen | doubao
     EMBEDDING_DIM: int = 1024
     EMB_BATCH_CONCURRENCY: int = 3      # 云 embedding 批次并发度（防 429，文档批量向量化加速）

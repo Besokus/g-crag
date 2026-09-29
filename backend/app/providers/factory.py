@@ -14,7 +14,8 @@ def llm_cache_tag(model_type: str | None) -> str:
     """
     if model_type and "@" in model_type:
         return model_type
-    p = model_type if model_type and model_type not in ("default", "auto") else settings.LLM_PROVIDER
+    user_pick = settings.LLM_ALLOW_USER_SELECT and model_type and model_type not in ("default", "auto")
+    p = model_type if user_pick else settings.LLM_PROVIDER
     name = {"qwen": settings.QWEN_LLM_MODEL, "claude": settings.CLAUDE_MODEL,
             "deepseek": settings.DEEPSEEK_MODEL, "doubao": settings.DOUBAO_LLM_ENDPOINT_ID}.get(p, "")
     return f"{p}@{name}"

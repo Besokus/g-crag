@@ -4,7 +4,8 @@
   不给任何资料。结果按模式写 <mode>.jsonl，已有的题跳过（断点续跑）。打分器录制回放由服务端
   SCORER_CACHE 控制，结束时把录制文件复制进运行目录。
 - judge：系统拒答（cragAction=refused）按规则判 refused；其余由判定模型对照标准答案判
-  correct / wrong / refused。判定模型默认 qwen-max：生成用 Claude，换一个模型家族来判，避免自评偏向。
+  correct / wrong / refused。判定模型默认 Claude（与生成同一模型，所有 LLM 调用只走 Claude 以控制成本）；
+  同模型自评可能偏宽松，报告中用人工抽查一致率、以及与 qwen-max 早期判定的一致率说明判定可信度。
 - calibrate：用标定集 none 模式的 top1 分数与判定结果扫描阈值（规则见 calibrate 的文档字符串）。
 - report：按模式汇总准确率、拒答率、误拒率、挽回率、代价。
 """
@@ -178,9 +179,9 @@ def parse_verdict(text: str) -> tuple[str, str]:
 
 
 async def judge(run_dir: Path, questions: list[dict], *, chat_fn, judge_model: str,
-                concurrency: int = 4) -> dict:
+                concurrency: int = 4, output: str = "judgments.jsonl") -> dict:
     qmap = {q["id"]: q for q in questions}
-    out = run_dir / "judgments.jsonl"
+    out = run_dir / output
     done = {(r["id"], r["mode"]) for r in load_jsonl(out)}
     sem = asyncio.Semaphore(concurrency)
     counts: Counter = Counter()

@@ -164,12 +164,7 @@
       </div>
 
       <div class="input-bar">
-        <select class="select model-sel" v-model="modelType">
-          <option value="">默认模型</option>
-          <option value="deepseek">DeepSeek</option>
-          <option value="qwen">通义千问</option>
-          <option value="doubao">豆包</option>
-        </select>
+        <!-- LLM 由部署统一配置（只走 Claude，LLM_ALLOW_USER_SELECT 默认关），不提供按请求切换 -->
         <label class="ws-toggle" title="WebSocket 双向流式（默认 SSE）"><input type="checkbox" v-model="useWS" /> WS</label>
         <label class="ws-toggle" title="深度思考：AI 自主多轮调工具(检索/图谱/案例)交叉验证后作答（仅 SSE）"><input type="checkbox" v-model="agentMode" /> 🎯深度</label>
         <button v-if="asrSupported" class="btn btn-ghost btn-sm" style="flex:none"
@@ -422,7 +417,7 @@ function confLabel(c) { return ({ high: '✓ 高置信', medium: '⚠ 证据有�
 function confTitle(c) { return ({ high: '检索证据充分，答案可信度高', medium: '检索相关性中等，部分内容建议人工核对', refused: '未找到强相关资料，答案已保守处理' })[c] || '' }
 function confBadge(c) { return ({ high: 'badge-success', medium: 'badge-warning', refused: 'badge-danger' })[c] || 'badge-neutral' }
 function routeLabel(r) { return ({ sparse: '🔤 纯 BM25 匹配(sparse)', dense: '🧠 向量语义检索(dense)', hybrid: '🔀 全链路(hybrid)', sparse_first: '🔤→🔀 关键词优先(sparse_first)' })[r] || r }
-function modelLabel(m) { return ({ deepseek: 'DeepSeek', qwen: '通义千问', doubao: '豆包', ollama: '本地应急模型' })[m] || m }
+function modelLabel(m) { return ({ claude: 'Claude', deepseek: 'DeepSeek', qwen: '通义千问', doubao: '豆包', ollama: '本地应急模型' })[m] || m }
 function routeBadge(r) { return ({ sparse: 'badge-sparse', dense: 'badge-dense', hybrid: 'badge-neutral', sparse_first: 'badge-warning' })[r] || 'badge-neutral' }
 // 缓存层标识：redis(L1热点) / mysql(L2持久) / semantic_*(L1.5相似) 三态区分
 function cacheLabel(l) { return ({ redis: '高频问答·热点', mysql: '高频问答·历史' })[l] || (l && l.startsWith('semantic') ? '高频问答·相似' : '高频问答') }

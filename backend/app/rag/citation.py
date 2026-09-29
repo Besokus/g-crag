@@ -24,13 +24,31 @@ def estimate_hallucination(answer: str, ref_count: int) -> float:
 
 # ===== P4-⑮ 证据溯源 & 高亮 =====
 
-_SENTENCE_SPLIT = re.compile(r"(?<=[。！？！?.])\s*")
+# 句末：中文句末标点；ASCII 的 . ! ? 后面紧跟数字或字母时不算句末（小数点 13.57、版本号 V1.2、
+# 缩写 U.S.）。原正则把小数点当句号，auto_cite 再把角标插在"句末标点"前 → 13[1].57亿元。
+_SENTENCE_END = re.compile(r"[。！？]|[.!?](?![0-9A-Za-z])")
+
+
+def split_sentences_keep(text: str) -> list[tuple[str, str]]:
+    """分句并保留句间空白：[(句子含句末标点, 其后的空白)]。拼回 s+sep 与原文完全一致。"""
+    text = text or ""
+    out: list[tuple[str, str]] = []
+    start = 0
+    for m in _SENTENCE_END.finditer(text):
+        end = m.end()
+        ws = end
+        while ws < len(text) and text[ws].isspace():
+            ws += 1
+        out.append((text[start:end], text[end:ws]))
+        start = ws
+    if start < len(text):
+        out.append((text[start:], ""))
+    return out
 
 
 def split_sentences(text: str) -> list[str]:
     """按句末标点分句，保留标点。"""
-    parts = _SENTENCE_SPLIT.split(text or "")
-    return [p.strip() for p in parts if p.strip()]
+    return [s.strip() for s, _ in split_sentences_keep(text) if s.strip()]
 
 
 _CITATION_PATTERN = re.compile(r"\[(\d+(?:,\s*\d+)*)\]")
@@ -142,8 +160,11 @@ async def auto_cite(answer: str, contexts: list[dict],
     if threshold is None:
         threshold = getattr(settings, "CITATION_SIM_THRESHOLD", 0.6)
 
-    sentences = split_sentences(answer)
-    bare_idx = [i for i, s in enumerate(sentences) if not extract_sentence_sources(s)]
+    # 保留句间空白（换行、Markdown 分隔线/标题前的空行），原实现拼回时丢掉了全部换行
+    parts = split_sentences_keep(answer)
+    sentences = [p[0] for p in parts]
+    bare_idx = [i for i, s in enumerate(sentences)
+                if s.strip() and not extract_sentence_sources(s)]
     annotated = list(sentences)
 
     if bare_idx:
@@ -153,7 +174,7 @@ async def auto_cite(answer: str, contexts: list[dict],
             # （EMBED_CHUNK_CACHE_ENABLE 默认关；关时 chunk_ids 被忽略，行为=现状）
             chunk_ids = [c.get("chunkId") or c.get("chunk_id") or "" for c in contexts]
             chunk_embs = await embedding_service.embed_texts(chunk_texts, chunk_ids=chunk_ids)
-            bare_embs = await embedding_service.embed_texts([sentences[i] for i in bare_idx])
+            bare_embs = await embedding_service.embed_texts([sentences[i].strip() for i in bare_idx])
             sim = _cosine_mat(bare_embs, chunk_embs)   # (len(bare), len(chunks))
             for row, si in enumerate(bare_idx):
                 if not sim[row]:
@@ -163,10 +184,12 @@ async def auto_cite(answer: str, contexts: list[dict],
                     s = sentences[si]
                     tag = f"[{best_k + 1}]"
                     # 角标插在句末标点之前，避免分句时跑到下一句（与 LLM 原生角标位置一致）
-                    if s and s[-1] in "。！？!.?":
-                        annotated[si] = s[:-1] + tag + s[-1]
+                    body = s.rstrip()
+                    tail = s[len(body):]
+                    if body and body[-1] in "。！？!.?":
+                        annotated[si] = body[:-1] + tag + body[-1] + tail
                     else:
-                        annotated[si] = s + tag
+                        annotated[si] = body + tag + tail
         except Exception as e:
             try:
                 from app.core.obs import degraded
@@ -174,5 +197,5 @@ async def auto_cite(answer: str, contexts: list[dict],
             except Exception:
                 pass
 
-    new_answer = "".join(annotated)
+    new_answer = "".join(a + sep for a, (_, sep) in zip(annotated, parts))
     return new_answer, evidence_trace(new_answer)

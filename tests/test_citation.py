@@ -481,3 +481,26 @@ def test_stream_done_no_citation_when_disabled(monkeypatch):
     assert called["apply"] is False               # 关时不调校验
     done = [e for e in events if e.get("type") == "done"]
     assert done and "citationVerified" not in done[0]
+
+
+# ---- 分句：小数点不是句号；auto_cite 保留换行（M6 前修复，设计文档 §17）----
+
+def test_split_sentences_keeps_decimals_and_versions():
+    assert citation.split_sentences("中标金额为13.57亿元，占比72.86%。版本V1.2已发布。Done. 好的") == \
+        ["中标金额为13.57亿元，占比72.86%。", "版本V1.2已发布。", "Done.", "好的"]
+
+
+def test_split_sentences_keep_roundtrip():
+    text = "**结论**\n\n金额13.57亿元。\n\n---\n\n**依据**\n- 第一条。\n- 第二条"
+    assert "".join(s + sep for s, sep in citation.split_sentences_keep(text)) == text
+
+
+def test_auto_cite_no_tag_inside_number_and_keeps_newlines(monkeypatch):
+    async def fake_embed(texts, chunk_ids=None):
+        return [[1.0, 0.0]] * len(texts)          # 全部命中 chunk0
+    monkeypatch.setattr("app.services.embedding_service.embed_texts", fake_embed)
+    answer = "**结论**\n\n中标金额为13.57亿元。\n\n---\n\n出资比例为72.86%。"
+    annotated, _ = _run(citation.auto_cite(answer, [{"chunk": "x"}], threshold=0.6))
+    assert "13.57亿元[1]。" in annotated and "72.86%[1]。" in annotated
+    assert "13[1]" not in annotated and "72[1]" not in annotated
+    assert "\n\n---\n\n" in annotated                # 原实现丢掉全部换行 → "。---"

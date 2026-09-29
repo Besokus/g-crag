@@ -91,6 +91,45 @@ async def upsert_triples(triples: list[dict], doc_id: str, doc_name: str) -> int
     return len(triples)
 
 
+async def find_evidence_paths(starts: list[str], *, max_hops: int, hub_degree: int,
+                              start_hub_max_hops: int, limit: int = 200) -> list[dict]:
+    """图谱定位证据的路径查询（设计文档 §8.1、§8.2、§16.6）。
+
+    无向遍历；只走 chunk_ids 非空的边；枢纽实体（degree > hub_degree）可作终点、不作中间节点；
+    起点本身是枢纽时只扩 start_hub_max_hops 跳（0 = 不从枢纽出发）。起点按名称精确匹配
+    （原 get_paths 为有向 + 子串匹配 + 无枢纽控制，不用于问答）。
+    返回 [{"start", "chain": [...], "rels": [{"type","chunk_ids","from","to"}]}]，按跳数升序。
+    """
+    for v in (max_hops, hub_degree, start_hub_max_hops, limit):   # 跳数要拼进 Cypher，先做整数校验
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise ValueError(f"非法参数: {v!r}")
+    if not starts or max_hops < 1:
+        return []
+    async with _get().session() as s:
+        res = await s.run("MATCH (n:Entity) WHERE n.name IN $names RETURN n.name AS name, "
+                          "coalesce(n.degree, 0) AS degree", names=list(starts))
+        deg = {r["name"]: r["degree"] async for r in res}
+        q_tpl = ("MATCH p = (s:Entity {name: $start})-[rs:REL*1..%d]-(t:Entity) "
+                 "WHERE t <> s "
+                 "AND all(r IN rs WHERE size(coalesce(r.chunk_ids, [])) > 0) "
+                 "AND all(n IN nodes(p)[1..-1] WHERE coalesce(n.degree, 0) <= $hub_degree) "
+                 "RETURN [n IN nodes(p) | n.name] AS chain, "
+                 "[r IN rs | {type: r.type, chunk_ids: r.chunk_ids, "
+                 "from: startNode(r).name, to: endNode(r).name}] AS rels "
+                 "ORDER BY length(p) ASC LIMIT $limit")
+        out: list[dict] = []
+        for name in dict.fromkeys(starts):          # 每个起点单独限额，避免邻居多的实体独占结果
+            if name not in deg:
+                continue
+            hops = max_hops if deg[name] <= hub_degree else min(start_hub_max_hops, max_hops)
+            if hops < 1:
+                continue
+            res = await s.run(q_tpl % hops, start=name, hub_degree=hub_degree, limit=limit)
+            out.extend([{"start": name, "chain": r["chain"], "rels": r["rels"]} async for r in res])
+        out.sort(key=lambda x: len(x["rels"]))
+        return out
+
+
 async def list_entities() -> list[tuple[str, int]]:
     """全部实体 (名称, 无向度数)，供实体链接的词典与向量索引加载。"""
     async with _get().session() as s:

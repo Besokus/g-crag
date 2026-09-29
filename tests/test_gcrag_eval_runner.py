@@ -56,20 +56,28 @@ def test_calibrate_respects_false_refusal_cap():
 
 
 def test_metrics_rates_and_rescue():
-    qs = [Q("a", qtype="double"), Q("b", qtype="double"), Q("u", answerable=False)]
+    qs = [Q("a", qtype="double"), Q("b", qtype="double"), Q("c", qtype="double"), Q("u", answerable=False)]
     runs = {"gcrag": [
         {"id": "a", "initialGrade": "ambiguous", "cragAction": "graph_recovered", "latencyMs": 100,
-         "correctionRounds": [{"action": "graph_evidence", "status": "done", "gradeAfter": "correct"}]},
+         "correctionRounds": [{"action": "graph_evidence", "status": "done", "gradeBefore": "ambiguous",
+                               "gradeAfter": "correct"}]},
         {"id": "b", "initialGrade": "incorrect", "cragAction": "refused", "latencyMs": 300,
-         "correctionRounds": [{"action": "graph_evidence", "status": "skipped_no_entity", "gradeAfter": "incorrect"},
-                              {"action": "rewrite", "status": "done", "gradeAfter": "incorrect"}]},
+         "correctionRounds": [{"action": "graph_evidence", "status": "skipped_no_entity",
+                               "gradeBefore": "incorrect", "gradeAfter": "incorrect"},
+                              {"action": "rewrite", "status": "done", "gradeBefore": "incorrect",
+                               "gradeAfter": "incorrect"}]},
+        {"id": "c", "initialGrade": "ambiguous", "cragAction": "ambiguous_kept", "latencyMs": 150,
+         "correctionRounds": [{"action": "graph_evidence", "status": "done", "gradeBefore": "ambiguous",
+                               "gradeAfter": "ambiguous"}]},
         {"id": "u", "initialGrade": "incorrect", "cragAction": "refused", "latencyMs": 200, "degraded": ["scoring"],
          "correctionRounds": []}]}
-    verdicts = {("a", "gcrag"): "correct", ("b", "gcrag"): "refused", ("u", "gcrag"): "refused"}
+    verdicts = {("a", "gcrag"): "correct", ("b", "gcrag"): "refused", ("c", "gcrag"): "correct",
+                ("u", "gcrag"): "refused"}
     m = R.metrics(qs, runs, verdicts)["gcrag"]
-    assert m["accuracy"]["double"] == {"n": 2, "correct": 1, "rate": 0.5}
-    assert m["unanswerableRefusal"]["rate"] == 1.0 and m["falseRefusal"]["rate"] == 0.5
-    assert m["rescue"]["graph_evidence"] == {"den": 1, "num": 1, "rate": 1.0}   # b 未执行图谱（跳过）不进分母
+    assert m["accuracy"]["double"] == {"n": 3, "correct": 2, "rate": 0.6667}
+    assert m["unanswerableRefusal"]["rate"] == 1.0 and m["falseRefusal"]["rate"] == 0.3333
+    # b 未执行图谱（跳过）不进分母；c 执行了但分级没提升，答对也不算挽回
+    assert m["rescue"]["graph_evidence"] == {"den": 2, "num": 1, "rate": 0.5}
     assert m["rescue"]["rewrite"] == {"den": 1, "num": 0, "rate": 0.0}
     assert m["degraded"] == 1 and m["latencyMs"]["p50"] == 200
     assert "graph_recovered" in R.render_report({"gcrag": m}, {"runId": "t"})

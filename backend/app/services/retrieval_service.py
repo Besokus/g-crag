@@ -201,6 +201,23 @@ async def _hyde_or_cache(q: str, model_type: str | None = None) -> str | None:
         return None
 
 
+async def _bm25_hits(db: AsyncSession, queries: list[str], cand: int) -> list[dict]:
+    """BM25 召回（sparse 路由与 dense 失败回落共用）。分数为原始 BM25 分，调用方负责归一。"""
+    await bm25_service.ensure_built(db)
+    out = []
+    for qq in queries:
+        for s in bm25_service.search(qq, topk=cand):
+            c = bm25_service.get_chunk(s["idx"])
+            if c:
+                out.append({
+                    "key": (c["doc_id"], c["chunk_idx"]), "text": c["text"],
+                    "doc_id": c["doc_id"], "doc_name": c["doc_name"],
+                    "chunk_idx": c["chunk_idx"], "score": s.get("score", 0),
+                    "srcs": ["bm25"],
+                })
+    return out
+
+
 async def _dense_dual(dense_q: str, cand: int, ef: int) -> tuple[list[dict], list[dict]]:
     """双路向量检索（云 grid_chunks + 本地 bge grid_chunks_bge），各自全程降级。
 
@@ -415,17 +432,7 @@ async def mixed_search_ex(
     if route == "sparse":
         # sparse-only: 仅 BM25，跳过 dense embedding 调用
         with _retr_span("sparse_search"):
-            await bm25_service.ensure_built(db)
-            for qq in queries:
-                for s in bm25_service.search(qq, topk=cand):
-                    c = bm25_service.get_chunk(s["idx"])
-                    if c:
-                        all_sparse.append({
-                            "key": (c["doc_id"], c["chunk_idx"]), "text": c["text"],
-                            "doc_id": c["doc_id"], "doc_name": c["doc_name"],
-                            "chunk_idx": c["chunk_idx"], "score": s.get("score", 0),
-                            "srcs": ["bm25"],
-                        })
+            all_sparse = await _bm25_hits(db, queries, cand)
         _tc = _get_trace()
         if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
             _tc.attach("sparse_search", topk=cand)
@@ -456,6 +463,14 @@ async def mixed_search_ex(
                         **d, "key": (d.get("doc_id"), d.get("chunk_idx")),
                         "srcs": [src],
                     })
+        if not all_dense:
+            # dense 单路全部失败（如 embedding 欠费/限流）：原实现直接返回空检索 → 拒答。
+            # 回落到 BM25，按 sparse 单路处理；dense_cloud_failed 标记已由 _dense_dual 打上，响应带 retrievalDegraded
+            degraded("dense_route_fallback", RuntimeError("dense 路由无命中"), "回落 BM25")
+            route = "sparse"
+            with _retr_span("sparse_search"):
+                all_sparse = await _bm25_hits(db, queries, cand)
+            _normalize_unbounded_scores(all_sparse)
 
     else:
         # hybrid / sparse_first: 全链路 dense + BM25

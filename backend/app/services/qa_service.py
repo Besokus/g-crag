@@ -1009,6 +1009,7 @@ async def answer(
             "retrievalSource": [], "responseTime": round(time.time() - t0, 3),
             "hallucinationRate": 0.0, "cached": False, "confidence": "refused",
             "conversationId": conversation_id or "",
+            **_retrieval_degradation_fields(),   # 评测据此把检索故障导致的空结果单独计数
         }
 
     # 纠错：none / legacy / gcrag 三种模式（rag/gcrag.py；设计文档 §6、§16.4）

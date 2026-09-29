@@ -150,3 +150,15 @@ def test_mixed_search_still_returns_list(sparse_env, use_scorer):
     use_scorer(_StubScorer(ScoreResult(ok=False, reason="error")))
     items = asyncio.run(rs.mixed_search(_FakeDB(), "无关问题", 5, routing_decision=sparse_env))
     assert isinstance(items, list) and items
+
+
+def test_dense_route_failure_falls_back_to_bm25(sparse_env, use_scorer, monkeypatch):
+    """dense 单路 embedding 失败（如欠费）：原实现返回空检索 → 拒答；现在回落 BM25。"""
+    async def dense_fail(q, cand, ef):
+        return [], []
+    monkeypatch.setattr(rs, "_dense_dual", dense_fail)
+    use_scorer(_StubScorer(lambda t: ScoreResult(ok=True, scores=[0.5] * len(t))))
+    dense = SimpleNamespace(route="dense", confidence=0.8, features=None, skip_rerank=False)
+    res = asyncio.run(rs.mixed_search_ex(_FakeDB(), "问题", 5, routing_decision=dense, force_score=True))
+    assert [i["docId"] for i in res.items] == ["d1", "d2"] and res.items[0]["sources"] == ["bm25"]
+    assert res.scoring.ok

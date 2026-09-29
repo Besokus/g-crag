@@ -17,6 +17,7 @@ from pathlib import Path
 
 MODES_ALL = ("none", "legacy", "gcrag", "closed_book")
 WEAK = ("ambiguous", "incorrect")
+_RANK = {"incorrect": 0, "ambiguous": 1, "correct": 2}
 
 # ---------------- 通用 ----------------
 
@@ -290,7 +291,8 @@ def metrics(questions: list[dict], runs: dict[str, list[dict]], verdicts: dict) 
             else:
                 unans_n += 1
                 unans_refused += v == "refused"
-        # 挽回率（§11.4）：初始 ambiguous/incorrect 且执行了动作 X 的可答题中，X 之后可作答且最终答对的比例
+        # 挽回率（§11.4、§6.2）：初始 ambiguous/incorrect 且执行了动作 X 的可答题中，X 使分级严格提升
+        # （incorrect→ambiguous/correct，ambiguous→correct）且最终答对的比例
         rescue = {}
         for action in ("graph_evidence", "rewrite"):
             den = num = 0
@@ -303,7 +305,9 @@ def metrics(questions: list[dict], runs: dict[str, list[dict]], verdicts: dict) 
                 if not rd:
                     continue
                 den += 1
-                if rd[-1]["gradeAfter"] in ("correct", "ambiguous") and verdicts.get((r["id"], mode)) == "correct":
+                x = rd[-1]
+                up = _RANK.get(x["gradeAfter"], -1) > _RANK.get(x["gradeBefore"], 99)
+                if up and verdicts.get((r["id"], mode)) == "correct":
                     num += 1
             rescue[action] = {"den": den, "num": num, "rate": _pct(num, den)}
         lat = sorted(r["latencyMs"] for r in recs if r.get("latencyMs") is not None)

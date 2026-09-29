@@ -422,8 +422,9 @@ def test_stream_done_includes_citation_when_enabled(monkeypatch):
     monkeypatch.setattr("app.services.qa_service._apply_citation_verification", fake_apply)
 
     ctx = [{"chunkId": "c1", "chunk": "油温不超过85度", "docName": "A", "score": 0.9}]
-    async def fake_mixed(*a, **kw): return ctx
-    monkeypatch.setattr("app.services.qa_service.retrieval_service.mixed_search", fake_mixed)
+    from app.services.retrieval_service import ScoringStatus, SearchResult
+    async def fake_mixed(*a, **kw): return SearchResult(ctx, ScoringStatus("stub", True, "ok", 1))
+    monkeypatch.setattr("app.services.qa_service.retrieval_service.mixed_search_ex", fake_mixed)
     async def fake_crag(*a, **kw): return (ctx, "high", "none", "good", {})  # 5 元组：extras（CRAG_V3）
     monkeypatch.setattr("app.services.qa_service._crag_correct", fake_crag)
 
@@ -459,8 +460,9 @@ def test_stream_done_no_citation_when_disabled(monkeypatch):
     monkeypatch.setattr("app.services.qa_service._apply_citation_verification", fake_apply)
 
     ctx = [{"chunkId": "c1", "chunk": "油温", "docName": "A", "score": 0.9}]
-    async def fake_mixed(*a, **kw): return ctx
-    monkeypatch.setattr("app.services.qa_service.retrieval_service.mixed_search", fake_mixed)
+    from app.services.retrieval_service import ScoringStatus, SearchResult
+    async def fake_mixed(*a, **kw): return SearchResult(ctx, ScoringStatus("stub", True, "ok", 1))
+    monkeypatch.setattr("app.services.qa_service.retrieval_service.mixed_search_ex", fake_mixed)
     async def fake_crag(*a, **kw): return (ctx, "high", "none", "good", {})  # 5 元组：extras（CRAG_V3）
     monkeypatch.setattr("app.services.qa_service._crag_correct", fake_crag)
     async def fake_stream(messages, temperature=0.5, **kwargs):

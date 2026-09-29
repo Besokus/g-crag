@@ -16,6 +16,7 @@ TEST_REDIS_URL=${TEST_REDIS_URL:-redis://:grid-langfuse-pass@redis:6379/15}
 docker exec "$C" sh -c 'rm -rf /tmp/gt && mkdir -p /tmp/gt'
 docker cp backend/app "$C":/tmp/gt/app
 docker cp backend/domain_packs "$C":/tmp/gt/domain_packs
+docker cp backend/scorer_thresholds "$C":/tmp/gt/scorer_thresholds
 docker cp tests "$C":/tmp/gt/tests
 docker cp scripts "$C":/tmp/gt/scripts
 

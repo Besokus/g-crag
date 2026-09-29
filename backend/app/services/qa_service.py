@@ -208,6 +208,7 @@ async def _cache_knowledge_valid(
 async def _crag_correct(
     db: AsyncSession, nq: str, contexts: list[dict],
     model_type: str | None, topk: int, tenant: str = "default",
+    *, scoring=None,   # retrieval_service.ScoringStatus；None = 旧调用方，沿用配置开关
 ) -> tuple[list[dict], str, str, str, dict]:
     """CRAG 分级 + 纠错闭环。返回 (contexts, confidence, action, grade, extras)。
 
@@ -221,9 +222,14 @@ async def _crag_correct(
     extras: dict = {}
     if not settings.CRAG_ENABLE:
         return contexts, confidence, action, grade, extras
-    from app.rag import crag
+    from app.rag import crag, grading
 
-    rerank_ok = settings.RERANK_ENABLE
+    # 分级信号只认本次打分是否成功（原实现读配置开关 RERANK_ENABLE，恒为 True；设计文档 §5.1）
+    rerank_ok = scoring.ok if scoring is not None else settings.RERANK_ENABLE
+    _th = grading.get_thresholds() if scoring is not None else None
+    if scoring is not None:
+        extras["scoringOk"] = scoring.ok
+        extras["scoringReason"] = scoring.reason
     # 分级：v2 优先，失败回退 v1
     grade = ""
     _v2_detail: dict = {}
@@ -245,12 +251,26 @@ async def _crag_correct(
 
     _es: float | None = None
     # T4（断点 C）：V3 开时 grade 统一由 es 分桶（消除 v1 绝对阈值/v2 相对计数口径漂移）
+    if not grade and scoring is not None and not scoring.ok:
+        # 打分失败：不分级、不纠错，直接生成，对外"不确定"（设计文档 §16.12 降级矩阵）
+        degraded("crag_unscored", RuntimeError(scoring.reason), "打分失败 → 不纠错，置信度 medium")
+        try:
+            from app.core import metrics
+            metrics.CRAG_GRADE.labels(grading.GRADE_UNSCORED).inc()
+            metrics.CRAG_ACTION.labels("unscored").inc()
+            metrics.CRAG_CONFIDENCE.labels("medium").inc()
+        except Exception:
+            pass
+        return contexts, "medium", "unscored", grading.GRADE_UNSCORED, extras
     if _v3:
         _es = _es_of(contexts, _v2_detail)
         grade, _ = crag.grade(0.0, len(contexts), rerank_ok, es=_es)
     elif not grade:
-        top1 = float(contexts[0].get("score", 0.0)) if contexts else 0.0
-        grade, _ = crag.grade(top1, len(contexts), rerank_ok)
+        if _th is not None:
+            grade, _ = grading.grade(contexts, scoring, _th)
+        else:
+            top1 = float(contexts[0].get("score", 0.0)) if contexts else 0.0
+            grade, _ = crag.grade(top1, len(contexts), rerank_ok)
 
     _rewrite_delta: float | None = None
     if grade == crag.GRADE_INCORRECT:
@@ -259,12 +279,23 @@ async def _crag_correct(
             from app.services.query_rewrite import rewrite_query
             new_q = await rewrite_query(nq, model_type, force=True)
             if new_q and new_q != nq:
-                new_ctx = await retrieval_service.mixed_search(db, new_q, topk, tenant=tenant)
+                if scoring is not None:
+                    _nsr = await retrieval_service.mixed_search_ex(db, new_q, topk, tenant=tenant,
+                                                                   force_score=True)
+                    new_ctx = _nsr.items
+                else:   # 旧调用方：不带打分状态，沿用原检索接口
+                    new_ctx = await retrieval_service.mixed_search(db, new_q, topk, tenant=tenant)
                 if new_ctx:
                     contexts = new_ctx
-                    if _v3:
+                    if scoring is not None and not _nsr.scoring.ok:
+                        # 改写后的检索打分失败：无法判断是否挽回，不据此拒答
+                        grade = grading.GRADE_UNSCORED
+                        extras["scoringOk"], extras["scoringReason"] = False, _nsr.scoring.reason
+                    elif _v3:
                         _es = _es_of(contexts, None)  # 改写后无 v2 detail
                         grade, _ = crag.grade(0.0, len(contexts), rerank_ok, es=_es)
+                    elif _th is not None:
+                        grade, _ = grading.grade(contexts, _nsr.scoring, _th)
                     else:
                         top1 = float(contexts[0].get("score", 0.0))
                         grade, _ = crag.grade(top1, len(contexts), rerank_ok)
@@ -921,10 +952,12 @@ async def answer(
                    queryType=(getattr(_feat, "query_type", "") or ""))
 
     with _trace_span("retrieval"):
-        contexts = await retrieval_service.mixed_search(
+        _sr = await retrieval_service.mixed_search_ex(
             db, search_q, topk, tenant=tenant, routing_decision=routing,
             user_dept=user_dept, user_role=user_role,
+            force_score=settings.CRAG_ENABLE,   # 分级依赖打分器分数，不允许按路由跳过
         )
+        contexts, scoring = _sr.items, _sr.scoring
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
         _tc.attach("retrieval", hits=len(contexts),
@@ -950,7 +983,7 @@ async def answer(
     # Corrective RAG：分级 + 纠错闭环
     with _trace_span("crag"):
         contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
-            db, nq, contexts, model_type, topk, tenant
+            db, nq, contexts, model_type, topk, tenant, scoring=scoring
         )
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
@@ -1593,10 +1626,12 @@ async def stream_answer(
                    queryType=(getattr(_feat, "query_type", "") or ""))
 
     with _trace_span("retrieval"):
-        contexts = await retrieval_service.mixed_search(
+        _sr = await retrieval_service.mixed_search_ex(
             db, search_q, topk, tenant=tenant, routing_decision=routing,
             user_dept=user_dept, user_role=user_role,
+            force_score=settings.CRAG_ENABLE,   # 分级依赖打分器分数，不允许按路由跳过
         )
+        contexts, scoring = _sr.items, _sr.scoring
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
         _tc.attach("retrieval", hits=len(contexts),
@@ -1614,7 +1649,7 @@ async def stream_answer(
     # Corrective RAG：分级 + 纠错闭环
     with _trace_span("crag"):
         contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
-            db, nq, contexts, model_type, topk, tenant
+            db, nq, contexts, model_type, topk, tenant, scoring=scoring
         )
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):

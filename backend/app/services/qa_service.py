@@ -27,7 +27,7 @@ from app.config import settings
 from app.core import safety
 from app.core.obs import degraded
 from app.core.qa_trace import get_collector as _get_trace, span as _trace_span
-from app.providers.factory import get_llm_provider
+from app.providers.factory import get_llm_provider, llm_cache_tag
 from app.rag import citation, prompt_templates
 from app.models.document import Document
 from app.services import config_service, conversation_service, kg_service, retrieval_service, term_service
@@ -95,7 +95,7 @@ def _llm_all_down_response(nq: str, contexts: list[dict], t0: float,
 
 def _cache_key(model_type: str | None, query: str, tenant: str | None = "default") -> str:
     from app.config import citation_cache_version
-    return f"qa:{_cache_tenant(tenant)}:{model_type or 'default'}:{query}:{citation_cache_version()}"
+    return f"qa:{_cache_tenant(tenant)}:{llm_cache_tag(model_type)}:{query}:{citation_cache_version()}"
 
 
 def _multi_cache_key(model_type: str | None, search_q: str, tenant: str | None,
@@ -106,7 +106,7 @@ def _multi_cache_key(model_type: str | None, search_q: str, tenant: str | None,
     """
     from app.config import citation_cache_version
     cid = (conversation_id or "")[:8]
-    return f"qa:{_cache_tenant(tenant)}:{model_type or 'default'}:{search_q}:conv{cid}:{citation_cache_version()}"
+    return f"qa:{_cache_tenant(tenant)}:{llm_cache_tag(model_type)}:{search_q}:conv{cid}:{citation_cache_version()}"
 
 
 async def _is_blacklisted(nq: str) -> bool:

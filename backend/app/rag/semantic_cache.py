@@ -21,6 +21,7 @@ import numpy as np
 from app.clients import redis_client
 from app.config import settings
 from app.core.obs import degraded
+from app.providers.factory import llm_cache_tag
 from app.services import embedding_service
 
 _SEMANTIC_PREFIX = "qa_semantic"
@@ -56,7 +57,7 @@ async def get_cached_key(
 ) -> str | None:
     """获取精确缓存 key（兼容现有缓存）。"""
     from app.config import citation_cache_version
-    return f"qa:{_cache_tenant(tenant_id)}:{model_type or 'default'}:{query}:{citation_cache_version()}"
+    return f"qa:{_cache_tenant(tenant_id)}:{llm_cache_tag(model_type)}:{query}:{citation_cache_version()}"
 
 
 async def semantic_cache_get(
@@ -93,7 +94,7 @@ async def semantic_cache_get(
         degraded("semantic_cache_embed", e)
         return None, "miss", 0.0
 
-    model = model_type or "default"
+    model = llm_cache_tag(model_type)
     try:
         index = await redis_client.cache_get_json(_semantic_index_key(tenant_id)) or []
     except Exception:
@@ -209,11 +210,11 @@ async def semantic_cache_set(
         # 去重：相同 query 已存在则更新
         updated = False
         for e in index:
-            if e.get("query") == nq and e.get("model_type", "default") == (model_type or "default"):
+            if e.get("query") == nq and e.get("model_type", "default") == llm_cache_tag(model_type):
                 e["emb"] = emb_b64
                 e["cache_key"] = cache_key
                 e["tenant_id"] = _cache_tenant(tenant_id)
-                e["model_type"] = model_type or "default"
+                e["model_type"] = llm_cache_tag(model_type)
                 e["ts"] = time.time()
                 updated = True
                 break
@@ -225,7 +226,7 @@ async def semantic_cache_set(
             index.append({
                 "query": nq,
                 "tenant_id": _cache_tenant(tenant_id),
-                "model_type": model_type or "default",
+                "model_type": llm_cache_tag(model_type),
                 "emb": emb_b64,
                 "cache_key": cache_key,
                 "ts": time.time(),
@@ -254,7 +255,7 @@ async def semantic_cache_invalidate(
                 e for e in index
                 if not (
                     e.get("query") == nq
-                    and e.get("model_type", "default") == (model_type or "default")
+                    and e.get("model_type", "default") == llm_cache_tag(model_type)
                 )
             ]
             await redis_client.cache_set_json(_semantic_index_key(tenant_id), index, _SEMANTIC_TTL)

@@ -114,7 +114,7 @@ def test_a5_semantic_get_passes_when_filter_disabled(monkeypatch):
         if call_count["i"] == 1:
             return None
         if call_count["i"] == 2:
-            return [{"query": "q", "model_type": "default", "emb": "x",
+            return [{"query": "q", "model_type": sc.llm_cache_tag(None), "emb": "x",
                      "cache_key": "k1", "ts": 0}]
         return cached_data
     monkeypatch.setattr(sc.redis_client, "cache_get_json", fake_get_json)

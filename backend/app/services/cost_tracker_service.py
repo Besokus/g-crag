@@ -18,6 +18,7 @@ _MODEL_PRICES = {
     "deepseek": {"input": 0.0005 / 1000, "output": 0.002 / 1000},    # ¥/token
     "qwen": {"input": 0.001 / 1000, "output": 0.002 / 1000},
     "doubao": {"input": 0.0008 / 1000, "output": 0.0015 / 1000},
+    "claude": {"input": 0.036 / 1000, "output": 0.18 / 1000},        # 按 Opus 级 $5/$25 每百万 token 折算
 }
 
 # 默认配额（月 token 上限）

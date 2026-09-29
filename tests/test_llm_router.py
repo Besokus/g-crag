@@ -133,8 +133,10 @@ def test_circuit_breaker_open_and_recover(monkeypatch):
 
 # ===== resolve_chain =====
 
-def test_resolve_chain_user_priority():
+def test_resolve_chain_user_priority(monkeypatch):
     """用户显式选优先（排链头），fallback 链跟后，去重保序。"""
+    from app.config import settings
+    monkeypatch.setattr(settings, "LLM_FALLBACK_CHAIN", "qwen,deepseek")   # 不依赖本地 .env
     chain = resolve_chain("deepseek")
     assert chain[0] == "deepseek"          # 用户选在前
     assert "qwen" in chain

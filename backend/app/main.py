@@ -354,6 +354,7 @@ async def health():
             return {"deepseek": bool(settings.DEEPSEEK_API_KEY),
                     "qwen": bool(settings.DASHSCOPE_API_KEY),
                     "doubao": bool(settings.ARK_API_KEY),
+                    "claude": bool(settings.CLAUDE_API_KEY and settings.CLAUDE_BASE_URL),
                     "ollama": True}.get(p, False)
         return {"qwen": bool(settings.DASHSCOPE_API_KEY),
                 "doubao": bool(settings.ARK_API_KEY), "bge": True}.get(p, False)

@@ -77,18 +77,21 @@ async def test_warmup_from_file_key_matches_read_path(capture_redis_set, tmp_pat
 
 @pytest.mark.asyncio
 async def test_warmup_hot_queries_fallback_key_has_version(capture_redis_set):
-    """cache_key 不匹配租户前缀时，回退拼 key 必须带版本后缀。"""
+    """cache_key 不匹配租户前缀时，回退拼 key 必须带版本后缀；未记录实际模型的旧行跳过。"""
+    from app.providers.factory import llm_cache_tag
+    tag, cv = llm_cache_tag("deepseek"), citation_cache_version()
     rows = [
         # 旧格式 cache_key（无前缀）→ 走回退拼 key 分支
         _Row(cache_key="legacy_key", query_normalized="旧key问题"),
         # 已是租户化完整 key → 原样回写
-        _Row(cache_key=f"qa:default:deepseek:完整key:{citation_cache_version()}",
-             query_normalized="完整key问题"),
+        _Row(cache_key=f"qa:default:{tag}:完整key:{cv}", query_normalized="完整key问题"),
+        # model_type=default：不知道是哪个模型答的，换算成当前模型的键会串模型 → 跳过
+        _Row(cache_key="k", query_normalized="旧模型问题", model_type="default"),
     ]
     warmed = await cache_warmup.warmup_hot_queries(_FakeDB(rows))
 
     assert warmed == 2
     assert capture_redis_set == [
-        f"qa:default:deepseek:旧key问题:{citation_cache_version()}",
-        f"qa:default:deepseek:完整key:{citation_cache_version()}",
+        f"qa:default:{tag}:旧key问题:{cv}",
+        f"qa:default:{tag}:完整key:{cv}",
     ]

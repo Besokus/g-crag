@@ -18,6 +18,7 @@ from app.clients import redis_client
 from app.config import citation_cache_version, settings
 from app.core.obs import degraded
 from app.models.qa_cache import QaCache
+from app.providers.factory import llm_cache_tag
 
 
 async def warmup_hot_queries(
@@ -51,7 +52,9 @@ async def warmup_hot_queries(
             # 用租户化 cache_key 回写 Redis；历史旧 key 不再参与租户问答命中。
             # 回退拼 key 必须带 citation_cache_version 后缀，否则与读路径（_cache_key）永不匹配 → 预热死写。
             tenant = getattr(row, "tenant_id", None) or "default"
-            model = row.model_type or "default"
+            if (row.model_type or "default") in ("default", "auto"):
+                continue   # 旧版未记录实际模型的行：换算成当前模型的键会把旧模型答案灌进新模型缓存
+            model = llm_cache_tag(row.model_type)
             expected_prefix = f"qa:{tenant}:{model}:"
             key = (row.cache_key if (row.cache_key or "").startswith(expected_prefix)
                    else f"{expected_prefix}{row.query_normalized}:{citation_cache_version()}")
@@ -87,7 +90,7 @@ async def warmup_from_file(filepath: str = "golden_qa.json") -> int:
         from app.services import term_service
         nq = term_service.normalize(query)
         # key 必须与 qa_service._cache_key 同构（含 citation_cache_version 后缀），否则预热永不命中
-        key = f"qa:default:default:{nq}:{citation_cache_version()}"
+        key = f"qa:default:{llm_cache_tag(None)}:{nq}:{citation_cache_version()}"
         val = {
             "answer": item.get("answer", ""),
             "retrievalSource": item.get("retrievalSource", []),

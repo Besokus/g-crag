@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = "admin123"
 
     # ---------- 模型 Provider ----------
-    LLM_PROVIDER: str = "deepseek"      # deepseek | qwen | doubao
+    LLM_PROVIDER: str = "deepseek"      # deepseek | qwen | doubao | claude
     EMB_PROVIDER: str = "qwen"          # qwen | doubao
     EMBEDDING_DIM: int = 1024
     EMB_BATCH_CONCURRENCY: int = 3      # 云 embedding 批次并发度（防 429，文档批量向量化加速）
@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_LLM_MODEL: str = "qwen-plus"
     QWEN_EMB_MODEL: str = "text-embedding-v3"
+
+    # --- Claude（Anthropic Messages 协议；providers/llm/claude_llm.py）---
+    CLAUDE_API_KEY: str = ""
+    CLAUDE_BASE_URL: str = ""
+    CLAUDE_PROTOCOL: str = "anthropic-proxy"   # anthropic-proxy（/anthropic/deployments/{model}/…）| anthropic（/v1/messages）
+    CLAUDE_MODEL: str = "claude-opus-4-8"
+    CLAUDE_SEND_TEMPERATURE: bool = False      # claude-opus-4-8 拒绝 temperature 参数
 
     # --- 火山方舟 Ark ---
     ARK_API_KEY: str = ""

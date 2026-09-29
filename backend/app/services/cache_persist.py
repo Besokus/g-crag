@@ -20,6 +20,7 @@ from app.config import settings
 from app.core.obs import degraded
 from app.db.session import AsyncSessionLocal
 from app.models.qa_cache import QaCache
+from app.providers.factory import llm_cache_tag
 
 
 async def cache_get_mysql(
@@ -153,7 +154,7 @@ async def cache_set_mysql(
                 {
                     "tenant_id": tenant_id,
                     "ck": cache_key,
-                    "mt": model_type or "default",
+                    "mt": llm_cache_tag(model_type)[:32],
                     "qh": query_hash,
                     "qn": normalized_query,
                     "qo": original_query[:1024],

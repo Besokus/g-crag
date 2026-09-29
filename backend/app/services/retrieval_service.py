@@ -9,6 +9,7 @@ import asyncio
 import math
 import time
 from collections import Counter
+from dataclasses import asdict, dataclass
 
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +20,7 @@ from app.models.chunk import Chunk
 from app.models.document import Document
 from app.rag import mmr, rrf
 from app.core.obs import degraded
-from app.services import bm25_service, config_service, embedding_service, query_rewrite, rerank_service
+from app.services import bm25_service, config_service, embedding_service, query_rewrite
 from contextlib import nullcontext
 
 from app.core.qa_trace import get_collector as _get_trace
@@ -303,6 +304,21 @@ def _acl_ok(doc_dept: str, doc_allowed_roles: str,
     return (not allowed) or (user_role in allowed)
 
 
+@dataclass
+class ScoringStatus:
+    """本次检索的打分是否真的成功（设计文档 §16.1）。分级只看 ok，不看分数、不看配置开关。"""
+    scorer: str
+    ok: bool
+    reason: str      # ok | timeout | error | no_key | disabled | skipped_by_route | not_forced
+    scored: int = 0  # 实际打分的条目数
+
+
+@dataclass
+class SearchResult:
+    items: list[dict]
+    scoring: ScoringStatus
+
+
 async def mixed_search(
     db: AsyncSession, query: str, topk: int = 10,
     doc_type: str | None = None, model_type: str | None = None,
@@ -311,6 +327,49 @@ async def mixed_search(
     user_dept: str | None = None, user_role: str | None = None,  # RBAC 文档级 ACL
     overrides: dict | None = None,  # 调参扫描覆盖（None=走 settings，13 caller 零破坏）
 ) -> list[dict]:
+    """兼容所有现有调用方：只返回检索条目。需要打分状态（分级）时用 mixed_search_ex。"""
+    return (await mixed_search_ex(
+        db, query, topk, doc_type=doc_type, model_type=model_type, equipment=equipment,
+        tenant=tenant, routing_decision=routing_decision, user_dept=user_dept,
+        user_role=user_role, overrides=overrides,
+    )).items
+
+
+async def _score_pool(q: str, pool: list[dict], *, enabled: bool, skip_by_route: bool,
+                      force: bool) -> tuple[list[dict], ScoringStatus]:
+    """打分器重排 pool，并如实返回打分状态。失败时 pool 保持原序、原分数。
+
+    force=True（纠错模式）：忽略路由的"高置信跳过 rerank"，候选只有 1 条也打分——
+    原实现在这两种情况下保留 BM25 归一分（top1=1.0）→ 全部判 correct，纠错永不触发。
+    """
+    from app.rag.scorer import get_scorer
+    scorer = get_scorer()
+    if not pool:
+        return pool, ScoringStatus(scorer.name, True, "ok", 0)
+    if not enabled:
+        return pool, ScoringStatus(scorer.name, False, "disabled")
+    if skip_by_route and not force:
+        return pool, ScoringStatus(scorer.name, False, "skipped_by_route")
+    if len(pool) <= 1 and not force:
+        return pool, ScoringStatus(scorer.name, False, "not_forced")
+    res = await scorer.score(q, [h.get("text", "") for h in pool],
+                             timeout=getattr(settings, "RERANK_TIMEOUT", 2.0))
+    if not res.ok:
+        degraded("rerank", RuntimeError(res.reason), "打分失败 → 保持原序，本次检索不参与分级")
+        return pool, ScoringStatus(scorer.name, False, res.reason)
+    scored = sorted(({**h, "score": s} for h, s in zip(pool, res.scores)), key=lambda h: -h["score"])
+    return scored, ScoringStatus(scorer.name, True, "ok", len(scored))
+
+
+async def mixed_search_ex(
+    db: AsyncSession, query: str, topk: int = 10,
+    doc_type: str | None = None, model_type: str | None = None,
+    equipment: str | None = None, tenant: str | None = None,
+    routing_decision = None,  # RoutingDecision | None
+    user_dept: str | None = None, user_role: str | None = None,  # RBAC 文档级 ACL
+    overrides: dict | None = None,  # 调参扫描覆盖（None=走 settings，13 caller 零破坏）
+    *, force_score: bool = False,   # 纠错模式传 True：分级依赖打分器分数，不允许跳过
+) -> SearchResult:
     _t0 = time.time()
     topk = _ov(overrides, "TOPK", topk)  # topk 可被扫描覆盖
     cand = max(topk * 4, 20)
@@ -446,27 +505,17 @@ async def mixed_search(
         if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
             _tc.attach("rrf", k=_rrf_k, dw=_rrf_dw, sw=_rrf_sw)
 
-    # 3) 重排（高置信 sparse 可跳过，单路 dense/sparse 也可跳过）
-    if _ov(overrides, "RERANK_ENABLE", settings.RERANK_ENABLE) and len(pool) > 1 and not skip_rerank:
-        _rr_topn = min(_pool_cap, len(pool))
-        _rr_ok, _rr_top1 = False, None
-        with _retr_span("rerank"):
-            try:
-                docs = [h.get("text", "") for h in pool]
-                ranked = await asyncio.wait_for(
-                    rerank_service.get_reranker().rerank(q, docs, top_n=_rr_topn),
-                    timeout=getattr(settings, "RERANK_TIMEOUT", 2.0))
-                pool = [{**pool[idx], "score": float(score)} for idx, score in ranked]
-                _rr_ok, _rr_top1 = True, (round(float(ranked[0][1]), 4) if ranked else None)
-            except Exception as e:
-                degraded("rerank", e, "超时/失败 → 用 RRF 原序兜底（稳 p99）")
-                # pool 保持原样，不改变
-        _tc = _get_trace()
-        if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
-            if _rr_ok:
-                _tc.attach("rerank", topN=_rr_topn, top1=_rr_top1)
-            else:
-                _tc.attach("rerank", degraded=True)
+    # 3) 打分器重排（高置信 sparse 可跳过，纠错模式 force_score 时不跳过）
+    with _retr_span("rerank"):
+        pool, scoring = await _score_pool(
+            q, pool, enabled=bool(_ov(overrides, "RERANK_ENABLE", settings.RERANK_ENABLE)),
+            skip_by_route=skip_rerank, force=force_score)
+    _tc = _get_trace()
+    if _tc:
+        _tc.mark("scoring", asdict(scoring))
+        if getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
+            _tc.attach("rerank", ok=scoring.ok, reason=scoring.reason, scored=scoring.scored,
+                       top1=round(float(pool[0].get("score", 0)), 4) if scoring.ok and pool else None)
     # pool 已经就绪（sparse/dense 单路直接使用，hybrid 已 RRF 融合）
 
     # 4) 元数据过滤：租户隔离 + docType/设备（多租户 + D5）+ RBAC 文档级 ACL（dept/allowed_roles）
@@ -627,7 +676,7 @@ async def mixed_search(
         items = plugin_registry.run_hook("retrieval_filter", items, {"query": q, "tenant": tenant})
     except Exception:
         pass
-    return items
+    return SearchResult(items=items, scoring=scoring)
 
 
 async def debug_search(
@@ -730,21 +779,15 @@ async def debug_search(
 
     # 3) 重排
     rerank_scores: dict = {}
-    if settings.RERANK_ENABLE and len(fused) > 1:
-        try:
-            docs = [h.get("text", "") for h in fused]
-            ranked = await rerank_service.get_reranker().rerank(q, docs, top_n=min(topk * 2, len(fused)))
-            for idx, score in ranked:
-                rerank_scores[fused[idx]["key"]] = float(score)
-            pool = [{**fused[idx], "score": float(score)} for idx, score in ranked]
-            _step("rerank", ok=True, reranked=len(ranked))
-        except Exception as e:
-            degraded("rerank", e)
-            pool = fused[: topk * 2]
-            _step("rerank", ok=False, error=str(e))
+    # 与问答同一个打分器（含录制回放），调试页看到的分数与分级用的一致
+    cand_pool = fused[: topk * 2]
+    pool, scoring = await _score_pool(q, cand_pool, enabled=bool(settings.RERANK_ENABLE),
+                                      skip_by_route=False, force=False)
+    if scoring.ok:
+        rerank_scores = {h["key"]: float(h["score"]) for h in pool}
+        _step("rerank", ok=True, reranked=scoring.scored)
     else:
-        pool = fused[: topk * 2]
-        _step("rerank", ok=False, reason="disabled")
+        _step("rerank", ok=False, reason=scoring.reason)
 
     # 4) 元数据过滤 + RBAC ACL
     doc_ids = {h.get("doc_id") for h in pool if h.get("doc_id")}

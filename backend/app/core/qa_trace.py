@@ -38,6 +38,9 @@ _LABELS: dict[str, str] = {
     "sparse_search": "BM25 检索", "rrf": "RRF 融合", "rerank": "重排",
     "filter_acl": "过滤/权限", "mmr": "MMR 多样性",
     "small_to_big": "父块召回", "raptor": "RAPTOR 摘要", "governance": "治理门禁",
+    # G-CRAG 纠错（group=crag；设计文档 §16.10，始终记录，不受 QA_TRACE_DETAIL_ENABLE 控制）
+    "gcrag_grade": "检索分级", "gcrag_link": "实体链接", "gcrag_graph": "图谱定位证据",
+    "gcrag_rescore": "合并重打分", "gcrag_rewrite": "LLM 改写重检索", "gcrag_refuse": "拒答",
 }
 
 # 单 span attrs 序列化后预算（字节），超限丢 prompt 留参数

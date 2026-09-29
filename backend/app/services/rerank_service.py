@@ -40,8 +40,11 @@ class Reranker:
 
     async def rerank(self, query: str, documents: list[str], top_n: int = 5) -> list[tuple[int, float]]:
         """返回 [(原始索引, 相关性分数), ...]，按相关性降序，长度 top_n。"""
-        if not documents or not settings.DASHSCOPE_API_KEY:
-            return [(i, 0.0) for i in range(min(top_n, len(documents)))]
+        if not documents:
+            return []
+        if not settings.DASHSCOPE_API_KEY:
+            # 原实现返回全 0 分，被分级当作有效分数 → 全部判 incorrect → 全部拒答（设计文档 §5.1）
+            raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法 rerank")
         import time
         _t0 = time.time()
         resp = await _get_client().post(

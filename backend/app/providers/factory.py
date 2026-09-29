@@ -7,7 +7,7 @@ from app.providers.base import EmbeddingProvider, LLMProvider
 
 
 def llm_cache_tag(model_type: str | None) -> str:
-    """答案缓存键里的模型标签：实际 provider@模型名（如 claude@claude-opus-4-8）。
+    """答案缓存键里的模型标签：实际 provider@模型名（如 claude@claude-sonnet-4-6）。
 
     前端不指定模型时 model_type 为空/default，旧实现一律记作 "default"，于是 .env 换了
     LLM_PROVIDER 或模型名后仍命中旧模型生成的答案（评测会混入旧模型输出）。已是标签时原样返回。

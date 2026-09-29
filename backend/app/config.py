@@ -109,8 +109,8 @@ class Settings(BaseSettings):
     CLAUDE_API_KEY: str = ""
     CLAUDE_BASE_URL: str = ""
     CLAUDE_PROTOCOL: str = "anthropic-proxy"   # anthropic-proxy（/anthropic/deployments/{model}/…）| anthropic（/v1/messages）
-    CLAUDE_MODEL: str = "claude-opus-4-8"
-    CLAUDE_SEND_TEMPERATURE: bool = False      # claude-opus-4-8 拒绝 temperature 参数
+    CLAUDE_MODEL: str = "claude-sonnet-4-6"
+    CLAUDE_SEND_TEMPERATURE: bool = True       # claude-opus-4-8 等模型拒绝 temperature 参数时设为 false
 
     # --- 火山方舟 Ark ---
     ARK_API_KEY: str = ""

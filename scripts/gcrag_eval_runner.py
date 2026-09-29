@@ -221,7 +221,9 @@ def calibrate(records: list[dict], verdicts: dict, questions: list[dict], *, max
     """标定集、none 模式（不纠错，最终上下文即初次检索，top1 未被纠错改动）。
 
     low：预测 top1 < low 的题会被纠错并最终拒答（保守假设：纠错不能挽回）。在"可答题误拒率
-         ≤ max_false_refusal"的约束下，最大化 可答题[答对且未被拒] + 不可答题[被拒]，并列取更小的 low。
+         ≤ max_false_refusal"的约束下，最大化 可答题[答对且未被拒] + 不可答题[被拒]；目标值并列时取
+         最优区间（包含最优 low 的连续一段）的中点，使阈值离两侧样本都尽量远。标定集小（不可答题只有
+         5 道），贴着样本取阈值在测试集上不稳。
     high：top1 ≥ high 的可答题中答对比例 ≥ high_precision 的最小 high（至少 min_support 题），
          决定何时给出 high 置信、何时进入 ambiguous 纠错。
     """
@@ -236,7 +238,16 @@ def calibrate(records: list[dict], verdicts: dict, questions: list[dict], *, max
         lows.append({"low": low, "falseRefusal": round(fr, 4), "objective": score,
                      "unansRefused": sum(1 for t, a, _ in rows if not a and t < low)})
     feasible = [x for x in lows if x["falseRefusal"] <= max_false_refusal]
-    best_low = max(feasible, key=lambda x: (x["objective"], -x["low"])) if feasible else None
+    best_low = None
+    if feasible:
+        top = max(x["objective"] for x in feasible)
+        first = next(i for i, x in enumerate(lows) if x in feasible and x["objective"] == top)
+        j = first
+        while j + 1 < len(lows) and lows[j + 1] in feasible and lows[j + 1]["objective"] == top:
+            j += 1
+        mid = round((lows[first]["low"] + lows[j]["low"]) / 2, 2)
+        best_low = min(lows[first:j + 1], key=lambda x: abs(x["low"] - mid))
+        best_low = {**best_low, "tieRange": [lows[first]["low"], lows[j]["low"]]}
     highs = []
     for high in _frange(0.3, 0.98, 0.01):
         sup = [c for t, a, c in rows if a and t >= high]

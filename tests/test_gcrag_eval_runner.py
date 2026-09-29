@@ -48,8 +48,8 @@ def test_calibrate_respects_false_refusal_cap():
     verdicts = {(q["id"], "none"): ("correct" if q["id"] in correct else "wrong") for q in qs}
     res = R.calibrate(recs, verdicts, qs, max_false_refusal=0.1, high_precision=0.9)
     # 误拒率上限 10% → 最多拒 1 道可答题（top1 0.12）：low ≤ 0.25；low ∈ [0.21, 0.25] 时不可答题
-    # 0.1/0.15/0.2 都被拒、目标值最大（6 + 3），并列取更小的 low
-    assert res["chosen"]["low"] == 0.21
+    # 0.1/0.15/0.2 都被拒、目标值最大（6 + 3）；并列取最优区间中点
+    assert res["bestLow"]["tieRange"] == [0.21, 0.25] and res["chosen"]["low"] == 0.23
     assert res["bestLow"]["falseRefusal"] <= 0.1 and res["bestLow"]["unansRefused"] == 3
     # high：top1 ≥ h 的可答题答对率 ≥ 90% 的最小 h（0.6 起 5/5 全对；0.5 起 5/6）
     assert res["chosen"]["high"] == 0.51

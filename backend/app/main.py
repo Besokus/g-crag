@@ -139,6 +139,16 @@ async def lifespan(app: FastAPI):
         await config_service.load_runtime()
     except Exception as e:
         print(f"[config] 运行时配置载入跳过：{e}")
+    # 实体链接索引（图谱实体名 + 名称向量）后台预加载；失败不阻塞启动，首次链接时再加载
+    async def _preload_entity_index():
+        try:
+            from app.rag.entity_index import get_index
+            await get_index().reload()
+            idx = get_index()
+            print(f"[entity-index] 已加载 {len(idx.names)} 个实体，其中 {len(idx.vec_names)} 个有名称向量")
+        except Exception as e:
+            print(f"[entity-index] 预加载跳过：{e}")
+    app.state.entity_index_task = asyncio.create_task(_preload_entity_index())
     # 后台周期刷新组件健康(原仅 GET /health 才更新 → 看板常驻空值)
     app.state.component_health_task = asyncio.create_task(
         _refresh_component_health_loop()

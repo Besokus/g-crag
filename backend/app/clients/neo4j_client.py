@@ -91,6 +91,13 @@ async def upsert_triples(triples: list[dict], doc_id: str, doc_name: str) -> int
     return len(triples)
 
 
+async def list_entities() -> list[tuple[str, int]]:
+    """全部实体 (名称, 无向度数)，供实体链接的词典与向量索引加载。"""
+    async with _get().session() as s:
+        res = await s.run("MATCH (n:Entity) RETURN n.name AS name, coalesce(n.degree, 0) AS degree")
+        return [(r["name"], int(r["degree"])) async for r in res if r["name"]]
+
+
 async def refresh_degree(names: set[str] | None = None) -> None:
     """刷新实体无向度数 n.degree。names=None 刷新全图（建图完成后）；否则只刷新给定实体
     （新增/删除边只会改变其端点的度数）。"""

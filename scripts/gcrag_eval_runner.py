@@ -356,3 +356,53 @@ def render_report(m: dict, config: dict) -> str:
     for mode in modes:
         lines.append(f"- {mode}：{m[mode]['actions']}")
     return "\n".join(lines) + "\n"
+
+
+# ---------------- 人工抽查（§11.3：抽查 20%，报告判定一致率） ----------------
+
+def review_sample(judgments: list[dict], ratio: float = 0.2, seed: int = 20260929) -> list[dict]:
+    """按 (mode, verdict) 分层抽样，每层至少 1 条；规则判定（系统拒答）不抽，判定模型没参与。"""
+    import random
+    rng = random.Random(seed)
+    layers: dict = defaultdict(list)
+    for j in judgments:
+        if j.get("judgeModel") != "rule":
+            layers[(j["mode"], j["verdict"])].append(j)
+    out = []
+    for key in sorted(layers):
+        items = sorted(layers[key], key=lambda x: x["id"])
+        k = max(1, round(len(items) * ratio))
+        out.extend(rng.sample(items, min(k, len(items))))
+    return sorted(out, key=lambda x: (x["mode"], x["id"]))
+
+
+def review_markdown(sample: list[dict], questions: list[dict], records: dict) -> str:
+    qmap = {q["id"]: q for q in questions}
+    lines = ["# 判定人工抽查表", "",
+             "在每条的“人工判定”处填 correct / wrong / refused，保存后运行 "
+             "`gcrag_eval.py review-agree --run-id <run>`。", ""]
+    for i, j in enumerate(sample, 1):
+        q, r = qmap[j["id"]], records.get((j["id"], j["mode"]), {})
+        lines += [f"## {i}. {j['id']}（{j['mode']}，{'可答' if q['answerable'] else '不可答'}）", "",
+                  f"**问题**：{q['question']}", "", f"**标准答案**：{q['answer']}", "",
+                  f"**系统回答**：{(r.get('answer') or '').strip()[:1500]}", "",
+                  f"**判定模型**：{j['verdict']} —— {j.get('reason', '')}", "",
+                  f"人工判定：`{j['id']}|{j['mode']}|`", ""]
+    return "\n".join(lines) + "\n"
+
+
+def parse_manual(md: str) -> dict:
+    """从抽查表读出人工判定：形如 `id|mode|verdict` 的行。"""
+    import re
+    out = {}
+    for m in re.finditer(r"`([^|`]+)\|([^|`]+)\|(correct|wrong|refused)`", md):
+        out[(m.group(1), m.group(2))] = m.group(3)
+    return out
+
+
+def agreement(sample: list[dict], manual: dict) -> dict:
+    pairs = [(j["verdict"], manual[(j["id"], j["mode"])]) for j in sample if (j["id"], j["mode"]) in manual]
+    agree = sum(a == b for a, b in pairs)
+    confusion = Counter(f"{a}->{b}" for a, b in pairs if a != b)
+    return {"sampled": len(sample), "reviewed": len(pairs), "agree": agree,
+            "rate": _pct(agree, len(pairs)), "disagreements": dict(confusion)}

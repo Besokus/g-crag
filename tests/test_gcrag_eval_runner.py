@@ -138,3 +138,18 @@ def test_judge_rules_and_resume(tmp_path):
     assert asyncio.run(R.judge(tmp_path, qs, chat_fn=chat, judge_model="m")) == {}   # 已判过的跳过
     js = R.load_jsonl(tmp_path / "judgments.jsonl")
     assert {(j["id"], j["verdict"], j["judgeModel"]) for j in js} == {("a", "correct", "m"), ("u", "refused", "rule")}
+
+
+def test_review_sample_stratified_and_agreement():
+    js = ([{"id": f"a{i}", "mode": "gcrag", "verdict": "correct", "judgeModel": "m"} for i in range(10)]
+          + [{"id": "w0", "mode": "gcrag", "verdict": "wrong", "judgeModel": "m"}]
+          + [{"id": "r0", "mode": "gcrag", "verdict": "refused", "judgeModel": "rule"}])
+    s = R.review_sample(js, 0.2)
+    assert len(s) == 3 and {x["verdict"] for x in s} == {"correct", "wrong"}    # 每层至少 1 条，规则判定不抽
+    assert s == R.review_sample(js, 0.2)                                        # 固定种子可复现
+    md = R.review_markdown(s, [Q(x["id"]) for x in js], {})
+    filled = md.replace(f"`{s[0]['id']}|gcrag|`", f"`{s[0]['id']}|gcrag|wrong`").replace(
+        f"`{s[1]['id']}|gcrag|`", f"`{s[1]['id']}|gcrag|{s[1]['verdict']}`")
+    res = R.agreement(s, R.parse_manual(filled))
+    assert res["reviewed"] == 2 and res["sampled"] == 3
+    assert res["agree"] == (1 if s[0]["verdict"] != "wrong" else 2)

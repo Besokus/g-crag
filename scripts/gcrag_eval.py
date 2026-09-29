@@ -496,7 +496,23 @@ async def _eval_cmd(args) -> int:
                                concurrency=args.concurrency)
         print("JUDGE_OK " + json.dumps(counts, ensure_ascii=False))
         return 0
-    verdicts = {(v["id"], v["mode"]): v["verdict"] for v in R.load_jsonl(run_dir / "judgments.jsonl")}
+    judgments = R.load_jsonl(run_dir / "judgments.jsonl")
+    verdicts = {(v["id"], v["mode"]): v["verdict"] for v in judgments}
+    if args.cmd == "review-sample":
+        sample = R.review_sample(judgments, args.ratio)
+        records = {(r["id"], r["mode"]): r for m in R.MODES_ALL for r in R.load_jsonl(run_dir / f"{m}.jsonl")}
+        (run_dir / "review_sample.jsonl").write_text(
+            "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in sample), encoding="utf-8")
+        (run_dir / "review_sample.md").write_text(R.review_markdown(sample, questions, records), encoding="utf-8")
+        print(f"REVIEW_SAMPLE_OK {len(sample)} 条 → {run_dir / 'review_sample.md'}")
+        return 0
+    if args.cmd == "review-agree":
+        sample = R.load_jsonl(run_dir / "review_sample.jsonl")
+        manual = R.parse_manual((run_dir / "review_sample.md").read_text(encoding="utf-8"))
+        res = R.agreement(sample, manual)
+        (run_dir / "review_agreement.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+        print("REVIEW_AGREE " + json.dumps(res, ensure_ascii=False))
+        return 0
     if args.cmd == "calibrate":
         recs = R.load_jsonl(run_dir / "none.jsonl")
         res = R.calibrate(recs, verdicts, questions, max_false_refusal=args.max_false_refusal,
@@ -561,8 +577,14 @@ def main() -> int:
     rp = sub.add_parser("report", help="生成指标表")
     rp.add_argument("--out", type=Path, default=OUT_DEFAULT)
     rp.add_argument("--run-id", required=True)
+    for name, hlp in (("review-sample", "按模式×判定分层抽 20% 生成人工抽查表"),
+                      ("review-agree", "读回人工判定，计算与判定模型的一致率")):
+        x = sub.add_parser(name, help=hlp)
+        x.add_argument("--out", type=Path, default=OUT_DEFAULT)
+        x.add_argument("--run-id", required=True)
+        x.add_argument("--ratio", type=float, default=0.2)
     args = ap.parse_args()
-    if args.cmd in ("run", "judge", "calibrate", "report"):
+    if args.cmd in ("run", "judge", "calibrate", "report", "review-sample", "review-agree"):
         import asyncio
         sys.path.insert(0, "/app")
         sys.path.insert(0, str(Path(__file__).resolve().parent))

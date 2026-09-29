@@ -16,7 +16,13 @@ build 输出（默认 /app/gcrag_eval/general/）：
 
 构造规则见《设计文档》§16.13：按事件抽样（各题事件互不相同、语义上不属于同一事件簇）、标准文档
 用内联片段、干扰文档排除与任一抽样事件相关的报道（字面 + 语义两道关，语义用云端 embedding）、
-不可答题另抽 15 题并删除其全部标准文档。run / judge / report 在 M7 实现。
+不可答题另抽 15 题并删除其全部标准文档。
+
+评测（逻辑在 gcrag_eval_runner.py；产物在 /app/gcrag_eval/general/runs/<run_id>/）：
+    ... gcrag_eval.py run --split calib --modes none --run-id calib1       # 按模式调 /qa/answer（noCache）
+    ... gcrag_eval.py judge --run-id calib1                               # 规则 + 判定模型（默认 qwen-max）
+    ... gcrag_eval.py calibrate --run-id calib1                           # 用 none 模式结果扫描阈值
+    ... gcrag_eval.py report --run-id test1                               # 指标表 report.md + metrics.json
 """
 import argparse
 import bisect
@@ -437,6 +443,79 @@ async def import_corpus(out: Path, *, doc_type: str, batch: int, concurrency: in
             "vectorizeFailed": fails, "bm25Docs": n_bm25}
 
 
+async def _eval_cmd(args) -> int:
+    import shutil
+
+    import gcrag_eval_runner as R
+    questions = R.load_jsonl(args.out / "questions.jsonl")
+    run_dir = args.out / "runs" / args.run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = run_dir / "config.json"
+    if args.cmd == "run":
+        from app.config import settings
+        from app.core.domain_pack import get_pack
+        from app.providers.factory import get_llm_provider, llm_cache_tag
+        from app.rag.grading import get_thresholds
+        from app.rag.scorer import cache_path, get_scorer
+        qs = R.select_questions(questions, args.split, args.limit)
+        modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+        bad = [m for m in modes if m not in R.MODES_ALL]
+        if bad:
+            raise SystemExit(f"未知模式: {bad}")
+        if not cfg_path.exists():
+            th = get_thresholds()
+            cfg_path.write_text(json.dumps({
+                "runId": args.run_id, "split": args.split, "modes": modes, "n": len(qs),
+                "thresholds": {"high": th.high, "low": th.low, "source": th.source},
+                "scorer": get_scorer().cache_id, "scorerCache": settings.SCORER_CACHE,
+                "domainPack": get_pack().name, "llm": llm_cache_tag(None), "commit": args.commit,
+                "startedAt": time.strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False, indent=1), encoding="utf-8")
+
+        async def closed_book(question: str) -> str:
+            return await get_llm_provider().chat(
+                [{"role": "system", "content": R.CLOSED_BOOK_SYSTEM}, {"role": "user", "content": question}],
+                temperature=0.2, max_tokens=settings.LLM_MAX_TOKENS)
+
+        summary = await R.run(qs, modes, run_dir, base=args.base, username=settings.ADMIN_USERNAME,
+                              password=settings.ADMIN_PASSWORD, concurrency=args.concurrency,
+                              interval=args.interval, timeout=args.timeout, closed_book_fn=closed_book)
+        src = cache_path(get_scorer())
+        if src.exists():
+            shutil.copy(src, run_dir / "scorer_cache.jsonl")
+        failed = sum(len(v["failed"]) for v in summary.values())
+        print(("RUN_OK " if not failed else "RUN_PARTIAL ") + json.dumps(summary, ensure_ascii=False))
+        return 0 if not failed else 1
+    if args.cmd == "judge":
+        from app.providers.factory import _get_raw_provider
+        prov = _get_raw_provider(args.judge_provider)
+
+        async def chat(prompt: str) -> str:
+            return await prov.chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=300,
+                                   model=args.judge_model)
+        counts = await R.judge(run_dir, questions, chat_fn=chat, judge_model=f"{args.judge_provider}:{args.judge_model}",
+                               concurrency=args.concurrency)
+        print("JUDGE_OK " + json.dumps(counts, ensure_ascii=False))
+        return 0
+    verdicts = {(v["id"], v["mode"]): v["verdict"] for v in R.load_jsonl(run_dir / "judgments.jsonl")}
+    if args.cmd == "calibrate":
+        recs = R.load_jsonl(run_dir / "none.jsonl")
+        res = R.calibrate(recs, verdicts, questions, max_false_refusal=args.max_false_refusal,
+                          high_precision=args.high_precision)
+        (run_dir / "calibration.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+        print("CALIBRATE_OK " + json.dumps({"chosen": res["chosen"], "bestLow": res["bestLow"],
+                                             "bestHigh": res["bestHigh"]}, ensure_ascii=False))
+        return 0
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    jm = sorted({v.get("judgeModel") for v in R.load_jsonl(run_dir / "judgments.jsonl")} - {"rule"})
+    cfg["judgeModel"] = ", ".join(jm)
+    runs = {m: R.load_jsonl(run_dir / f"{m}.jsonl") for m in R.MODES_ALL if (run_dir / f"{m}.jsonl").exists()}
+    m = R.metrics(questions, runs, verdicts)
+    (run_dir / "metrics.json").write_text(json.dumps(m, ensure_ascii=False, indent=1), encoding="utf-8")
+    (run_dir / "report.md").write_text(R.render_report(m, cfg), encoding="utf-8")
+    print(R.render_report(m, cfg))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="G-CRAG 评测集构建与导入")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -457,7 +536,37 @@ def main() -> int:
     im.add_argument("--doc-type", default="新闻")
     im.add_argument("--batch", type=int, default=5, help="每次上传的文件数（服务层上限 5）")
     im.add_argument("--concurrency", type=int, default=4, help="向量化并发数")
+    r = sub.add_parser("run", help="按模式跑评测题（断点续跑）")
+    r.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    r.add_argument("--run-id", required=True)
+    r.add_argument("--split", choices=["calib", "test", "all"], default="test")
+    r.add_argument("--modes", default="none,legacy,gcrag,closed_book")
+    r.add_argument("--limit", type=int, default=0)
+    r.add_argument("--concurrency", type=int, default=3)
+    r.add_argument("--interval", type=float, default=2.2, help="请求起始最小间隔秒（接口限流 30 次/分钟）")
+    r.add_argument("--timeout", type=float, default=300)
+    r.add_argument("--base", default="http://localhost:8001")
+    r.add_argument("--commit", default="", help="宿主机 git rev-parse HEAD（容器内无 .git）")
+    j = sub.add_parser("judge", help="判定 correct / wrong / refused")
+    j.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    j.add_argument("--run-id", required=True)
+    j.add_argument("--judge-provider", default="qwen")
+    j.add_argument("--judge-model", default="qwen-max")
+    j.add_argument("--concurrency", type=int, default=4)
+    c = sub.add_parser("calibrate", help="用标定集 none 模式结果扫描 (high, low)")
+    c.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    c.add_argument("--run-id", required=True)
+    c.add_argument("--max-false-refusal", type=float, default=0.1)
+    c.add_argument("--high-precision", type=float, default=0.9)
+    rp = sub.add_parser("report", help="生成指标表")
+    rp.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    rp.add_argument("--run-id", required=True)
     args = ap.parse_args()
+    if args.cmd in ("run", "judge", "calibrate", "report"):
+        import asyncio
+        sys.path.insert(0, "/app")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        return asyncio.run(_eval_cmd(args))
 
     if args.cmd == "build":
         import asyncio

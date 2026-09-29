@@ -92,6 +92,21 @@ def test_prompt_numbers_chunks_and_renders_pack_schema():
     assert seen["timeout"] == svc.settings.KG_EXTRACT_TIMEOUT   # 建图用单独的长超时，不用问答的 LLM_TIMEOUT
 
 
+def test_content_rejection_counted_apart_from_retryable_failure():
+    class _Prov:
+        def __init__(self, err):
+            self.err = err
+
+        async def chat(self, msgs, **kw):
+            raise self.err
+
+    rejected = Exception("Error code: 400 - {'error': {'code': 'data_inspection_failed'}}")
+    for err, key in ((rejected, "rejected_batches"), (TimeoutError("timeout"), "failed_batches")):
+        stats: dict = {}
+        assert asyncio.run(svc._extract_from_chunks(_Prov(err), BATCH[:2], stats)) == []
+        assert stats == {"batches": 1, key: 1}   # 被审核拒绝的批不计入"需重试"的失败
+
+
 def test_general_relations_normalized_by_pack():
     assert canonical_relation("发布") == "发布"
     assert canonical_relation("正式发布") == "发布"
@@ -102,6 +117,15 @@ def test_general_relations_normalized_by_pack():
 
 def test_general_pack_keeps_number_prefix():
     assert canonical_entity("3号线") == "3号线"          # 编号前缀剥离只属于电网包
+
+
+def test_general_pack_strips_only_wrapping_quote_pair():
+    assert canonical_entity("《魔兽》") == "魔兽"
+    assert canonical_entity("“双城论坛”") == "双城论坛"
+    # 引号只包住名字的一部分时原样保留，不剥成不成对的残名（M5 通用包抽查发现）
+    assert canonical_entity("《魔兽》电影") == "《魔兽》电影"
+    assert canonical_entity("“一带一路”青年论坛") == "“一带一路”青年论坛"
+    assert canonical_entity("上海台北“双城论坛”") == "上海台北“双城论坛”"
 
 
 def test_grid_pack_strips_number_prefix(grid_pack):

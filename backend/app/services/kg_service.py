@@ -179,12 +179,18 @@ def _normalize_triples(triples: list[dict]) -> list[dict]:
     return out
 
 
+def _is_content_rejected(e: Exception) -> bool:
+    """云端模型的内容审核拒绝（百炼 data_inspection_failed）：同一输入重试结果不变。"""
+    return "data_inspection_failed" in str(e)
+
+
 async def _extract_from_chunks(provider, chunks: list, stats: dict | None = None) -> list[dict]:
     """分批调 LLM 抽取（领域包 schema 约束 prompt，批内编号 [1]…）→ 解析为原始三元组。单批失败降级。
 
     chunks：(chunk_id, text) 列表；也接受纯文本列表（无 chunk_id，出处校验一律置空）。
     每条原始三元组附带 `_batch`（该批的 (chunk_id, text)），供 _normalize_triples 做出处校验。
-    stats：可选，累计 {"batches": 总批数, "failed_batches": 失败批数}（重建脚本据此判断是否需重试）。
+    stats：可选，累计 {"batches": 总批数, "failed_batches": 失败批数, "rejected_batches": 被内容审核拒绝的批数}。
+    失败批（超时、限流等）重跑可能成功，重建脚本据此重试；被拒批是确定性的，重试无用，单独计数。
     """
     from app.core.domain_pack import get_pack
     pack = get_pack()
@@ -205,7 +211,8 @@ async def _extract_from_chunks(provider, chunks: list, stats: dict | None = None
                 all_triples.append(tp)
         except Exception as e:
             if stats is not None:
-                stats["failed_batches"] = stats.get("failed_batches", 0) + 1
+                key = "rejected_batches" if _is_content_rejected(e) else "failed_batches"
+                stats[key] = stats.get(key, 0) + 1
             degraded("kg_extract_batch", e)
     return all_triples
 
@@ -243,6 +250,7 @@ async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None 
     prov = {k: sum(1 for t in triples if t["provenance"] == k) for k in ("verified", "rematched", "none")}
     return {"tripleCount": len(triples), "newCount": len(new_triples), "provenance": prov,
             "neo4jOk": neo4j_ok, "failedBatches": stats.get("failed_batches", 0),
+            "rejectedBatches": stats.get("rejected_batches", 0),
             "docName": doc.doc_name, "sample": triples[:30]}
 
 

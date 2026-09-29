@@ -91,7 +91,8 @@ async def _extract_one(doc_id: str, lock: asyncio.Lock) -> dict:
         res = await kg_service.extract_triples(db, doc_id, write_lock=lock)
     if res.get("failedBatches") or not res.get("neo4jOk", True):
         raise RuntimeError(f"failedBatches={res.get('failedBatches')} neo4jOk={res.get('neo4jOk')}")
-    return {"triples": res["tripleCount"], "provenance": res["provenance"]}
+    return {"triples": res["tripleCount"], "provenance": res["provenance"],
+            "rejectedBatches": res.get("rejectedBatches", 0)}
 
 
 async def _embed_entities() -> str:
@@ -131,9 +132,10 @@ def _summary(state: dict) -> str:
         for k in prov:
             prov[k] += d["provenance"].get(k, 0)
     linked = (prov["verified"] + prov["rematched"]) / max(1, triples)
+    rejected = sum(d.get("rejectedBatches", 0) for d in state["done"].values())
     return (f"pack={state['pack']} docs={len(state['done'])}/{state['total']} failed={len(state['failed'])} "
             f"triples={triples} verified={prov['verified']} rematched={prov['rematched']} none={prov['none']} "
-            f"with_chunk={linked:.1%}")
+            f"with_chunk={linked:.1%} rejected_batches={rejected}")
 
 
 async def main() -> int:

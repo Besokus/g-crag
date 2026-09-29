@@ -29,7 +29,8 @@ def rk(monkeypatch, tmp_path):
         calls["extract"].append(doc_id)
         if doc_id in mod._fail:
             raise RuntimeError("LLM 超时")
-        return {"triples": 10, "provenance": {"verified": 8, "rematched": 1, "none": 1}}
+        return {"triples": 10, "provenance": {"verified": 8, "rematched": 1, "none": 1},
+                "rejectedBatches": 1 if doc_id == "d3" else 0}
 
     async def refresh(names=None):
         calls["degree"] += 1
@@ -62,6 +63,7 @@ def test_fresh_build_completes(rk):
     assert st["finished"] and set(st["done"]) == {"d1", "d2", "d3"} and st["failed"] == {}
     assert rk._calls["clear"] == 1
     assert "with_chunk=90.0%" in rk._summary(st)
+    assert "rejected_batches=1" in rk._summary(st)   # 被审核拒绝的批次算完成，但在汇总中列出
 
 
 def test_finished_build_refuses_without_fresh(rk):

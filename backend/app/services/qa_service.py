@@ -757,13 +757,44 @@ def _injection_blocked(query: str) -> str | None:
             "请用自然语言描述电网运维问题（设备、故障现象、处置需求）。")
 
 
+async def _refused_response(nq: str, contexts: list[dict], t0: float, conversation_id: str | None,
+                            tenant: str, crag_extras: dict, routing, *, db=None) -> dict:
+    """纠错用尽后的拒答：不调用 LLM，返回领域包 prompts/refuse.md，并入证据补全队列。"""
+    from app.core.domain_pack import get_pack
+    text = get_pack().render_prompt("refuse").strip()
+    if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
+        try:
+            from app.services.evidence_gap_service import collect
+            await collect(nq, "", "refused", crag_extras.get("cragGrade", ""),
+                          crag_extras.get("cragAction", ""), "auto", tenant or "default")
+        except Exception as e:
+            degraded("gcrag_refused_to_gap", e)
+    if conversation_id and db is not None:
+        try:
+            await conversation_service.save_message(db, conversation_id, "assistant", text)
+        except Exception as e:
+            degraded("gcrag_refused_save", e)
+    return {
+        "answer": text, "retrievalSource": [], "responseTime": round(time.time() - t0, 3),
+        "hallucinationRate": 0.0, "cached": False, "cacheLayer": "llm", "confidence": "refused",
+        "route": routing.route if routing else "hybrid",
+        "conversationId": conversation_id or "",
+        **crag_extras,
+    }
+
+
 async def answer(
     db: AsyncSession, query: str, model_type: str | None = None,
     topk: int = 5, conversation_id: str | None = None, username: str = "",
     tenant: str = "default", user_dept: str | None = None, user_role: str | None = None,
-    regen: bool = False,
+    regen: bool = False, no_cache: bool = False, correction_mode: str | None = None,
 ) -> dict:
     t0 = time.time()
+    from app.rag import gcrag
+    mode = gcrag.resolve_mode(correction_mode)
+    # 缓存键带纠错模式（设计文档 §16.9）：同一问题在不同模式下答案不同，不能互相命中
+    ck_model = f"{llm_cache_tag(model_type)}#{mode}"
+    skip_read = regen or no_cache   # noCache 跳过所有缓存的读和写；regen 只跳过读
     with _trace_span("normalize"):
         nq = term_service.normalize(query)
         safety.guard_query(query)  # 入站 prompt injection 告警（D4）
@@ -792,7 +823,7 @@ async def answer(
     # 多轮也命中（用户认可的高频答案与上下文无关）；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
     # regen=True 跳过 hotqa（与流式链路对齐，强制重新生成）。
     hot = None
-    if not regen:
+    if not skip_read:
         with _trace_span("hotqa"):
             hot = await _hit_hotqa(nq, conversation_id or "", t0)
     _tc = _get_trace()
@@ -808,10 +839,10 @@ async def answer(
         return hot
 
     # 多轮不走缓存（上下文变化）；单轮走三级缓存：Redis(L1) → 语义缓存(L1.5) → MySQL(L2) → LLM(L3)
-    if is_single and not regen and not await _is_blacklisted(nq):
+    if is_single and not skip_read and not await _is_blacklisted(nq):
         # regen=True（重新生成）跳过缓存读，强制重走 LLM；L1: Redis 热点缓存（精确 key 匹配）
         try:
-            cached = await redis_client.cache_get_json(_cache_key(model_type, nq, tenant))
+            cached = await redis_client.cache_get_json(_cache_key(ck_model, nq, tenant))
         except Exception as e:
             degraded("qa_cache_get", e)
             cached = None
@@ -834,7 +865,7 @@ async def answer(
         if settings.CACHE_PERSIST_ENABLE:
             try:
                 from app.services.cache_persist import cache_get_mysql
-                mysql_cached = await cache_get_mysql(db, model_type, nq, tenant_id=tenant)
+                mysql_cached = await cache_get_mysql(db, ck_model, nq, tenant_id=tenant)
                 if mysql_cached and await _cache_knowledge_valid(db, mysql_cached, tenant):
                     mysql_cached["cached"] = True
                     mysql_cached["cacheLayer"] = "mysql"
@@ -855,7 +886,7 @@ async def answer(
         if getattr(settings, "SEMANTIC_CACHE_ENABLE", False):
             try:
                 from app.rag.semantic_cache import semantic_cache_get
-                sc_data, sc_type, sc_sim = await semantic_cache_get(model_type, nq, tenant_id=tenant)
+                sc_data, sc_type, sc_sim = await semantic_cache_get(ck_model, nq, tenant_id=tenant)
                 if (
                     sc_data
                     and sc_type in ("semantic_high", "semantic_medium")
@@ -893,9 +924,9 @@ async def answer(
 
     # 多轮且 query 完整(standalone 未改写 search_q==nq) → 也查 Redis 热点缓存
     # 场景：用户点推荐问题(完整 query)接续对话，答案不依赖上下文，可安全命中
-    if conversation_id and search_q == nq and not await _is_blacklisted(nq):
+    if conversation_id and search_q == nq and not skip_read and not await _is_blacklisted(nq):
         try:
-            cached = await redis_client.cache_get_json(_cache_key(model_type, nq, tenant))
+            cached = await redis_client.cache_get_json(_cache_key(ck_model, nq, tenant))
             if cached and await _cache_knowledge_valid(db, cached, tenant):
                 cached["cached"] = True
                 cached["cacheLayer"] = "redis"
@@ -913,12 +944,12 @@ async def answer(
             degraded("qa_cache_get_multi", e)
 
     # C4: 多轮 standalone(search_q!=nq) 缓存扩面——同对话同语义追问命中（MULTI_TURN_CACHE_ENABLE）
-    if (conversation_id and search_q != nq
+    if (conversation_id and search_q != nq and not skip_read
             and getattr(settings, "MULTI_TURN_CACHE_ENABLE", False)
             and not await _is_blacklisted(search_q)):
         try:
             cached = await redis_client.cache_get_json(
-                _multi_cache_key(model_type, search_q, tenant, conversation_id))
+                _multi_cache_key(ck_model, search_q, tenant, conversation_id))
             if cached and await _cache_knowledge_valid(db, cached, tenant):
                 cached["cached"] = True
                 cached["cacheLayer"] = "redis_multi"
@@ -963,7 +994,7 @@ async def answer(
         _tc.attach("retrieval", hits=len(contexts),
                    route=(routing.route if routing else "hybrid"),
                    top1=round(float(contexts[0].get("score") or 0), 4) if contexts else None)
-    if not contexts:
+    if not contexts and not (mode == "gcrag" and settings.CRAG_ENABLE):
         # 无结果兜底：记录为知识缺口（喂证据补全闭环）+ 友好引导，而非生硬拒答
         try:
             from app.services.evidence_gap_service import collect
@@ -980,11 +1011,28 @@ async def answer(
             "conversationId": conversation_id or "",
         }
 
-    # Corrective RAG：分级 + 纠错闭环
-    with _trace_span("crag"):
-        contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
-            db, nq, contexts, model_type, topk, tenant, scoring=scoring
-        )
+    # 纠错：none / legacy / gcrag 三种模式（rag/gcrag.py；设计文档 §6、§16.4）
+    crag_extras: dict = {}
+    if settings.CRAG_ENABLE:
+        with _trace_span("crag"):
+            _cres = await gcrag.correct(db, nq, _sr, mode=mode, topk=topk, tenant=tenant,
+                                        model_type=model_type)
+        contexts, confidence = _cres.contexts, _cres.confidence
+        crag_action, crag_grade = _cres.action, _cres.final_grade
+        crag_extras = _cres.to_response()
+        try:
+            from app.core import metrics
+            metrics.CRAG_GRADE.labels(crag_grade).inc()
+            metrics.CRAG_ACTION.labels(crag_action).inc()
+            metrics.CRAG_CONFIDENCE.labels(confidence).inc()
+        except Exception:
+            pass
+        if crag_action == "refused":
+            # 纠错用尽仍为 incorrect：不生成答案，返回领域包的拒答措辞（设计文档 §9）
+            return await _refused_response(nq, contexts, t0, conversation_id, tenant, crag_extras,
+                                           routing, db=db)
+    else:
+        contexts, confidence, crag_action, crag_grade = contexts, "high", "normal", ""
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
         _tc.attach("crag", grade=crag_grade, action=crag_action, confidence=confidence,
@@ -1152,6 +1200,8 @@ async def answer(
             "docType": c.get("docType", ""), "chunkIdx": c.get("chunkIdx"),
             "chunk": c.get("chunk", ""), "score": c.get("score", 0.0),
             "sources": c.get("sources", []),
+            "chunkId": c.get("chunkId", ""), "origin": c.get("origin", "retrieval"),
+            "pathIds": c.get("pathIds", []),
         } for c in contexts],
         "evidenceTrace": _trace,
         "graphCount": len(graph),
@@ -1174,17 +1224,18 @@ async def answer(
 
     # 单轮 或 多轮 且 高置信(confidence==high) 才写；黑名单/证据有限/不足不写
     # 注：多轮指代问题(search_q!=nq)会写但读时按 search_q==nq 过滤(避免跨对话脏命中)
-    if (is_single or conversation_id) and confidence == "high" and not await _is_blacklisted(nq):
+    if (not no_cache and (is_single or conversation_id) and confidence == "high"
+            and not await _is_blacklisted(nq)):
         # L2: MySQL 持久化（先写，保证数据不丢）
         if settings.CACHE_PERSIST_ENABLE:
             try:
                 from app.services.cache_persist import cache_set_mysql
-                await cache_set_mysql(db, model_type, nq, query, result, tenant_id=tenant)
+                await cache_set_mysql(db, ck_model, nq, query, result, tenant_id=tenant)
             except Exception as e:
                 degraded("qa_cache_mysql_set", e)
         # L1: Redis 热点（后写，MySQL 已成功）
         try:
-            await redis_client.cache_set_json(_cache_key(model_type, nq, tenant), result, settings.QA_CACHE_TTL)
+            await redis_client.cache_set_json(_cache_key(ck_model, nq, tenant), result, settings.QA_CACHE_TTL)
         except Exception as e:
             degraded("qa_cache_set", e)
         # C4: 多轮 standalone 额外写 multi key（search_q!=nq + 开关开；读配对见上方 C4 块）
@@ -1192,7 +1243,7 @@ async def answer(
                 and getattr(settings, "MULTI_TURN_CACHE_ENABLE", False)):
             try:
                 await redis_client.cache_set_json(
-                    _multi_cache_key(model_type, search_q, tenant, conversation_id),
+                    _multi_cache_key(ck_model, search_q, tenant, conversation_id),
                     result, settings.QA_CACHE_TTL)
             except Exception as e:
                 degraded("qa_cache_set_multi_standalone", e)
@@ -1200,7 +1251,7 @@ async def answer(
         if getattr(settings, "SEMANTIC_CACHE_ENABLE", False):
             try:
                 from app.rag.semantic_cache import semantic_cache_set
-                await semantic_cache_set(model_type, nq, _cache_key(model_type, nq, tenant), tenant_id=tenant)
+                await semantic_cache_set(ck_model, nq, _cache_key(ck_model, nq, tenant), tenant_id=tenant)
             except Exception as e:
                 degraded("semantic_cache_set", e)
     # B6: high 答案写独立 highbase key（TTL 30 天，不依赖问答缓存存活）——供 dislike 时 overconfident 检出
@@ -1382,6 +1433,7 @@ async def stream_answer(
     user_dept: str | None = None, user_role: str | None = None,
     memory_read: bool = False, memory_write: bool = False,
     memory_scope: str = "user", trace_id: str = "",
+    no_cache: bool = False, correction_mode: str | None = None,
 ):
     """流式问答：单轮查热点缓存(命中则快流不调LLM) → 否则 meta/token/done 三段。
 
@@ -1389,6 +1441,10 @@ async def stream_answer(
     memory_read/memory_write：Agent 模式长期记忆 opt-in（个性化运行绕开共享缓存）。
     """
     t0 = time.time()
+    from app.rag import gcrag
+    mode = gcrag.resolve_mode(correction_mode)
+    ck_model = f"{llm_cache_tag(model_type)}#{mode}"   # 缓存键带纠错模式（设计文档 §16.9）
+    skip_read = regen or no_cache
     nq = term_service.normalize(query)
     _p = model_type or settings.LLM_PROVIDER
     safety.guard_query(query)  # 入站 prompt injection 告警（D4）
@@ -1422,7 +1478,7 @@ async def stream_answer(
 
     # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接快流，跳检索/CRAG/生成。
     # regen=True（强制重新生成）跳过 hotqa；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
-    if not regen:
+    if not skip_read:
         with _trace_span("hotqa"):
             hot = await _hit_hotqa(nq, conversation_id or "", t0)
         _tc = _get_trace()
@@ -1463,10 +1519,10 @@ async def stream_answer(
 
     # 0) 单轮三级缓存：Redis(L1) → MySQL(L2) → LLM(L3)
     #    regen=True（重新生成）跳过缓存读，强制重走 LLM
-    if is_single and not regen and not await _is_blacklisted(nq):
+    if is_single and not skip_read and not await _is_blacklisted(nq):
         # L1: Redis 热点
         try:
-            cached = await redis_client.cache_get_json(_cache_key(model_type, nq, tenant))
+            cached = await redis_client.cache_get_json(_cache_key(ck_model, nq, tenant))
         except Exception as e:
             degraded("qa_cache_get", e)
             cached = None
@@ -1500,7 +1556,7 @@ async def stream_answer(
         if settings.CACHE_PERSIST_ENABLE:
             try:
                 from app.services.cache_persist import cache_get_mysql
-                mysql_cached = await cache_get_mysql(db, model_type, nq, tenant_id=tenant)
+                mysql_cached = await cache_get_mysql(db, ck_model, nq, tenant_id=tenant)
                 if mysql_cached and await _cache_knowledge_valid(db, mysql_cached, tenant):
                     conv = await conversation_service.create_conversation(db, username, query)
                     cid = conv.id
@@ -1533,7 +1589,7 @@ async def stream_answer(
         if getattr(settings, "SEMANTIC_CACHE_ENABLE", False):
             try:
                 from app.rag.semantic_cache import semantic_cache_get
-                sc_data, sc_type, sc_sim = await semantic_cache_get(model_type, nq, tenant_id=tenant)
+                sc_data, sc_type, sc_sim = await semantic_cache_get(ck_model, nq, tenant_id=tenant)
                 if (
                     sc_data
                     and sc_type in ("semantic_high", "semantic_medium")
@@ -1582,9 +1638,9 @@ async def stream_answer(
         _tc.attach("standalone_rewrite", rewritten=search_q[:160], changed=search_q != nq)
 
     # 多轮且 query 完整(search_q==nq) → 也查 Redis 热点（流式，存消息接续对话）
-    if conversation_id and search_q == nq and not regen and not await _is_blacklisted(nq):
+    if conversation_id and search_q == nq and not skip_read and not await _is_blacklisted(nq):
         try:
-            cached = await redis_client.cache_get_json(_cache_key(model_type, nq, tenant))
+            cached = await redis_client.cache_get_json(_cache_key(ck_model, nq, tenant))
             if cached and await _cache_knowledge_valid(db, cached, tenant):
                 try:
                     await conversation_service.save_message(db, conversation_id, "user", query)
@@ -1637,7 +1693,7 @@ async def stream_answer(
         _tc.attach("retrieval", hits=len(contexts),
                    route=(routing.route if routing else "hybrid"),
                    top1=round(float(contexts[0].get("score") or 0), 4) if contexts else None)
-    if not contexts:
+    if not contexts and not (mode == "gcrag" and settings.CRAG_ENABLE):
         # B7：stream 无结果 → 自动入证据补全队列（auto_no_recall）
         if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
             _fire_and_forget(_maybe_collect_refused(
@@ -1646,11 +1702,25 @@ async def stream_answer(
         yield {"type": "done", "content": "根据现有资料无法确认该问题，请先上传并解析相关运维文档后重试。"}
         return
 
-    # Corrective RAG：分级 + 纠错闭环
-    with _trace_span("crag"):
-        contexts, confidence, crag_action, crag_grade, crag_extras = await _crag_correct(
-            db, nq, contexts, model_type, topk, tenant, scoring=scoring
-        )
+    # 纠错：none / legacy / gcrag（rag/gcrag.py）
+    crag_extras: dict = {}
+    if settings.CRAG_ENABLE:
+        with _trace_span("crag"):
+            _cres = await gcrag.correct(db, nq, _sr, mode=mode, topk=topk, tenant=tenant,
+                                        model_type=model_type)
+        contexts, confidence = _cres.contexts, _cres.confidence
+        crag_action, crag_grade = _cres.action, _cres.final_grade
+        crag_extras = _cres.to_response()
+        if crag_action == "refused":
+            # 纠错用尽：不生成，返回领域包拒答措辞（设计文档 §9）
+            _ref = await _refused_response(nq, contexts, t0, conversation_id, tenant, crag_extras,
+                                           routing, db=db)
+            yield {"type": "meta", "sources": [], "conversationId": conversation_id or ""}
+            yield {"type": "done", "content": _ref["answer"], **{k: v for k, v in _ref.items()
+                                                                 if k not in ("answer",)}}
+            return
+    else:
+        contexts, confidence, crag_action, crag_grade = contexts, "high", "normal", ""
     _tc = _get_trace()
     if _tc and getattr(settings, "QA_TRACE_DETAIL_ENABLE", False):
         _tc.attach("crag", grade=crag_grade, action=crag_action, confidence=confidence,
@@ -1686,6 +1756,8 @@ async def stream_answer(
             "docType": c.get("docType", ""), "chunkIdx": c.get("chunkIdx"),
             "chunk": c.get("chunk", ""), "score": c.get("score", 0.0),
             "sources": c.get("sources", []),
+            "chunkId": c.get("chunkId", ""), "origin": c.get("origin", "retrieval"),
+            "pathIds": c.get("pathIds", []),
         } for c in contexts],
         "conversationId": conversation_id,
     }
@@ -1807,17 +1879,18 @@ async def stream_answer(
         "conversationId": conversation_id,
     }
     # 单轮 或 多轮 且 高置信 才写；黑名单/证据有限/不足不写
-    if (is_single or conversation_id) and confidence == "high" and not await _is_blacklisted(nq):
+    if (not no_cache and (is_single or conversation_id) and confidence == "high"
+            and not await _is_blacklisted(nq)):
         # L2: MySQL 持久化（先写）
         if settings.CACHE_PERSIST_ENABLE:
             try:
                 from app.services.cache_persist import cache_set_mysql
-                await cache_set_mysql(db, model_type, nq, query, cache_data, tenant_id=tenant)
+                await cache_set_mysql(db, ck_model, nq, query, cache_data, tenant_id=tenant)
             except Exception as e:
                 degraded("qa_cache_mysql_set_stream", e)
         # L1: Redis 热点（后写）
         try:
-            await redis_client.cache_set_json(_cache_key(model_type, nq, tenant), cache_data, settings.QA_CACHE_TTL)
+            await redis_client.cache_set_json(_cache_key(ck_model, nq, tenant), cache_data, settings.QA_CACHE_TTL)
         except Exception as e:
             degraded("qa_cache_set", e)
         # L1.5: 语义缓存索引（向量化入库，供后续相似查询命中）
@@ -1826,7 +1899,7 @@ async def stream_answer(
         if getattr(settings, "SEMANTIC_CACHE_ENABLE", False):
             try:
                 from app.rag.semantic_cache import semantic_cache_set
-                await semantic_cache_set(model_type, nq, _cache_key(model_type, nq, tenant), tenant_id=tenant)
+                await semantic_cache_set(ck_model, nq, _cache_key(ck_model, nq, tenant), tenant_id=tenant)
             except Exception as e:
                 degraded("semantic_cache_set_stream", e)
     # B6: high 答案写独立 highbase key（TTL 30 天，不依赖问答缓存存活）——供 dislike 时 overconfident 检出

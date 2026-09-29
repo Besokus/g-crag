@@ -79,6 +79,7 @@ async def answer(
             db, q, body.modelType, conversation_id=body.conversationId,
             username=user.username, tenant=user.tenant_id,
             user_dept=user.dept, user_role=user.role, regen=regen,
+            no_cache=body.noCache, correction_mode=body.correctionMode,
         )
     # 插件 · 答案后处理（扩展点）
     if isinstance(data, dict) and data.get("answer"):
@@ -178,6 +179,7 @@ async def answer_stream(
                 db, body.query, body.modelType,
                 conversation_id=body.conversationId, username=user.username, tenant=user.tenant_id,
                 regen=regen, agent_mode=body.agentMode,
+                no_cache=body.noCache, correction_mode=body.correctionMode,
                 user_dept=user.dept, user_role=user.role,
                 memory_read=body.memoryRead, memory_write=body.memoryWrite,
                 memory_scope=body.memoryScope,

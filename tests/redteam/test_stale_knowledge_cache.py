@@ -278,4 +278,5 @@ def test_cache_write_requires_high_confidence_condition():
     import inspect
 
     src = inspect.getsource(qa_service)
-    assert 'confidence == "high" and not await _is_blacklisted(nq)' in src
+    cond = 'and confidence == "high"\n            and not await _is_blacklisted(nq)'
+    assert src.count(cond) == 2          # answer 与 stream_answer 两处写缓存都要求 high（noCache 另外跳过）

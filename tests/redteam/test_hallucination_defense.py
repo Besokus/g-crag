@@ -100,11 +100,16 @@ def test_refused_reason_attributes_conservative_refusal():
 
 
 @pytest.mark.asyncio
-async def test_qa_no_recall_answer_refuses_without_inventing(test_db, monkeypatch):
-    """真实调用 answer() 无结果兜底分支（qa_service.py:891-906）：
-    confidence=refused + 引导补证据，不编造任何处置数值/结论。"""
+@pytest.mark.parametrize("mode", ["none", "gcrag"])
+async def test_qa_no_recall_answer_refuses_without_inventing(test_db, monkeypatch, mode):
+    """真实调用 answer()，检索无结果：confidence=refused，不编造任何处置数值/结论。
+
+    none/legacy 走原兜底分支（引导补证据）；gcrag 先尝试图谱与改写纠错，无果后返回领域包拒答措辞。"""
     from app.clients import redis_client
-    from app.services import retrieval_service
+    from app.rag import entity_linking, graph_evidence
+    from app.rag.graph_evidence import GraphEvidenceResult
+    from app.services import query_rewrite, retrieval_service
+    from app.services.retrieval_service import ScoringStatus, SearchResult
 
     def _redis_offline(*_a, **_k):
         raise RuntimeError("redis offline (redteam offline test)")
@@ -112,16 +117,31 @@ async def test_qa_no_recall_answer_refuses_without_inventing(test_db, monkeypatc
     monkeypatch.setattr(redis_client, "get_redis", _redis_offline)
 
     async def _empty_search(*_a, **_k):
-        return []
+        return SearchResult([], ScoringStatus("stub", True, "ok", 0))
 
-    monkeypatch.setattr(retrieval_service, "mixed_search", _empty_search)
+    async def _no_link(q):
+        return entity_linking.LinkingResult("none")
 
-    result = await qa_service.answer(test_db, "1号主变油温异常升高怎么处理", tenant="t-redteam")
+    async def _no_graph(*a, **k):
+        return GraphEvidenceResult("no_path")
+
+    async def _no_rewrite(q, *a, **k):
+        return q
+
+    monkeypatch.setattr(retrieval_service, "mixed_search_ex", _empty_search)
+    monkeypatch.setattr(entity_linking, "link", _no_link)
+    monkeypatch.setattr(graph_evidence, "find", _no_graph)
+    monkeypatch.setattr(query_rewrite, "rewrite_query", _no_rewrite)
+
+    result = await qa_service.answer(test_db, "1号主变油温异常升高怎么处理", tenant="t-redteam",
+                                     correction_mode=mode)
     assert result["confidence"] == "refused"
     assert result["retrievalSource"] == []
     assert result["cached"] is False
-    assert "知识缺口" in result["answer"]
-    assert "建议" in result["answer"]
+    if mode == "none":
+        assert "知识缺口" in result["answer"] and "建议" in result["answer"]
+    else:
+        assert result["cragAction"] == "refused" and result["answer"].startswith("根据现有资料无法回答")
     assert not _TELEMETRY_NUMBER_RE.search(result["answer"])
 
 

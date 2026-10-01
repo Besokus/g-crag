@@ -141,6 +141,28 @@ def test_gcrag_ambiguous_graph_recovers(env):
     assert len(env["scorer"].calls[0]) == 3              # 原上下文 ∪ 图谱候选，一次统一重打分
 
 
+def test_gcrag_v2_appends_graph_keeps_retrieval(env):
+    # 同样的分级与采纳判定；差别只在上下文：原检索条目原样保留，图谱条目追加在后
+    env["graph"] = _graph(0.95, 0.45)
+    v1 = _run(_search(0.5, 0.4, 0.35), "gcrag")
+    v2 = _run(_search(0.5, 0.4, 0.35), "gcrag_v2")
+    assert (v1.final_grade, v1.action) == (v2.final_grade, v2.action) == ("correct", "graph_recovered")
+    assert [c["chunkId"] for c in v1.contexts] == ["g0", "r0", "g1"]          # r1、r2 被挤掉
+    assert [c["chunkId"] for c in v2.contexts] == ["r0", "r1", "r2", "g0", "g1"]
+    assert [c["score"] for c in v2.contexts[:3]] == [0.5, 0.4, 0.35]          # 原条目分数不变
+    assert v2.rounds[0].admitted == v1.rounds[0].admitted == 2
+    assert [p.id for p in v2.evidence_paths] == [0]
+
+
+def test_gcrag_v2_no_improvement_keeps_original(env):
+    env["graph"] = _graph(0.2)
+    search = _search(0.5)
+    search.items[0]["chunk"] = "r0@0.2"                  # 重打分后变差 → 不采纳
+    r = _run(search, "gcrag_v2")
+    assert r.rounds[0].status == "no_improvement" and r.action == "ambiguous_kept"
+    assert [(c["chunkId"], c["score"]) for c in r.contexts] == [("r0", 0.5)]
+
+
 def test_gcrag_incorrect_graph_partial(env):
     env["graph"] = _graph(0.5)
     r = _run(_search(0.1), "gcrag")

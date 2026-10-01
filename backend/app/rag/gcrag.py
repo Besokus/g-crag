@@ -7,10 +7,13 @@
 | none   | 生成           | 生成                                        |
 | legacy | 生成（标不确定）| LLM 改写重检索 → 仍 incorrect 拒答           |
 | gcrag  | 图谱定位证据    | 图谱定位证据 → LLM 改写 → 仍 incorrect 拒答  |
+| gcrag_v2 | 同 gcrag，仅图谱证据的采纳方式不同（见下）                    |
 
 - 打分失败（unscored）时任何模式都不纠错、不拒答，置信度 medium（M3）。
 - 图谱定位证据：原上下文 ∪ 图谱候选 → 去重 → 打分器统一重打分一次 → 取 topk → 再分级；
   重打分失败时丢弃图谱候选、本轮记 failed，保持原分级进入下一步。
+- gcrag_v2（2026-10-01，test2 事后迭代）：分级与 gcrag 完全相同；采纳时原检索条目原样保留（顺序、分数不变），
+  只把进入重打分 topk 的图谱条目追加在后面。gcrag 的"取 topk"会让图谱条目挤掉有用的检索条目（test2 t30）。
 - 最多两轮纠错。每一步写 span（随 spans_json 落库，始终记录）。
 """
 import time
@@ -21,8 +24,9 @@ from app.config import settings
 from app.core.obs import degraded
 from app.rag import grading
 
-CorrectionMode = Literal["none", "legacy", "gcrag"]
-MODES = ("none", "legacy", "gcrag")
+CorrectionMode = Literal["none", "legacy", "gcrag", "gcrag_v2"]
+MODES = ("none", "legacy", "gcrag", "gcrag_v2")
+GRAPH_MODES = ("gcrag", "gcrag_v2")
 _RANK = {"incorrect": 0, "ambiguous": 1, "correct": 2}
 
 
@@ -92,7 +96,7 @@ def _camel(k: str) -> str:
 def resolve_mode(mode: str | None) -> str:
     m = mode or settings.CORRECTION_MODE
     if m not in MODES:
-        raise ValueError(f"未知纠错模式: {m}（支持: none | legacy | gcrag）")
+        raise ValueError(f"未知纠错模式: {m}（支持: none | legacy | gcrag | gcrag_v2）")
     return m
 
 
@@ -118,8 +122,12 @@ def _dedupe_key(it: dict) -> tuple:
 
 
 async def _graph_round(db, query: str, contexts: list[dict], grade_before: str, rnd: int,
-                       *, topk: int, th, result: CorrectionResult) -> tuple[list[dict], str, RoundRecord]:
-    """一轮图谱定位证据。返回 (新上下文, 新分级, 本轮记录)；未改变时返回原上下文与原分级。"""
+                       *, topk: int, th, result: CorrectionResult,
+                       append: bool = False) -> tuple[list[dict], str, RoundRecord]:
+    """一轮图谱定位证据。返回 (新上下文, 新分级, 本轮记录)；未改变时返回原上下文与原分级。
+
+    append=True（gcrag_v2）：新上下文 = 原上下文 + 重打分 topk 中的图谱条目，原条目不被挤掉。
+    """
     from app.core.domain_pack import get_pack
     from app.rag import entity_linking, graph_evidence
     from app.rag.scorer import get_scorer
@@ -174,10 +182,11 @@ async def _graph_round(db, query: str, contexts: list[dict], grade_before: str, 
         # 此时不采纳本轮结果，避免把原本可作答的问题推向拒答。
         rec.status = "no_improvement"
         return contexts, grade_before, rec
-    rec.admitted = sum(1 for m in rescored if m.get("origin") == "graph")
-    used = {pid for m in rescored for pid in (m.get("pathIds") or [])}
+    admitted = [m for m in rescored if m.get("origin") == "graph"]
+    rec.admitted = len(admitted)
+    used = {pid for m in admitted for pid in (m.get("pathIds") or [])}
     result.evidence_paths = [p for p in ev.paths if p.id in used]
-    return rescored, grade_after, rec
+    return ([*contexts, *admitted] if append else rescored), grade_after, rec
 
 
 async def _rewrite_round(db, query: str, contexts: list[dict], grade_before: str, rnd: int,
@@ -238,9 +247,10 @@ async def correct(db, query: str, search, *, mode: str, topk: int, tenant: str =
         return res
 
     ctx, grade, rnd = items, g0, 0
-    if mode == "gcrag":
+    if mode in GRAPH_MODES:
         rnd += 1
-        ctx, grade, rec = await _graph_round(db, query, ctx, grade, rnd, topk=topk, th=th, result=res)
+        ctx, grade, rec = await _graph_round(db, query, ctx, grade, rnd, topk=topk, th=th, result=res,
+                                             append=mode == "gcrag_v2")
         res.rounds.append(rec)
         if grade in ("correct", "ambiguous"):
             res.contexts, res.final_grade = ctx, grade

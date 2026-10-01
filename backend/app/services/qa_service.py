@@ -994,7 +994,7 @@ async def answer(
         _tc.attach("retrieval", hits=len(contexts),
                    route=(routing.route if routing else "hybrid"),
                    top1=round(float(contexts[0].get("score") or 0), 4) if contexts else None)
-    if not contexts and not (mode == "gcrag" and settings.CRAG_ENABLE):
+    if not contexts and not (mode in gcrag.GRAPH_MODES and settings.CRAG_ENABLE):
         # 无结果兜底：记录为知识缺口（喂证据补全闭环）+ 友好引导，而非生硬拒答
         try:
             from app.services.evidence_gap_service import collect
@@ -1694,7 +1694,7 @@ async def stream_answer(
         _tc.attach("retrieval", hits=len(contexts),
                    route=(routing.route if routing else "hybrid"),
                    top1=round(float(contexts[0].get("score") or 0), 4) if contexts else None)
-    if not contexts and not (mode == "gcrag" and settings.CRAG_ENABLE):
+    if not contexts and not (mode in gcrag.GRAPH_MODES and settings.CRAG_ENABLE):
         # B7：stream 无结果 → 自动入证据补全队列（auto_no_recall）
         if getattr(settings, "CRAG_REFUSED_TO_GAP_ENABLE", True):
             _fire_and_forget(_maybe_collect_refused(

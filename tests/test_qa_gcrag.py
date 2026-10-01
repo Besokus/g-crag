@@ -121,7 +121,8 @@ def test_empty_retrieval_enters_correction_only_in_gcrag(qa):
     out = _answer(correction_mode="none", no_cache=True)
     assert qa["modes"] == [] and out["confidence"] == "refused"   # none/legacy：保持原兜底
     _answer(correction_mode="gcrag", no_cache=True)
-    assert qa["modes"] == ["gcrag"]                                 # gcrag：图谱可能找得到证据
+    _answer(correction_mode="gcrag_v2", no_cache=True)
+    assert qa["modes"] == ["gcrag", "gcrag_v2"]                     # 图谱模式：图谱可能找得到证据
 
 
 def test_invalid_mode_rejected_by_schema():

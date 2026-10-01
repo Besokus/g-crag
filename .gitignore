@@ -52,6 +52,7 @@ logs/
 !README.md
 !使用手册.md
 !CONTEXT.md
+!CLAUDE.md
 
 # ===== 工具/临时产物（不入库）=====
 /.tmp-ops-test-deps/

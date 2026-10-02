@@ -199,9 +199,204 @@ async def candidates(out: Path, *, n: int, seed: int, interval: float) -> dict:
     return {"paths": len(rows), "sampled": len(paths), "kinds": counts}
 
 
+# ---------------- 隐藏桥接子集（hard，2026-10-02；构造规则见调研文档 §4.2，按 MuSiQue 思路按构造去捷径）----------------
+# 与上面 candidates 的区别：doc2 全文不提 A、doc1 不提 C（桥接真正"藏"在两篇之间）；出题时不给 doc2；
+# 逐题过滤 F1 两篇都给可答 → F2 只给 doc1 不可答 → F3 闭卷不可答 → F4 冻结检索 top5 无同时含 B、C 的 chunk。
+# 先免费、再 Claude、最后百炼，任一关不过即停，漏斗全部落盘。
+
+HARD_GEN_PROMPT = """你在为知识图谱问答系统构造"两跳"评测题。已知两条事实，通过实体「{b}」相连：
+- 事实 1（出自下面的文档 1）：{t1}
+- 事实 2（出自另一篇文档）：{t2}
+
+【文档 1 片段】
+{c1}
+
+要求：
+1. 问题以「{a}」为出发点，用文档 1 中的关系指代「{b}」（如"与{a}签约的那家企业"），**不得出现「{b}」或「{c}」**；
+2. 问题问的是事实 2：答案就是「{c}」（或以它为核心的短语）；
+3. 只读文档 1 无法回答，必须再找到讲「{b}」的另一篇文档；
+4. 问题自然、无歧义；如果事实 2 太泛（如"发布了通知"）导致答案不唯一，返回 ok=false。
+
+只输出 JSON：{{"ok": true/false, "question": "...", "answer": "..."}}"""
+
+ANSWER_PROMPT = """根据【资料】回答【问题】，答案尽量简短（一个名称、数字或短语即可）。资料不足以回答时只输出"无法回答"。
+
+【资料】
+{ctx}
+
+【问题】{question}"""
+
+CLOSED_PROMPT = """不借助任何资料，凭你已有的知识回答下面的问题，答案尽量简短。不知道或无法确定时只输出"无法回答"。
+
+【问题】{question}"""
+
+_REFUSE = ("无法回答", "无法确定", "无法确认", "资料不足", "未提及", "没有提到", "不知道")
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[\s“”\"'《》「」（）()、，,。.]", "", s or "").lower()
+
+
+def contains(text: str, name: str) -> bool:
+    return bool(name) and _norm(name) in _norm(text)
+
+
+def leak_ratio(question: str, doc: str, n: int = 3) -> float:
+    """题面字符 n-gram 在文档中出现的比例（题面短、文档长，用覆盖率而不是 Jaccard）。"""
+    q = _norm(question)
+    grams = {q[i:i + n] for i in range(len(q) - n + 1)}
+    if not grams:
+        return 0.0
+    d = _norm(doc)
+    return round(sum(g in d for g in grams) / len(grams), 4)
+
+
+def sample_hidden(rows: list[dict], texts: dict[str, str], n: int, seed: int, max_per_bridge: int = 3) -> list[dict]:
+    """doc2 全文不含 A、doc1 全文不含 C；每个桥接实体至多 max_per_bridge 条，每篇 doc2 至多一条。"""
+    rows = sorted(rows, key=lambda r: (r["b"], r["a"], r["c"], r["chunk2"]))
+    random.Random(seed).shuffle(rows)
+    per_b: dict[str, int] = {}
+    seen_doc2, out = set(), []
+    for r in rows:
+        d1, d2 = texts.get(r["doc1"], ""), texts.get(r["doc2"], "")
+        if not d1 or not d2 or contains(d2, r["a"]) or contains(d1, r["c"]):
+            continue
+        if per_b.get(r["b"], 0) >= max_per_bridge or r["doc2"] in seen_doc2:
+            continue
+        per_b[r["b"]] = per_b.get(r["b"], 0) + 1
+        seen_doc2.add(r["doc2"])
+        out.append({**r, "pid": f"hb{len(out) + 1:03d}",
+                    "t1": _triple(r["r1from"], r["rel1"], r["a"], r["b"]),
+                    "t2": _triple(r["r2from"], r["rel2"], r["b"], r["c"])})
+        if len(out) >= n:
+            break
+    return out
+
+
+def quick_verdict(answer: str, gold: str) -> str | None:
+    """先用规则判：含标准答案 → correct；表示无法回答 → refused；其余交给判定模型。"""
+    if contains(answer, gold):
+        return "correct"
+    if not (answer or "").strip() or any(k in answer for k in _REFUSE):
+        return "refused"
+    return None
+
+
+FILTERS = ("F1_answerable", "F2_doc2_needed", "F3_closed_book", "F4_retrieval_hard")
+
+
+def funnel(cands: list[dict]) -> dict:
+    """各关剩余数；stage = 首个未通过的关（passed = 全部通过）。"""
+    out = {"sampled": len(cands), "generated": sum(1 for c in cands if c.get("valid"))}
+    alive = [c for c in cands if c.get("valid")]
+    for f in FILTERS:
+        alive = [c for c in alive if c.get("stage") not in ("invalid",) + FILTERS[:FILTERS.index(f) + 1]]
+        out[f] = len(alive)
+    return out
+
+
+async def hard(out: Path, *, n: int, seed: int, interval: float) -> dict:
+    from sqlalchemy import select
+
+    from app.clients import neo4j_client
+    from app.core.domain_pack import get_pack
+    from app.db.session import AsyncSessionLocal
+    from app.models.chunk import Chunk
+    from app.providers.factory import _get_raw_provider
+    from app.rag import entity_linking, graph_evidence
+    from app.services import retrieval_service
+    from app.services.chunk_loader import load_items
+
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "hard_candidates.jsonl"
+    done = {c["pid"]: c for c in R.load_jsonl(path)} if path.exists() else {}
+    hub = get_pack().graph_evidence.hub_degree
+    async with neo4j_client._get().session() as s:
+        rows = [dict(r) async for r in await s.run(PATHS_CYPHER, hub=hub)]
+    texts: dict[str, list[str]] = {}
+    async with AsyncSessionLocal() as db:
+        # 边上的 doc_ids 与 chunk_ids 不保证按位对齐：以出处 chunk 实际所属文档为准
+        cids = sorted({r[k] for r in rows for k in ("chunk1", "chunk2")})
+        owner = dict((await db.execute(select(Chunk.id, Chunk.doc_id).where(Chunk.id.in_(cids)))).all())
+        rows = [{**r, "doc1": owner[r["chunk1"]], "doc2": owner[r["chunk2"]]} for r in rows
+                if r["chunk1"] in owner and r["chunk2"] in owner and owner[r["chunk1"]] != owner[r["chunk2"]]]
+        doc_ids = sorted({r[k] for r in rows for k in ("doc1", "doc2")})
+        for did, content in (await db.execute(select(Chunk.doc_id, Chunk.content).where(Chunk.doc_id.in_(doc_ids))
+                                              .order_by(Chunk.doc_id, Chunk.chunk_idx))).all():
+            texts.setdefault(did, []).append(content or "")
+    full = {d: "\n".join(v) for d, v in texts.items()}
+    eligible = len(sample_hidden(rows, full, 10 ** 9, seed))     # 满足隐藏桥接条件的全部路径（不调用模型）
+    paths = sample_hidden(rows, full, n, seed)
+    llm, pacer = _get_raw_provider("claude"), R._Pacer(interval)
+
+    async def ask(prompt: str, max_tokens: int = 200) -> str:
+        await pacer.wait()
+        return await llm.chat([{"role": "user", "content": prompt}], temperature=0, max_tokens=max_tokens)
+
+    async def verdict(question: str, gold: str, answer: str) -> str:
+        v = quick_verdict(answer, gold)
+        if v:
+            return v
+        return R.parse_verdict(await ask(R.JUDGE_PROMPT.format(question=question, gold=gold, answer=answer)))[0]
+
+    for p in paths:
+        if p["pid"] in done:
+            continue
+        rec = dict(p)
+        async with AsyncSessionLocal() as db:
+            items = await load_items(db, [p["chunk1"], p["chunk2"]], expand_parent=False, origin="graph", sources=[])
+            text = {i["chunkId"]: i.get("chunk", "") for i in items}
+            c1, c2 = text.get(p["chunk1"], ""), text.get(p["chunk2"], "")
+            raw = await ask(HARD_GEN_PROMPT.format(a=p["a"], b=p["b"], c=p["c"], t1=p["t1"], t2=p["t2"],
+                                                   c1=c1[:900]), max_tokens=400)
+            rec.update(parse_generated(raw, p["b"], p["c"]))
+            rec["stage"] = "invalid" if not rec["valid"] else "passed"
+            if rec["valid"]:
+                q, gold = rec["question"], rec["answer"]
+                rec["leakDoc2"], rec["leakDoc1"] = leak_ratio(q, full.get(p["doc2"], "")), leak_ratio(q, c1)
+                checks = [("F1_answerable", f"{c1[:1500]}\n\n{c2[:1500]}", "correct"),
+                          ("F2_doc2_needed", c1[:1500], None),
+                          ("F3_closed_book", None, None)]
+                for name, ctx, want in checks:
+                    prompt = CLOSED_PROMPT.format(question=q) if ctx is None else ANSWER_PROMPT.format(ctx=ctx, question=q)
+                    ans = await ask(prompt)
+                    v = await verdict(q, gold, ans)
+                    rec[name] = {"answer": ans[:300], "verdict": v}
+                    if (v != "correct") if want == "correct" else (v == "correct"):
+                        rec["stage"] = name
+                        break
+                if rec["stage"] == "passed":
+                    sr = await retrieval_service.mixed_search_ex(db, q, 5, force_score=True)
+                    both = [i for i in sr.items if contains(i.get("chunk", ""), p["b"]) and contains(i.get("chunk", ""), p["c"])]
+                    rec["retrieval"] = {"docs": [i.get("docId") for i in sr.items], "top1": sr.items[0]["score"] if sr.items else None,
+                                        "scoringOk": sr.scoring.ok, "doc2InTop5": any(i.get("docId") == p["doc2"] for i in sr.items),
+                                        "chunkWithBC": len(both)}
+                    link = await entity_linking.link(q)
+                    names = [e.name for e in link.entities]
+                    ev = await graph_evidence.find(db, names, cfg=get_pack().graph_evidence, exclude_chunk_ids=set())
+                    gdocs = [i.get("docId") for i in ev.candidates]
+                    rec["graph"] = {"linked": names, "startLinked": p["a"] in names, "status": ev.status,
+                                    "doc2Rank": gdocs.index(p["doc2"]) + 1 if p["doc2"] in gdocs else None,
+                                    "candidates": len(gdocs)}
+                    if both or rec["retrieval"]["doc2InTop5"]:
+                        rec["stage"] = "F4_retrieval_hard"
+        R.append_jsonl(path, rec)
+        done[p["pid"]] = rec
+        print(f"[hb] {p['pid']} {rec['stage']} {rec.get('question', '')[:40]}", flush=True)
+    cands = [done[p["pid"]] for p in paths if p["pid"] in done]
+    res = {"paths": len(rows), "eligible": eligible, "funnel": funnel(cands)}
+    (out / "hard_funnel.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+    return res
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    h = sub.add_parser("hard", help="隐藏桥接子集：枚举 → 出题（不给 doc2）→ F1~F4 过滤")
+    h.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    h.add_argument("--n", type=int, default=40)
+    h.add_argument("--seed", type=int, default=20261003)
+    h.add_argument("--interval", type=float, default=4.0)
     c = sub.add_parser("candidates", help="采样路径 → Claude 出题 → 检索/图谱探测")
     c.add_argument("--out", type=Path, default=OUT_DEFAULT)
     c.add_argument("--n", type=int, default=30)
@@ -212,6 +407,10 @@ def main() -> int:
         sys.path.insert(0, "/app")
         res = asyncio.run(candidates(args.out, n=args.n, seed=args.seed, interval=args.interval))
         print("MH_CANDIDATES_OK " + json.dumps(res, ensure_ascii=False))
+    if args.cmd == "hard":
+        sys.path.insert(0, "/app")
+        res = asyncio.run(hard(args.out, n=args.n, seed=args.seed, interval=args.interval))
+        print("MH_HARD_OK " + json.dumps(res, ensure_ascii=False))
     return 0
 
 

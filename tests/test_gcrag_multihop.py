@@ -49,3 +49,38 @@ def test_classify_and_render_order():
     md = M.render_markdown(cs)
     assert md.index("mh02（graph_only）") < md.index("mh01（both）") < md.index("mh04（invalid）")
     assert "采用：`mh02|`" in md
+
+
+# ---- 隐藏桥接子集（hard）----
+
+def test_contains_and_leak_ratio():
+    assert M.contains("据《人民日报》报道", "人民日报") and not M.contains("新华社", "人民日报")
+    assert M.leak_ratio("碧水源中标金额", "碧水源中标金额13亿") == 1.0
+    assert M.leak_ratio("与甲签约的企业", "完全无关的文字") == 0.0
+
+
+def test_sample_hidden_requires_bridge_hidden():
+    rows = [_row("甲公司", "碧水源", "项目X", "d1", "d2"),      # d2 提到了甲公司 → 不是隐藏桥接
+            _row("乙公司", "碧水源", "项目Y", "d3", "d4"),      # 合格
+            _row("丙公司", "久安公司", "项目Z", "d5", "d6")]    # d5 提到了项目Z → doc1 已含答案
+    texts = {"d1": "甲公司与碧水源签约", "d2": "碧水源中标项目X，甲公司参与", "d3": "乙公司与碧水源签约",
+             "d4": "碧水源中标项目Y", "d5": "丙公司与久安公司合作项目Z", "d6": "久安公司中标项目Z"}
+    ps = M.sample_hidden(rows, texts, 10, seed=1)
+    assert [p["a"] for p in ps] == ["乙公司"] and ps[0]["pid"] == "hb001"
+
+
+def test_sample_hidden_bridge_cap():
+    rows = [_row(f"公司{i}", "碧水源", f"项目{i}", f"a{i}", f"b{i}") for i in range(5)]
+    texts = {f"a{i}": f"公司{i}与碧水源签约" for i in range(5)} | {f"b{i}": f"碧水源中标项目{i}" for i in range(5)}
+    assert len(M.sample_hidden(rows, texts, 10, seed=1, max_per_bridge=3)) == 3
+
+
+def test_quick_verdict_and_funnel():
+    assert M.quick_verdict("答案是项目X。", "项目X") == "correct"
+    assert M.quick_verdict("无法回答", "项目X") == "refused"
+    assert M.quick_verdict("项目Q", "项目X") is None
+    cs = [{"valid": False, "stage": "invalid"}, {"valid": True, "stage": "F1_answerable"},
+          {"valid": True, "stage": "F3_closed_book"}, {"valid": True, "stage": "F4_retrieval_hard"},
+          {"valid": True, "stage": "passed"}]
+    assert M.funnel(cs) == {"sampled": 5, "generated": 4, "F1_answerable": 3, "F2_doc2_needed": 3,
+                            "F3_closed_book": 2, "F4_retrieval_hard": 1}

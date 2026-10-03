@@ -267,7 +267,11 @@ function drawGraph() {
     }],
   }, true)
 }
-watch(graphData, () => nextTick(drawGraph))
+watch(graphData, (g) => {
+  // 卡片随 v-if 销毁重建：旧实例绑在已移除的 DOM 上，需释放后重新 init
+  if (!g && chart) { chart.dispose(); chart = null }
+  nextTick(drawGraph)
+})
 function onResize() { chart && chart.resize() }
 onMounted(() => { loadFault(); window.addEventListener('resize', onResize) })
 onBeforeUnmount(() => { window.removeEventListener('resize', onResize); chart && chart.dispose(); chart = null })

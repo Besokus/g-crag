@@ -155,7 +155,7 @@
         </div>
         <div v-if="!messages.length" class="welcome">
           <div class="welcome-icon">👋</div>
-          <div class="welcome-title">欢迎使用电网运维智能问答</div>
+          <div class="welcome-title">欢迎使用 G-CRAG 图谱纠错智能问答</div>
           <div class="welcome-sub">自然语言提问 · 混合检索 · 自纠错 · 可信答案</div>
           <div class="qq-grid">
             <button class="qq" v-for="q in quickQuestions" :key="q" @click="quickAsk(q)"><span class="qq-icon">💬</span>{{ q }}</button>
@@ -170,7 +170,7 @@
         <button v-if="asrSupported" class="btn btn-ghost btn-sm" style="flex:none"
                 :class="{ 'btn-primary': listening }" @click="toggleAsr" :title="listening ? '停止录音' : '语音输入'">
           {{ listening ? '⏺ 录音中' : '🎤' }}</button>
-        <input class="input" v-model="query" placeholder="输入运维问题，如：主变压器温度异常如何处置..." @keyup.enter="ask" :disabled="loading" />
+        <input class="input" v-model="query" placeholder="输入问题，如：三星堆博物馆新馆展出了多少件文物？" @keyup.enter="ask" :disabled="loading" />
         <button v-if="loading && !useWS" class="btn btn-danger send-btn" @click="stopGen">⏹ 停止</button>
         <button v-else class="btn btn-primary send-btn" @click="ask" :disabled="loading">{{ loading ? '生成中...' : '发送' }}</button>
       </div>
@@ -251,10 +251,10 @@ import { watch } from 'vue'
 watch(convCollapsed, watchCollapsed)
 
 const quickQuestions = [
-  '主变压器温度异常如何处置？',
-  '配电线路单相接地故障如何排查？',
-  'SF6断路器漏气该如何处理？',
-  '变压器日常巡视检查哪些项目？',
+  '三星堆博物馆新馆在四川开放后，其建筑面积是原展馆的几倍，以及新馆共展出了多少件(套)文物？',
+  '考虑到2023年第二季度，洛克希德·马丁公司和爱彼迎的业绩增长，分别是由哪些因素驱动的？',
+  '立昂技术和佳华科技的技术分析指标分别预示了市场的哪种趋势？',
+  '2026年上海理工大学学生手册是什么',
 ]
 function quickAsk(q) { query.value = q; ask() }
 
@@ -298,6 +298,7 @@ function toggleTts(m) {
 function askRelated(q) { query.value = q; ask() }
 
 async function loadRelated(m) {
+  if (m.confidence === 'refused') { m.related = []; return }   // 拒答时知识库没有相关资料，追问同样答不了
   try { const r = await getRelatedQuestions(m.query, m.content, modelType.value || undefined); m.related = (r.data && r.data.questions) || [] } catch (e) { m.related = [] }
 }
 async function loadFaithfulness(m) {
@@ -445,7 +446,7 @@ function useFav(f) { showFavPanel.value = false; query.value = f.query; ask() }
 async function exportWord(m) {
   try {
     const blob = await exportAnswer(m.query, m.content, m.sources, { confidence: m.confidence, hallucinationRate: m.halluc, responseTime: m.time })
-    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '运维问答报告.docx'; a.click(); URL.revokeObjectURL(url); toast('已导出 Word')
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = '问答报告.docx'; a.click(); URL.revokeObjectURL(url); toast('已导出 Word')
   } catch (e) { toast('导出失败') }
 }
 async function copySource(s) { try { await navigator.clipboard.writeText(srcText(s)); toast('来源已复制') } catch (e) {} }

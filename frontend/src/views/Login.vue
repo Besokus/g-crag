@@ -6,10 +6,10 @@
     </div>
     <div class="login-card">
       <div class="brand">
-        <div class="brand-logo">电网</div>
-        <div class="brand-text">运维 RAG <small>智能问答系统</small></div>
+        <div class="brand-logo">G</div>
+        <div class="brand-text">G-CRAG <small>图谱纠错智能问答系统</small></div>
       </div>
-      <p class="login-desc">基于大模型 + 检索增强生成，覆盖变电 · 配电 · 输电运维场景</p>
+      <p class="login-desc">知识图谱定位证据 · 检索纠错 · 证据不足诚实拒答</p>
       <div class="field">
         <label class="field-label">用户名</label>
         <input class="input" v-model="username" placeholder="请输入用户名" @keyup.enter="doLogin" />

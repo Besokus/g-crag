@@ -754,7 +754,7 @@ def _injection_blocked(query: str) -> str | None:
     except Exception:
         pass
     return ("您的请求包含疑似指令注入内容（试图覆盖系统指令），已被安全策略拦截。"
-            "请用自然语言描述电网运维问题（设备、故障现象、处置需求）。")
+            "请直接用自然语言描述你的问题。")
 
 
 async def _refused_response(nq: str, contexts: list[dict], t0: float, conversation_id: str | None,
@@ -1959,10 +1959,12 @@ async def generate_related(
 
     独立接口：避免塞进流式 done 拖慢首字延迟，由前端答案渲染后异步拉取。
     """
+    from app.core.domain_pack import get_pack
     provider = get_llm_provider(model_type)
     prompt = (
-        "基于以下电网运维问答，生成 3 个用户可能继续追问的相关问题。\n"
-        "要求：与原问题相关但换角度或更深一层；简短具体（10-25 字）；聚焦变电/配电/输电运维。\n"
+        f"基于以下{get_pack().display_name}知识问答，生成 3 个用户可能继续追问的相关问题。\n"
+        "要求：与原问题相关但换角度或更深一层；简短具体（10-25 字）；"
+        "只围绕答案里已出现的人物、机构、事件、数据追问，不引入答案之外的新话题。\n"
         "只输出 JSON 字符串数组，如 [\"问题1\",\"问题2\",\"问题3\"]，不要任何解释或代码块。\n\n"
         f"【原问题】{query}\n【答案摘要】{(answer or '')[:500]}"
     )

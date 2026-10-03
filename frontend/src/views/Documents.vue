@@ -16,7 +16,7 @@
         </div>
         <div class="row" style="margin-top: 14px">
           <select class="select" v-model="docType" style="width:auto">
-            <option>运维手册</option><option>故障案例</option><option>检修规程</option><option>其他</option>
+            <option>新闻</option><option>报告</option><option>手册</option><option>其他</option>
           </select>
           <input class="input" v-model="dept" placeholder="部门(调度/检修,空=公开)" style="width:170px" title="文档级 ACL：限定某部门可见，空=全员公开" />
           <input class="input" v-model="allowedRoles" placeholder="授权角色(逗号分隔,空=全员)" style="width:170px" title="限定可读角色，空=部门内全员" />
@@ -119,7 +119,7 @@ const can = (p) => hasPerm(auth.role, p)   // RBAC：操作级隐藏（上传/�
 const docs = ref([])
 const stats = ref(null)
 const files = ref([])
-const docType = ref('运维手册')
+const docType = ref('新闻')
 const dept = ref('')          // RBAC 文档部门（上传时定）
 const allowedRoles = ref('')  // RBAC 授权角色（逗号分隔，空=部门内全员）
 // C2 治理元数据（可选，opt-in；后端 GOVERNANCE_UPLOAD_REQUIRE 控制是否建 meta）

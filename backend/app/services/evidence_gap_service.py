@@ -306,11 +306,16 @@ async def confirm_and_sync(gap_id: int, final_answer: str, operator: str,
                 "confidence": "high",
                 "hallucinationRate": 0.0, "cached": True, "cacheLayer": "redis",
             }
-            await cache_set_mysql(db, model_type, nq, nq, result, tenant_id=row.tenant)
-            from app.config import citation_cache_version
-            await redis_client.cache_set_json(
-                f"qa:{row.tenant or 'default'}:{model_type or 'default'}:{nq}:{citation_cache_version()}", result, settings.QA_CACHE_TTL,
-            )
+            # 键必须与问答读缓存一致：provider@模型#纠错模式（设计文档 §16.9）。原实现写 `model_type or
+            # 'default'`，任何模式都读不到；逐模式写入同时覆盖该问题此前的 medium 旧答案。
+            from app.providers.factory import llm_cache_tag
+            from app.rag.gcrag import MODES
+            from app.services.qa_service import _cache_key
+            for mode in MODES:
+                ck_model = f"{llm_cache_tag(model_type)}#{mode}"
+                await cache_set_mysql(db, ck_model, nq, nq, result, tenant_id=row.tenant or "default")
+                await redis_client.cache_set_json(_cache_key(ck_model, nq, row.tenant), result,
+                                                  settings.QA_CACHE_TTL)
             # 4) 状态 synced
             row.final_answer = final_answer
             row.synced_doc_id = doc_id

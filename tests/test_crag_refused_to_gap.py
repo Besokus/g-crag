@@ -95,3 +95,20 @@ async def test_collect_exception_swallowed(monkeypatch):
     await qa_service._maybe_collect_refused(
         nq="x", answer="", confidence="refused",
         grade="incorrect", action="refused", tenant="default")
+
+
+@pytest.mark.asyncio
+async def test_gcrag_refused_response_collects_with_crag_source(monkeypatch):
+    """G-CRAG 纠错用尽的拒答（_refused_response，不调 LLM）同样入证据补全队列，source 与原 CRAG 一致。"""
+    called = {}
+
+    async def fake_collect(query, answer, confidence, grade, action, source="auto", tenant="default"):
+        called.update(query=query, confidence=confidence, action=action, source=source, tenant=tenant)
+        return 1
+    monkeypatch.setattr("app.services.evidence_gap_service.collect", fake_collect, raising=False)
+    monkeypatch.setattr("app.services.qa_service.settings.CRAG_REFUSED_TO_GAP_ENABLE", True, raising=False)
+    out = await qa_service._refused_response("某个无依据的问题", [], 0.0, None, "t1",
+                                             {"cragGrade": "incorrect", "cragAction": "refused"}, None)
+    assert out["confidence"] == "refused"
+    assert called == {"query": "某个无依据的问题", "confidence": "refused", "action": "refused",
+                      "source": "auto_crag", "tenant": "t1"}

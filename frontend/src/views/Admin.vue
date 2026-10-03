@@ -376,7 +376,7 @@
           <button v-if="egSelected.length" class="btn btn-danger btn-sm" @click="egBatchDelete">🗑 批量删除({{ egSelected.length }})</button>
           <select v-model="egFilter" @change="loadEvidenceGaps" class="btn btn-ghost btn-sm">
             <option value="">全部</option><option value="pending">待处理</option>
-            <option value="ai_drafted">已续写</option><option value="synced">已同步</option>
+            <option value="ai_drafted">已续写</option><option value="confirmed">已确认</option><option value="synced">已同步</option>
             <option value="ignored">已忽略</option>
           </select>
           <select v-model="egSourceFilter" @change="loadEvidenceGaps" class="btn btn-ghost btn-sm" title="按来源筛选">
@@ -402,7 +402,7 @@
               <option value="verify">需人工核实</option>
               <option value="expired">已过保</option>
             </select>
-            <span class="badge" :class="{pending:'badge-info',ai_drafted:'badge-warning',synced:'badge-success',ignored:'badge-neutral'}[g.status]">{{ {pending:'待处理',ai_drafted:'已续写',synced:'已同步',ignored:'已忽略'}[g.status] }}</span>
+            <span class="badge" :class="{pending:'badge-info',ai_drafted:'badge-warning',confirmed:'badge-accent',synced:'badge-success',ignored:'badge-neutral'}[g.status]">{{ {pending:'待处理',ai_drafted:'已续写',confirmed:'已确认',synced:'已同步',ignored:'已忽略'}[g.status] }}</span>
             <span v-if="g.source" class="badge badge-neutral" :title="`来源: ${g.source}`">{{ {auto:'自动',auto_crag:'CRAG',auto_no_recall:'无结果',overconfident:'过自信',feedback_dislike:'点踩',manual:'人工',auto_llm_down:'服务不可用'}[g.source] || g.source }}</span>
             <strong class="opt-title" style="cursor:pointer" @click="g._expanded = !g._expanded" :title="'点击' + (g._expanded ? '收起' : '展开全部答案')">{{ g._expanded ? '▼' : '▶' }} {{ g.query }}</strong>
             <span v-if="g.operator === 'auto-deep-sync'" class="badge badge-success" style="margin-left:6px">✅ 自动深度补全</span>

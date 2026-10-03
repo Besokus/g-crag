@@ -766,7 +766,7 @@ async def _refused_response(nq: str, contexts: list[dict], t0: float, conversati
         try:
             from app.services.evidence_gap_service import collect
             await collect(nq, "", "refused", crag_extras.get("cragGrade", ""),
-                          crag_extras.get("cragAction", ""), "auto", tenant or "default")
+                          crag_extras.get("cragAction", ""), "auto_crag", tenant or "default")
         except Exception as e:
             degraded("gcrag_refused_to_gap", e)
     if conversation_id and db is not None:

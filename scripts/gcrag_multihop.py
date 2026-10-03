@@ -306,7 +306,7 @@ def funnel(cands: list[dict]) -> dict:
     return out
 
 
-async def hard(out: Path, *, n: int, seed: int, interval: float) -> dict:
+async def hard(out: Path, *, n: int, seed: int, interval: float, concurrency: int = 3) -> dict:
     from sqlalchemy import select
 
     from app.clients import neo4j_client
@@ -353,9 +353,15 @@ async def hard(out: Path, *, n: int, seed: int, interval: float) -> dict:
             return v
         return R.parse_verdict(await ask(R.JUDGE_PROMPT.format(question=question, gold=gold, answer=answer)))[0]
 
-    for p in paths:
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(p):
         if p["pid"] in done:
-            continue
+            return
+        async with sem:
+            await _one(p)
+
+    async def _one(p):
         rec = dict(p)
         async with AsyncSessionLocal() as db:
             items = await load_items(db, [p["chunk1"], p["chunk2"]], expand_parent=False, origin="graph", sources=[])
@@ -397,6 +403,8 @@ async def hard(out: Path, *, n: int, seed: int, interval: float) -> dict:
         R.append_jsonl(path, rec)
         done[p["pid"]] = rec
         print(f"[hb] {p['pid']} {rec['stage']} {rec.get('question', '')[:40]}", flush=True)
+
+    await asyncio.gather(*(one(p) for p in paths))
     cands = [done[p["pid"]] for p in paths if p["pid"] in done]
     res = {"paths": len(rows), "eligible": eligible, "funnel": funnel(cands)}
     (out / "hard_funnel.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -410,7 +418,8 @@ def main() -> int:
     h.add_argument("--out", type=Path, default=OUT_DEFAULT)
     h.add_argument("--n", type=int, default=40)
     h.add_argument("--seed", type=int, default=20261003)
-    h.add_argument("--interval", type=float, default=4.0)
+    h.add_argument("--interval", type=float, default=4.0, help="全局 Claude 请求最小间隔秒（并发共享）")
+    h.add_argument("--concurrency", type=int, default=3, help="同时处理的路径数")
     c = sub.add_parser("candidates", help="采样路径 → Claude 出题 → 检索/图谱探测")
     c.add_argument("--out", type=Path, default=OUT_DEFAULT)
     c.add_argument("--n", type=int, default=30)
@@ -423,7 +432,7 @@ def main() -> int:
         print("MH_CANDIDATES_OK " + json.dumps(res, ensure_ascii=False))
     if args.cmd == "hard":
         sys.path.insert(0, "/app")
-        res = asyncio.run(hard(args.out, n=args.n, seed=args.seed, interval=args.interval))
+        res = asyncio.run(hard(args.out, n=args.n, seed=args.seed, interval=args.interval, concurrency=args.concurrency))
         print("MH_HARD_OK " + json.dumps(res, ensure_ascii=False))
     return 0
 

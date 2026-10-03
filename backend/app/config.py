@@ -134,7 +134,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_MAXMEMORY: str = "300mb"      # allkeys-lru 内存上限
     QA_CACHE_TTL: int = 259200          # 3 天（72h），原 3600 命中率太低
-    HOTQA_ENABLE: bool = True           # 复用点赞写入的高频问答对(hotqa:{nq}永久缓存，命中跳检索/CRAG/生成)
+    HOTQA_ENABLE: bool = False          # 旧 hotqa 层（永久、链路最前、绕过租户/知识时效校验）默认关，见 ADR 0008；点赞已不再写入
+    LIKE_CACHE_TTL: int = 604800        # 点赞续期：命中已有问答缓存时把有效期延长到 7 天（不缩短，只对已缓存的高置信答案生效）
     # ---------- MySQL 二级缓存（Redis LRU 淘汰持久化）----------
     CACHE_PERSIST_ENABLE: bool = True     # Write-Through 双写 MySQL
     CACHE_PERSIST_CLEANUP_HOURS: int = 6  # 应用层清理周期（小时），兜底 MySQL Event Scheduler

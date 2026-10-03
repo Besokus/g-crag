@@ -36,6 +36,12 @@ def _fake_redis_with_hotqa(payload: dict | None):
     return r
 
 
+@pytest.fixture(autouse=True)
+def _hotqa_on(monkeypatch):
+    """旧 hotqa 读取层默认已关（ADR 0008）；本文件测试的是开关打开时的读取行为。"""
+    monkeypatch.setattr(qa_service.settings, "HOTQA_ENABLE", True)
+
+
 def test_hit_hotqa_returns_dict_when_key_present():
     """hotqa:{nq} 有值 → 返回完整 answer dict，cacheLayer=hotqa，confidence=high。"""
     payload = {

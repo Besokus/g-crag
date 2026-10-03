@@ -437,13 +437,12 @@ async def feedback(
         )
     except Exception:
         pass
-    # like 时写入高频问答对到 Redis（永不过期，后续流程可复用）
+    # like 时为已有的问答缓存续期（ADR 0008：替代旧 hotqa；未缓存的回答不新增条目）
     if body.feedback == "like" and body.query:
         try:
-            from app.services.feedback_optimizer_service import write_hotqa
-            _bg_tasks.add(asyncio.create_task(write_hotqa(
-                body.query, body.answer or "", body.retrievalSources or "",
-                getattr(user, "tenant_id", None) or "default")))
+            from app.services.feedback_optimizer_service import extend_cache_on_like
+            _bg_tasks.add(asyncio.create_task(extend_cache_on_like(
+                body.query, getattr(user, "tenant_id", None) or "default")))
         except Exception:
             pass
     # dislike 时异步失效缓存 + 自动黑名单判定（累计≥阈值则进黑名单，打通自动链路）

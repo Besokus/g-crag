@@ -356,47 +356,50 @@ async def maybe_blacklist_on_dislike(query: str) -> int:
         return 0
 
 
-async def write_hotqa(query: str, answer: str, sources: str = "",
-                      tenant: str = "default") -> None:
-    """like 时写入高频问答对到 Redis（永不过期）。
+async def extend_cache_on_like(query: str, tenant: str = "default") -> int:
+    """点赞续期（替代旧 hotqa，ADR 0008）：问答页对应的缓存条目存在时，把有效期延长到 LIKE_CACHE_TTL。
 
-    key=hotqa:{nq}, value=JSON{query,answer,sources,count,lastLikedAt,tenant}。
-    count 读改写累加（同 query 再 like +1），answer/sources 覆盖更新最新。
-    后续 qa_service 可按 nq 精确命中复用（跳检索/生成）。无 TTL=永不过期。
-    用独立 Redis 操作，供后台 task 安全调用。
+    是否进缓存由系统分级决定（只有 high 置信才写），点赞只延长已有条目的寿命，不新增条目：
+    拒答、证据有限的回答本就没有缓存，点赞后也不会被复用。条目仍走原有的租户隔离、命中前证据时效复核、
+    文档变更与点踩失效。键与问答链路一致：默认模型 + 默认纠错模式（问答页不指定），按归一化问题与租户。
+    有效期只延长不缩短（分层 TTL 可能已更长）。返回续期的条目数（Redis + MySQL）。
     """
     try:
-        import json
-        import time
-        from app.services.term_service import normalize as _normalize
         from app.clients import redis_client
+        from app.db.session import AsyncSessionLocal
+        from app.providers.factory import llm_cache_tag
+        from app.rag.gcrag import resolve_mode
+        from app.services.qa_service import _cache_key
+        from app.services.term_service import normalize as _normalize
         nq = _normalize(query or "")
-        if not nq or not (answer or "").strip():
-            return
-        # 结构化拒答（领域包 refuse 模板）不进 hotqa：命中时会被当作高置信答案永久复用
-        from app.core.domain_pack import get_pack
-        if answer.strip() == get_pack().render_prompt("refuse").strip():
-            return
+        if not nq:
+            return 0
+        ttl = settings.LIKE_CACHE_TTL
+        ck_model = f"{llm_cache_tag(None)}#{resolve_mode(None)}"
+        n = 0
         r = redis_client.get_redis()
-        key = f"hotqa:{nq}"
-        existing = await r.get(key)
-        count = 1
-        if existing:
-            try:
-                count = int(json.loads(existing).get("count", 0)) + 1
-            except Exception:
-                count = 1
-        payload = {
-            "query": nq,
-            "answer": (answer or "")[:2000],
-            "sources": sources or "",
-            "count": count,
-            "lastLikedAt": int(time.time()),
-            "tenant": tenant or "default",
-        }
-        await r.set(key, json.dumps(payload, ensure_ascii=False))  # 无 TTL = 永不过期
+        key = _cache_key(ck_model, nq, tenant)
+        left = await r.ttl(key)                       # -2 不存在，-1 无过期
+        if 0 < left < ttl:
+            await r.expire(key, ttl)
+        n += left != -2
+        async with AsyncSessionLocal() as db:
+            row = (await db.execute(select(QaCache).where(
+                QaCache.tenant_id == (tenant or "default"),
+                QaCache.query_hash == QaCache.build_hash(ck_model, nq, tenant or "default"),
+                QaCache.is_deleted == 0,
+                QaCache.expires_at > datetime.utcnow(),
+            ))).scalar_one_or_none()
+            if row:
+                target = datetime.utcnow() + timedelta(seconds=ttl)
+                if row.expires_at < target:
+                    row.expires_at, row.ttl_seconds = target, ttl
+                    await db.commit()
+                n += 1
+        return n
     except Exception as e:
-        degraded("hotqa_write", e)
+        degraded("like_cache_extend", e)
+        return 0
 
 
 async def check_overconfident(query: str, tenant: str = "default") -> bool:

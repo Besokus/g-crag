@@ -104,3 +104,20 @@ def test_excerpt_and_hard_review():
     md = M.render_hard_review(cs, {"k_d1": "甲公司与碧水源签约", "k_d2": "碧水源中标项目X"})
     assert md.count("合格：`") == 2 and "hb001" not in md                     # 只列通过全部过滤的题
     assert md.index("hb002|") < md.index("hb003|") and "排第 3" in md and "未找到" in md
+
+
+def test_parse_review_and_build_hardset():
+    base = {**_row("甲公司", "碧水源", "项目X", "d1", "d2"), "t1": "t1", "t2": "t2", "question": "原问题？", "answer": "原答案",
+            "stage": "passed"}
+    cs = [{**base, "pid": "hb001"}, {**base, "pid": "hb002"}, {**base, "pid": "hb003"},
+          {**base, "pid": "hb004", "stage": "F4_retrieval_hard"}]
+    md = ("# 抽检\n\n在“合格”处填 y 或 n（如 `hb012|n 指代不唯一`）\n\n"
+          "## 1. hb001\n\n**问题**：原问题？\n\n**标准答案**：原答案\n\n合格：`hb001|y`\n\n"
+          "## 2. hb002\n\n**问题**：改过的问题？\n\n**标准答案**：原答案\n\n合格：`hb002|Y`\n\n"
+          "## 3. hb003\n\n**问题**：原问题？\n\n**标准答案**：原答案\n\n合格：`hb003|n 指代错`\n\n"
+          "## 4. hb004\n\n**问题**：原问题？\n\n**标准答案**：原答案\n\n合格：`hb004|y`\n")
+    rv = M.parse_review(md)
+    assert [p for p, r in rv.items() if r["ok"]] == ["hb001", "hb002", "hb004"] and rv["hb003"]["note"] == "指代错"
+    qs = M.build_hardset(cs, rv)
+    assert [(q["id"], q["edited"]) for q in qs] == [("hb001", False), ("hb002", True)]   # 未通过自动过滤的不收
+    assert qs[1]["question"] == "改过的问题？" and qs[0]["answerable"] and qs[0]["bridge"] == "碧水源"

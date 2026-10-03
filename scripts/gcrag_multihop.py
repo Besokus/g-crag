@@ -464,6 +464,63 @@ async def review(out: Path) -> int:
     return md.count("合格：`")
 
 
+def parse_review(md: str) -> dict[str, dict]:
+    """解析人工抽检单：pid → {ok, note, question, answer}（问题、答案以抽检单上的文字为准，可能被人工改过）。"""
+    out = {}
+    for sec in re.split(r"^## \d+\. ", md, flags=re.M)[1:]:
+        pid = sec.split("\n", 1)[0].strip()
+        q = re.search(r"^\*\*问题\*\*：(.+)$", sec, re.M)
+        a = re.search(r"^\*\*标准答案\*\*：(.+)$", sec, re.M)
+        v = re.search(r"合格：`" + re.escape(pid) + r"\|([^`]*)`", sec)
+        mark = (v.group(1) if v else "").strip()
+        out[pid] = {"ok": mark[:1].lower() == "y", "note": mark[1:].strip(),
+                    "question": q.group(1).strip() if q else "", "answer": a.group(1).strip() if a else ""}
+    return out
+
+
+def build_hardset(cands: list[dict], review: dict[str, dict]) -> list[dict]:
+    """抽检合格的题 → 评测题目（与 questions.jsonl 同结构；两篇文档，type 记为 double）。"""
+    qs = []
+    for c in sorted(cands, key=lambda c: c["pid"]):
+        r = review.get(c["pid"])
+        if c.get("stage") != "passed" or not r or not r["ok"]:
+            continue
+        edited = (r["question"], r["answer"]) != (c["question"], c["answer"])
+        qs.append({"id": c["pid"], "type": "double", "split": "hard", "answerable": True,
+                   "question": r["question"], "answer": r["answer"], "edited": edited,
+                   "bridge": c["b"], "start": c["a"], "end": c["c"], "doc1": c["doc1"], "doc2": c["doc2"],
+                   "t1": c["t1"], "t2": c["t2"]})
+    return qs
+
+
+async def hardset(out: Path, review_path: Path) -> dict:
+    """人工抽检合格的隐藏桥接题 → <out>/hardset/questions.jsonl。人工改过措辞的题重做 F4（检索仍召回不到文档 2）。"""
+    from app.db.session import AsyncSessionLocal
+    from app.services import retrieval_service
+
+    cands = R.load_jsonl(out / "hard_candidates.jsonl")
+    review = parse_review(review_path.read_text(encoding="utf-8"))
+    qs, dropped = build_hardset(cands, review), []
+    async with AsyncSessionLocal() as db:
+        for q in [q for q in qs if q["edited"]]:
+            sr = await retrieval_service.mixed_search_ex(db, q["question"], 5, force_score=True)
+            both = any(contains(i.get("chunk", ""), q["bridge"]) and contains(i.get("chunk", ""), q["end"])
+                       for i in sr.items)
+            if both or any(i.get("docId") == q["doc2"] for i in sr.items):
+                dropped.append(q["id"])
+    qs = [q for q in qs if q["id"] not in dropped]
+    d = out / "hardset"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "questions.jsonl").write_text("".join(json.dumps(q, ensure_ascii=False) + "\n" for q in qs), encoding="utf-8")
+    res = {"passedFilters": sum(c.get("stage") == "passed" for c in cands),
+           "reviewedOk": sum(r["ok"] for r in review.values()),
+           "reviewRejected": {p: r["note"] for p, r in review.items() if not r["ok"]},
+           "edited": [q["id"] for q in build_hardset(cands, review) if q["edited"]],
+           "editedFailedF4": dropped, "final": len(qs)}
+    (d / "manifest.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
+    return res
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -475,6 +532,9 @@ def main() -> int:
     h.add_argument("--concurrency", type=int, default=3, help="同时处理的路径数")
     rv = sub.add_parser("review", help="把通过过滤的隐藏桥接题渲染成人工抽检单 hard_review.md")
     rv.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    hs = sub.add_parser("hardset", help="人工抽检合格的题 → hardset/questions.jsonl（供 gcrag_eval.py --out 使用）")
+    hs.add_argument("--out", type=Path, default=OUT_DEFAULT)
+    hs.add_argument("--review", type=Path, default=OUT_DEFAULT / "hard_review_checked.md")
     c = sub.add_parser("candidates", help="采样路径 → Claude 出题 → 检索/图谱探测")
     c.add_argument("--out", type=Path, default=OUT_DEFAULT)
     c.add_argument("--n", type=int, default=30)
@@ -492,6 +552,9 @@ def main() -> int:
     if args.cmd == "review":
         sys.path.insert(0, "/app")
         print(f"MH_REVIEW_OK {asyncio.run(review(args.out))}")
+    if args.cmd == "hardset":
+        sys.path.insert(0, "/app")
+        print("MH_HARDSET_OK " + json.dumps(asyncio.run(hardset(args.out, args.review)), ensure_ascii=False))
     return 0
 
 

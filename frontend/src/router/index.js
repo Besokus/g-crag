@@ -11,6 +11,7 @@ const routes = [
       { path: '', redirect: '/chat' },
       { path: 'chat', component: () => import('../views/Chat.vue'), meta: { auth: true, title: '智能问答', sub: '自然语言提问 · 自纠错 · 可信答案' } },
       { path: 'documents', component: () => import('../views/Documents.vue'), meta: { auth: true, title: '知识库', sub: '上传 · 解析 · 向量化 · 预览' } },
+      { path: 'compare', component: () => import('../views/GcragCompare.vue'), meta: { auth: true, title: '纠错对照', sub: '同一问题 · 三种纠错模式 · 证据路径' } },
       { path: 'kg', component: () => import('../views/KgGraph.vue'), meta: { auth: true, title: '知识图谱', sub: '实体关系 · 多跳推理' } },
       { path: 'admin', component: () => import('../views/Admin.vue'), meta: { auth: true, roles: ['admin', 'auditor'], title: '系统管理', sub: '反馈 · 日志 · 配置' } },
       { path: 'retrieval-debug', component: () => import('../views/RetrievalDebug.vue'), meta: { auth: true, admin: true, title: '检索调试', sub: '全链路 trace · 命中归因' } },

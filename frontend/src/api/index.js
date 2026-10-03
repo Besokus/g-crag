@@ -395,3 +395,7 @@ export const deleteWorkflow = (id) => request.delete(`/workflows/${id}`)
 export const runWorkflow = (id, query, vars = {}) => request.post(`/workflows/${id}/run`, { query, vars })
 export const getWorkflowRuns = (id, params = {}) => request.get(`/workflows/${id}/runs`, { params })
 export const getWorkflowRun = (runId) => request.get(`/workflows/runs/${runId}`)
+
+// G-CRAG 对照页：同一问题按指定纠错模式问答（逐列顺序调用；Claude 生成可能较慢，超时放宽）
+export const compareAnswer = (query, correctionMode, noCache = false) =>
+  request.post('/qa/answer', { query, correctionMode, noCache }, { timeout: 180000 })

@@ -77,6 +77,7 @@ const navItems = computed(() => {
     { to: '/chat', icon: '💬', label: '智能问答' },
     { to: '/documents', icon: '📄', label: '知识库' },
     { to: '/kg', icon: '🧠', label: '知识图谱' },
+    { to: '/compare', icon: '⚖️', label: '纠错对照' },
   ]
   if (hasPerm(auth.role, 'metric:read')) {
     items.push({ to: '/trace', icon: '⏱', label: '链路诊断' })

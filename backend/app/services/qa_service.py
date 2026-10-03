@@ -822,8 +822,9 @@ async def answer(
     # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接返回，跳检索/CRAG/生成。
     # 多轮也命中（用户认可的高频答案与上下文无关）；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
     # regen=True 跳过 hotqa（与流式链路对齐，强制重新生成）。
+    # hotqa 不区分纠错模式：显式指定 correctionMode（对照页、评测）时跳过，否则各模式会拿到同一份点赞答案。
     hot = None
-    if not skip_read:
+    if not skip_read and correction_mode is None:
         with _trace_span("hotqa"):
             hot = await _hit_hotqa(nq, conversation_id or "", t0)
     _tc = _get_trace()
@@ -1479,7 +1480,8 @@ async def stream_answer(
 
     # hotqa：用户 like 写入的高频问答对（永久缓存）——最高优先级，命中直接快流，跳检索/CRAG/生成。
     # regen=True（强制重新生成）跳过 hotqa；HOTQA_ENABLE opt-out；异常吞掉走正常链路。
-    if not skip_read:
+    # 显式指定 correctionMode 时跳过（hotqa 不区分纠错模式），与非流式一致。
+    if not skip_read and correction_mode is None:
         with _trace_span("hotqa"):
             hot = await _hit_hotqa(nq, conversation_id or "", t0)
         _tc = _get_trace()

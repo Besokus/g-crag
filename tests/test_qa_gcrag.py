@@ -132,3 +132,15 @@ def test_invalid_mode_rejected_by_schema():
     assert QaAnswerRequest(query="q", correctionMode="gcrag", noCache=True).noCache is True
     with pytest.raises(ValidationError):
         QaAnswerRequest(query="q", correctionMode="magic")
+
+
+def test_explicit_mode_skips_hotqa(qa, monkeypatch):
+    calls = []
+
+    async def hot(nq, cid, t0):
+        calls.append(nq)
+        return {"answer": "点赞答案", "retrievalSource": [], "cached": True, "cacheLayer": "hotqa", "confidence": "high"}
+    monkeypatch.setattr(qa_service, "_hit_hotqa", hot)
+    out = _answer(correction_mode="gcrag")
+    assert calls == [] and out.get("cacheLayer") != "hotqa"          # hotqa 不区分模式，指定模式时不读
+    assert _answer()["cacheLayer"] == "hotqa" and len(calls) == 1      # 未指定模式（问答页）照常命中

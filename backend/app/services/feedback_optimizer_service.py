@@ -371,7 +371,11 @@ async def write_hotqa(query: str, answer: str, sources: str = "",
         from app.services.term_service import normalize as _normalize
         from app.clients import redis_client
         nq = _normalize(query or "")
-        if not nq:
+        if not nq or not (answer or "").strip():
+            return
+        # 结构化拒答（领域包 refuse 模板）不进 hotqa：命中时会被当作高置信答案永久复用
+        from app.core.domain_pack import get_pack
+        if answer.strip() == get_pack().render_prompt("refuse").strip():
             return
         r = redis_client.get_redis()
         key = f"hotqa:{nq}"

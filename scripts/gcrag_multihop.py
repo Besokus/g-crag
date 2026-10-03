@@ -200,24 +200,31 @@ async def candidates(out: Path, *, n: int, seed: int, interval: float) -> dict:
 
 
 # ---------------- 隐藏桥接子集（hard，2026-10-02；构造规则见调研文档 §4.2，按 MuSiQue 思路按构造去捷径）----------------
-# 与上面 candidates 的区别：doc2 全文不提 A、doc1 不提 C（桥接真正"藏"在两篇之间）；出题时不给 doc2；
+# 与上面 candidates 的区别：doc2 全文不提 A、doc1 不提 C（桥接真正"藏"在两篇之间）；B 的 r2 同类关系不超过 3 个；
+# 出题时给 doc2 以问出具体、唯一的事实，但题面只能用 doc1 信息指代 B（试跑 1 不给 doc2，题目宽泛、答案不唯一，
+# 已存档于 hard_pilot1/；题面泄漏由 F4 冻结检索与 leakDoc2 兜底）；
 # 逐题过滤 F1 两篇都给可答 → F2 只给 doc1 不可答 → F3 闭卷不可答 → F4 冻结检索 top5 无同时含 B、C 的 chunk。
 # 先免费、再 Claude、最后百炼，任一关不过即停，漏斗全部落盘。
 
-HARD_GEN_PROMPT = """你在为知识图谱问答系统构造"两跳"评测题。已知两条事实，通过实体「{b}」相连：
-- 事实 1（出自下面的文档 1）：{t1}
-- 事实 2（出自另一篇文档）：{t2}
+HARD_GEN_PROMPT = """你在为知识图谱问答系统构造"两跳"评测题。两篇新闻通过实体「{b}」相连：
+- 文档 1 中：{t1}
+- 文档 2 中：{t2}
 
 【文档 1 片段】
 {c1}
 
-要求：
-1. 问题以「{a}」为出发点，用文档 1 中的关系指代「{b}」（如"与{a}签约的那家企业"），**不得出现「{b}」或「{c}」**；
-2. 问题问的是事实 2：答案就是「{c}」（或以它为核心的短语）；
-3. 只读文档 1 无法回答，必须再找到讲「{b}」的另一篇文档；
-4. 问题自然、无歧义；如果事实 2 太泛（如"发布了通知"）导致答案不唯一，返回 ok=false。
+【文档 2 片段】
+{c2}
 
-只输出 JSON：{{"ok": true/false, "question": "...", "answer": "..."}}"""
+要求：
+1. 问题以「{a}」为出发点，**只能用文档 1 中的信息指代「{b}」**（如"与{a}签约的那家企业"），不得出现「{b}」；
+2. 问文档 2 中关于「{b}」的**一个具体事实**：金额、数量、日期、地点、人名、机构名、项目名等，答案唯一、可核对；
+   不要问"举办了什么活动""对哪里产生了影响"这类答案宽泛或不唯一的问题；
+3. 描述所问的事实时只用通用词（如"它此后中标的项目金额是多少"），**不得复述文档 2 中的事件细节、专有名称或特征词**；
+4. 只读文档 1 无法回答，必须再找到讲「{b}」的文档 2；
+5. 做不出满足以上要求的题，返回 ok=false。
+
+只输出 JSON：{{"ok": true/false, "question": "...", "answer": "简短答案"}}"""
 
 ANSWER_PROMPT = """根据【资料】回答【问题】，答案尽量简短（一个名称、数字或短语即可）。资料不足以回答时只输出"无法回答"。
 
@@ -251,8 +258,10 @@ def leak_ratio(question: str, doc: str, n: int = 3) -> float:
     return round(sum(g in d for g in grams) / len(grams), 4)
 
 
-def sample_hidden(rows: list[dict], texts: dict[str, str], n: int, seed: int, max_per_bridge: int = 3) -> list[dict]:
-    """doc2 全文不含 A、doc1 全文不含 C；每个桥接实体至多 max_per_bridge 条，每篇 doc2 至多一条。"""
+def sample_hidden(rows: list[dict], texts: dict[str, str], n: int, seed: int, max_per_bridge: int = 3,
+                  max_fanout: int = 3) -> list[dict]:
+    """doc2 全文不含 A、doc1 全文不含 C；B 经 r2 同类关系连接的实体不超过 max_fanout 个（否则"B 的 r2"
+    指代不唯一）；每个桥接实体至多 max_per_bridge 条，每篇 doc2 至多一条。"""
     rows = sorted(rows, key=lambda r: (r["b"], r["a"], r["c"], r["chunk2"]))
     random.Random(seed).shuffle(rows)
     per_b: dict[str, int] = {}
@@ -260,6 +269,8 @@ def sample_hidden(rows: list[dict], texts: dict[str, str], n: int, seed: int, ma
     for r in rows:
         d1, d2 = texts.get(r["doc1"], ""), texts.get(r["doc2"], "")
         if not d1 or not d2 or contains(d2, r["a"]) or contains(d1, r["c"]):
+            continue
+        if r.get("r2Fanout", 1) > max_fanout:
             continue
         if per_b.get(r["b"], 0) >= max_per_bridge or r["doc2"] in seen_doc2:
             continue
@@ -313,6 +324,9 @@ async def hard(out: Path, *, n: int, seed: int, interval: float) -> dict:
     hub = get_pack().graph_evidence.hub_degree
     async with neo4j_client._get().session() as s:
         rows = [dict(r) async for r in await s.run(PATHS_CYPHER, hub=hub)]
+        fan = {(r["b"], r["t"]): r["n"] async for r in await s.run(
+            "MATCH (b:Entity)-[r:REL]-(x:Entity) RETURN b.name AS b, r.type AS t, count(DISTINCT x) AS n")}
+    rows = [{**r, "r2Fanout": fan.get((r["b"], r["rel2"]), 1)} for r in rows]
     texts: dict[str, list[str]] = {}
     async with AsyncSessionLocal() as db:
         # 边上的 doc_ids 与 chunk_ids 不保证按位对齐：以出处 chunk 实际所属文档为准
@@ -347,9 +361,9 @@ async def hard(out: Path, *, n: int, seed: int, interval: float) -> dict:
             items = await load_items(db, [p["chunk1"], p["chunk2"]], expand_parent=False, origin="graph", sources=[])
             text = {i["chunkId"]: i.get("chunk", "") for i in items}
             c1, c2 = text.get(p["chunk1"], ""), text.get(p["chunk2"], "")
-            raw = await ask(HARD_GEN_PROMPT.format(a=p["a"], b=p["b"], c=p["c"], t1=p["t1"], t2=p["t2"],
-                                                   c1=c1[:900]), max_tokens=400)
-            rec.update(parse_generated(raw, p["b"], p["c"]))
+            raw = await ask(HARD_GEN_PROMPT.format(a=p["a"], b=p["b"], t1=p["t1"], t2=p["t2"],
+                                                   c1=c1[:900], c2=c2[:900]), max_tokens=400)
+            rec.update(parse_generated(raw, p["b"]))
             rec["stage"] = "invalid" if not rec["valid"] else "passed"
             if rec["valid"]:
                 q, gold = rec["question"], rec["answer"]

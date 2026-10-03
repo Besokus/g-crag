@@ -14,7 +14,7 @@ class QaAnswerRequest(BaseModel):
     memoryScope: Literal["user", "device"] = "user"  # 记忆归属域（tenant 域禁止：跨用户记忆=越权）
     # G-CRAG（设计文档 §16.8）：纠错模式按请求覆盖（null = settings.CORRECTION_MODE）；
     # noCache 跳过所有问答缓存的读和写（对照页与评测使用）
-    correctionMode: Optional[Literal["none", "legacy", "gcrag", "gcrag_v2"]] = None
+    correctionMode: Optional[Literal["none", "legacy", "gcrag", "gcrag_v2", "gcrag_path", "gcrag_path_all"]] = None
     noCache: bool = False
 
 

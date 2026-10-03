@@ -16,7 +16,7 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-MODES_ALL = ("none", "legacy", "gcrag", "gcrag_v2", "closed_book")
+MODES_ALL = ("none", "legacy", "gcrag", "gcrag_v2", "gcrag_path", "gcrag_path_all", "closed_book")
 WEAK = ("ambiguous", "incorrect")
 _RANK = {"incorrect": 0, "ambiguous": 1, "correct": 2}
 

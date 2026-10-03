@@ -75,6 +75,13 @@ def test_sample_hidden_bridge_cap():
     assert len(M.sample_hidden(rows, texts, 10, seed=1, max_per_bridge=3)) == 3
 
 
+def test_sample_hidden_fanout():
+    rows = [{**_row("甲公司", "碧水源", "项目X", "d1", "d2"), "r2Fanout": 5},
+            {**_row("乙公司", "久安公司", "项目Y", "d3", "d4"), "r2Fanout": 2}]
+    texts = {"d1": "甲公司与碧水源签约", "d2": "碧水源中标项目X", "d3": "乙公司与久安公司签约", "d4": "久安公司中标项目Y"}
+    assert [p["b"] for p in M.sample_hidden(rows, texts, 10, seed=1)] == ["久安公司"]     # "B 的 r2"指代不唯一
+
+
 def test_quick_verdict_and_funnel():
     assert M.quick_verdict("答案是项目X。", "项目X") == "correct"
     assert M.quick_verdict("无法回答", "项目X") == "refused"

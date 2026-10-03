@@ -167,7 +167,7 @@ class Settings(BaseSettings):
     RERANK_ENABLE: bool = True
     RERANK_MODEL: str = "gte-rerank-v2"
     # --- 检索打分器与录制回放（rag/scorer.py；设计文档 §5.3、§5.4）---
-    CORRECTION_MODE: str = "gcrag"         # none | legacy | gcrag | gcrag_v2（rag/gcrag.py；可按请求覆盖）
+    CORRECTION_MODE: str = "gcrag"         # none | legacy | gcrag | gcrag_v2 | gcrag_path | gcrag_path_all（rag/gcrag.py；可按请求覆盖）
     SCORER: str = "dashscope_rerank"
     SCORER_CACHE: str = "off"              # off | record | replay（评测首跑 record，重跑 replay）
     SCORER_CACHE_PATH: str = ""            # 空 = data/scorer_cache/<打分器@模型>.jsonl

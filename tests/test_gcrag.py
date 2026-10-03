@@ -88,7 +88,7 @@ def _run(search, mode, topk=3):
 
 # ---- 初始分级：三种模式共同行为 ----
 
-@pytest.mark.parametrize("mode", gcrag.MODES)
+@pytest.mark.parametrize("mode", [m for m in gcrag.MODES if m != "gcrag_path_all"])   # _all 见文末
 def test_correct_generates_without_correction(env, mode):
     r = _run(_search(0.9, 0.5), mode)
     assert (r.initial_grade, r.final_grade, r.action, r.confidence) == ("correct", "correct", "normal", "high")
@@ -263,3 +263,52 @@ def test_trace_spans_recorded(env, monkeypatch):
     names = [n for n, _ in spans]
     assert names[:4] == ["gcrag_grade", "gcrag_link", "gcrag_graph", "gcrag_rescore"]
     assert {"gcrag_rewrite", "gcrag_refuse"} <= set(names) and all(g == "crag" for _, g in spans)
+
+
+# ---- gcrag_path / gcrag_path_all：路径感知打分、只追加、不要求分级提升 ----
+
+def test_path_query_dedupes_paths_in_candidate_order():
+    g = _graph(0.9, 0.5)
+    g.candidates[1]["pathIds"] = [1, 0]
+    q = gcrag.path_query("问题", g.paths, g.candidates)
+    assert q == "问题\n相关的知识关系：碧水源 -[参与]-> 疏勒河项目；碧水源 -[合作]-> 久安"
+    assert gcrag.path_query("问题", g.paths, g.candidates, limit=1).count("；") == 0
+    assert gcrag.path_query("问题", [], []) == "问题"
+
+
+def test_gcrag_path_ambiguous_appends_graph_without_grade_gain(env):
+    env["graph"] = _graph(0.9, 0.5, 0.2)
+    r = _run(_search(0.5, 0.4), "gcrag_path")
+    assert (r.final_grade, r.action, r.confidence) == ("ambiguous", "graph_supplemented", "medium")
+    assert [c["chunkId"] for c in r.contexts] == ["r0", "r1", "g0", "g1"]      # 原条目不动，≥ low 的前 2 条追加
+    assert len(env["scorer"].calls[0]) == 3                                   # 只给图谱候选打分
+    assert r.rounds[0].admitted == 2 and "相关的知识关系" in r.rounds[0].detail["pathQuery"]
+
+
+def test_gcrag_path_incorrect_admitted_becomes_ambiguous(env):
+    env["graph"] = _graph(0.35)
+    r = _run(_search(0.1), "gcrag_path")
+    assert (r.final_grade, r.action) == ("ambiguous", "graph_partial") and env["calls"]["rewrite"] == 0
+
+
+def test_gcrag_path_low_scores_fall_back_to_rewrite(env):
+    env["graph"] = _graph(0.2, 0.1)
+    env["retry"] = _search(0.9)
+    r = _run(_search(0.1), "gcrag_path")
+    assert [(x.action, x.status) for x in r.rounds] == [("graph_evidence", "no_improvement"), ("rewrite", "done")]
+    assert r.action == "rewrite_recovered"
+
+
+def test_gcrag_path_all_supplements_correct_keeps_high(env):
+    env["graph"] = _graph(0.6)
+    r = _run(_search(0.9), "gcrag_path_all")
+    assert (r.final_grade, r.action, r.confidence) == ("correct", "graph_supplemented", "high")
+    assert r.rounds[0].action == "graph_supplement" and r.contexts[-1]["origin"] == "graph"
+    r = _run(_search(0.9), "gcrag_path")
+    assert r.rounds == [] and r.action == "normal"                            # 只有 _all 会在 correct 时走图谱
+
+
+def test_gcrag_path_all_no_entity_is_normal(env):
+    env["entities"] = []
+    r = _run(_search(0.9), "gcrag_path_all")
+    assert (r.action, r.confidence) == ("normal", "high") and r.rounds[0].status == "skipped_no_entity"

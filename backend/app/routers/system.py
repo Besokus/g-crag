@@ -186,6 +186,29 @@ async def get_model_config_route(admin: User = Depends(require_admin)):
     return success(await config_service.get_model_config(), "查询成功")
 
 
+class FaultInjectionRequest(BaseModel):
+    scorer: str | None = Field(None, description="timeout | error；null 关闭")
+
+
+@router.get("/fault-injection")
+async def get_fault_injection_route(admin: User = Depends(require_admin)):
+    from app.rag.scorer import FAULTS, get_fault
+    return success({"scorer": get_fault(), "options": list(FAULTS)}, "查询成功")
+
+
+@router.put("/fault-injection")
+async def set_fault_injection_route(body: FaultInjectionRequest, admin: User = Depends(require_admin),
+                                    db: AsyncSession = Depends(get_db)):
+    """打分器故障注入（演示 unscored）：只存进程内存，重启后端即恢复。"""
+    from app.rag.scorer import set_fault
+    try:
+        set_fault(body.scorer)
+    except ValueError as e:
+        raise BizError(str(e))
+    await write_log(db, admin.username, "故障注入", f"scorer={body.scorer}")
+    return success({"scorer": body.scorer}, "已关闭故障注入" if body.scorer is None else f"已注入：{body.scorer}")
+
+
 @router.get("/config/llm-router")
 async def get_llm_router_config_route(admin: User = Depends(require_admin)):
     return success(await config_service.get_llm_router_config(), "查询成功")

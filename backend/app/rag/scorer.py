@@ -118,6 +118,36 @@ def cache_path(scorer: Scorer) -> Path:
 
 _instances: dict[tuple, Scorer] = {}
 
+# ---- 故障注入（演示与排障用，设计文档 §5.2）：只存进程内存，重启即恢复，不落配置 ----
+FAULTS = ("timeout", "error")
+_fault: str | None = None
+
+
+def set_fault(kind: str | None) -> None:
+    global _fault
+    if kind not in (None, *FAULTS):
+        raise ValueError(f"未知故障类型: {kind}（支持: {' | '.join(FAULTS)}，或 None 关闭）")
+    _fault = kind
+
+
+def get_fault() -> str | None:
+    return _fault
+
+
+class _FaultScorer:
+    """包在最外层（录制回放之外），保证回放命中也会失败。timeout 先等满超时，模拟真实超时的体感。"""
+
+    def __init__(self, inner: Scorer, kind: str):
+        self.inner, self.kind = inner, kind
+        self.name, self.cache_id = inner.name, inner.cache_id
+
+    async def score(self, query: str, texts: list[str], *, timeout: float) -> ScoreResult:
+        if not texts:
+            return ScoreResult(ok=True)
+        if self.kind == "timeout":
+            await asyncio.sleep(timeout)
+        return ScoreResult(ok=False, reason=f"{self.kind}:injected")
+
 
 def get_scorer() -> Scorer:
     """按 SCORER 选实现，按 SCORER_CACHE 包录制回放；同一配置复用同一实例（缓存表只加载一次）。"""
@@ -126,4 +156,4 @@ def get_scorer() -> Scorer:
         inner = _build_inner()
         mode = settings.SCORER_CACHE
         _instances[key] = inner if mode == "off" else CachedScorer(inner, mode, cache_path(inner))
-    return _instances[key]
+    return _FaultScorer(_instances[key], _fault) if _fault else _instances[key]

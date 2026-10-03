@@ -144,3 +144,28 @@ def test_rerank_service_no_key_raises(monkeypatch):
     monkeypatch.setattr(rerank_service.settings, "DASHSCOPE_API_KEY", "")
     with pytest.raises(RuntimeError):
         asyncio.run(rerank_service.Reranker().rerank("q", ["a"]))
+
+
+# ---- 故障注入（演示 unscored）----
+
+def test_fault_injection_wraps_outermost_and_resets(monkeypatch, tmp_path):
+    import asyncio
+
+    from app.rag import scorer as sc
+    monkeypatch.setattr(sc.settings, "SCORER_CACHE", "off")
+    sc._instances.clear()
+    base = sc.get_scorer()
+    try:
+        sc.set_fault("error")
+        s = sc.get_scorer()
+        assert s.name == base.name and s.cache_id == base.cache_id
+        r = asyncio.run(s.score("q", ["a", "b"], timeout=0.01))
+        assert (r.ok, r.reason) == (False, "error:injected")
+        assert asyncio.run(s.score("q", [], timeout=0.01)).ok           # 空候选仍按原约定 ok
+        sc.set_fault("timeout")
+        assert asyncio.run(sc.get_scorer().score("q", ["a"], timeout=0.01)).reason == "timeout:injected"
+        with pytest.raises(ValueError):
+            sc.set_fault("magic")
+    finally:
+        sc.set_fault(None)
+    assert sc.get_scorer() is base and sc.get_fault() is None

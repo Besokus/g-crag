@@ -358,6 +358,8 @@ async def health():
     _sync_component_health(checks)
 
     # provider 配置态快照（仅看 key 是否配置；运行态可用性见 /api/system/health/providers）
+    from app.rag.scorer import get_fault as scorer_fault
+
     def _key_ok(role: str) -> bool:
         p = settings.LLM_PROVIDER if role == "llm" else settings.EMB_PROVIDER
         if role == "llm":
@@ -372,6 +374,8 @@ async def health():
     providers = {
         "llm": {"provider": settings.LLM_PROVIDER, "keyConfigured": _key_ok("llm")},
         "embedding": {"provider": settings.EMB_PROVIDER, "keyConfigured": _key_ok("emb")},
+        "rerank": {"model": settings.RERANK_MODEL, "keyConfigured": bool(settings.DASHSCOPE_API_KEY),
+                   "faultInjected": scorer_fault()},
     }
     observer_configured = bool(
         settings.LLM_USER_OBSERVER_ENABLED

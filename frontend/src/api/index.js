@@ -261,6 +261,10 @@ export const deleteGap = (id) => request.delete(`/system/evidence-gap/${id}`)
 export const reportEvidenceGap = (query, answer, confidence, grade, action) =>
   request.post('/qa/evidence-gap/report', { query, answer, confidence, grade, action })
 
+// 打分器故障注入（admin，演示 unscored；只存后端进程内存，重启即恢复）
+export const getFaultInjection = () => request.get('/system/fault-injection')
+export const setFaultInjection = (scorer) => request.put('/system/fault-injection', { scorer })
+
 // ===== N1 Agent 记忆管理 =====
 export const getMemories = (params) => request.get('/memory/list', { params })
 export const deleteMemory = (id) => request.delete(`/memory/${id}`)

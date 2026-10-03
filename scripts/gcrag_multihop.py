@@ -411,6 +411,59 @@ async def hard(out: Path, *, n: int, seed: int, interval: float, concurrency: in
     return res
 
 
+def excerpt(text: str, keys: list[str], width: int = 260) -> str:
+    """以第一个出现的关键词为中心截取片段，关键词加粗。"""
+    text = re.sub(r"\s+", " ", text or "")
+    pos = min((text.find(k) for k in keys if k and k in text), default=0)
+    lo = max(0, pos - width // 3)
+    s = ("…" if lo else "") + text[lo:lo + width] + ("…" if lo + width < len(text) else "")
+    for k in sorted({k for k in keys if k}, key=len, reverse=True):
+        s = s.replace(k, f"**{k}**")
+    return s
+
+
+def render_hard_review(cands: list[dict], texts: dict[str, str]) -> str:
+    """通过 F1~F4 的隐藏桥接题 → 人工抽检单（texts：chunk_id → 正文）。"""
+    ps = sorted((c for c in cands if c.get("stage") == "passed"), key=lambda c: c["pid"])
+    lines = ["# 隐藏桥接子集人工抽检", "",
+             f"共 {len(ps)} 题，均已通过自动过滤：两篇都给能答对（F1）、只给文档 1 答不对（F2）、闭卷答不对（F3）、"
+             "检索 top5 既没召回文档 2 也没有同时含桥接实体与答案实体的片段（F4）。", "",
+             "每题判断三点，全部满足才算合格：", "",
+             "1. **指代唯一**：只读题目和文档 1，能唯一确定题目说的是哪个对象（即加粗的桥接实体）；",
+             "2. **答案正确**：标准答案确实出自文档 2，且回答了题目所问；",
+             "3. **题目自然**：像真实用户会问的问题，只问一个事实，没有照抄文档 2 的细节。", "",
+             "在“合格”处填 y 或 n（n 可在后面写原因，如 `hb012|n 指代不唯一`）；也可以直接改问题或答案的文字。", ""]
+    for i, c in enumerate(ps, 1):
+        g, r = c.get("graph") or {}, c.get("retrieval") or {}
+        rank = g.get("doc2Rank")
+        lines += [f"## {i}. {c['pid']}", "",
+                  f"**问题**：{c['question']}", "", f"**标准答案**：{c['answer']}", "",
+                  f"**路径**：{c['t1']}（文档 1）→ {c['t2']}（文档 2），桥接实体 **{c['b']}**", "",
+                  f"**文档 1 片段**：{excerpt(texts.get(c['chunk1'], ''), [c['b'], c['a']])}", "",
+                  f"**文档 2 片段**：{excerpt(texts.get(c['chunk2'], ''), [c['b'], c['c']])}", ""]
+        if c.get("why"):
+            lines += [f"**推理**：{c['why']}", ""]
+        lines += [f"**探测**：检索 top1 分数 {r.get('top1', 0):.2f}；图谱候选中文档 2 排第 "
+                  f"{rank if rank else '—（未找到）'}（共 {g.get('candidates', 0)} 条）", "",
+                  f"合格：`{c['pid']}|`", ""]
+    return "\n".join(lines)
+
+
+async def review(out: Path) -> int:
+    from sqlalchemy import select
+
+    from app.db.session import AsyncSessionLocal
+    from app.models.chunk import Chunk
+
+    cands = R.load_jsonl(out / "hard_candidates.jsonl")
+    cids = sorted({c[k] for c in cands if c.get("stage") == "passed" for k in ("chunk1", "chunk2")})
+    async with AsyncSessionLocal() as db:
+        texts = dict((await db.execute(select(Chunk.id, Chunk.content).where(Chunk.id.in_(cids)))).all())
+    md = render_hard_review(cands, texts)
+    (out / "hard_review.md").write_text(md, encoding="utf-8")
+    return md.count("合格：`")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -420,6 +473,8 @@ def main() -> int:
     h.add_argument("--seed", type=int, default=20261003)
     h.add_argument("--interval", type=float, default=4.0, help="全局 Claude 请求最小间隔秒（并发共享）")
     h.add_argument("--concurrency", type=int, default=3, help="同时处理的路径数")
+    rv = sub.add_parser("review", help="把通过过滤的隐藏桥接题渲染成人工抽检单 hard_review.md")
+    rv.add_argument("--out", type=Path, default=OUT_DEFAULT)
     c = sub.add_parser("candidates", help="采样路径 → Claude 出题 → 检索/图谱探测")
     c.add_argument("--out", type=Path, default=OUT_DEFAULT)
     c.add_argument("--n", type=int, default=30)
@@ -434,6 +489,9 @@ def main() -> int:
         sys.path.insert(0, "/app")
         res = asyncio.run(hard(args.out, n=args.n, seed=args.seed, interval=args.interval, concurrency=args.concurrency))
         print("MH_HARD_OK " + json.dumps(res, ensure_ascii=False))
+    if args.cmd == "review":
+        sys.path.insert(0, "/app")
+        print(f"MH_REVIEW_OK {asyncio.run(review(args.out))}")
     return 0
 
 

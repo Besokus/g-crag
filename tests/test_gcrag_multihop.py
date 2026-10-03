@@ -91,3 +91,16 @@ def test_quick_verdict_and_funnel():
           {"valid": True, "stage": "passed"}]
     assert M.funnel(cs) == {"sampled": 5, "generated": 4, "F1_answerable": 3, "F2_doc2_needed": 3,
                             "F3_closed_book": 2, "F4_retrieval_hard": 1}
+
+
+def test_excerpt_and_hard_review():
+    assert M.excerpt("前文" * 200 + "碧水源中标项目X", ["碧水源"], width=20).startswith("…")
+    assert "**碧水源**" in M.excerpt("甲公司与碧水源签约", ["碧水源", "甲公司"])
+    base = {**_row("甲公司", "碧水源", "项目X", "d1", "d2"), "t1": "甲公司 -[合作]-> 碧水源", "t2": "项目X -[中标]-> 碧水源",
+            "question": "与甲公司合作的企业中标了什么？", "answer": "项目X", "valid": True,
+            "retrieval": {"top1": 0.41}, "graph": {"doc2Rank": 3, "candidates": 12}}
+    cs = [{**base, "pid": "hb002", "stage": "passed"}, {**base, "pid": "hb001", "stage": "F4_retrieval_hard"},
+          {**base, "pid": "hb003", "stage": "passed", "graph": {"doc2Rank": None, "candidates": 0}}]
+    md = M.render_hard_review(cs, {"k_d1": "甲公司与碧水源签约", "k_d2": "碧水源中标项目X"})
+    assert md.count("合格：`") == 2 and "hb001" not in md                     # 只列通过全部过滤的题
+    assert md.index("hb002|") < md.index("hb003|") and "排第 3" in md and "未找到" in md

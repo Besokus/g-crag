@@ -29,7 +29,13 @@ G-CRAG —— 基于知识图谱与纠错机制的检索增强智能问答系统
 - 新增实体链接策略链（词典匹配 + 实体向量召回）。
 - LLM provider 合并为通用 OpenAI 兼容实现。
 - 裁剪电网业务功能、Agent 与 MCP、知识治理与数据飞轮模块及相关服务。
-- 新增基于 CRUD-RAG 的对照评测与 GcragCompare 对照页。
+- 新增基于 CRUD-RAG 的对照评测、隐藏桥接多跳子集与 GcragCompare 对照页；
+  新增路径感知重打分的纠错模式（gcrag_path / gcrag_path_all）。
+- 新增打分器运行时故障注入（演示 unscored），健康检查显示 rerank 状态。
+- LLM 调用统一走 Claude（Anthropic 协议），阿里百炼只用于 embedding / rerank。
+- 修复证据补全：回流缓存键与问答读取不一致；结论为"无法确认"的草稿可被确认入库。
+- 关闭 hotqa 永久缓存层，点赞改为给已有问答缓存续期（ADR 0008）。
+- 前端文案与预置问题由电网领域改为通用；三元组管理表展示出处段落与校验状态。
 - 部署编排裁剪为 9 个服务；MinIO 镜像改用 pgsty/minio；构建代理、HF 缓存、
   Neo4j 宿主端口改为可配置；修复定时备份卸载在线 collection 的缺陷。
 

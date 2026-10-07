@@ -52,3 +52,33 @@ def test_confirm_and_sync_writes_cache_for_every_mode(monkeypatch):
         assert {mt for mt, _, _ in mysql_keys} == expect and {t for _, _, t in mysql_keys} == {"t_sync"}
         assert set(redis_keys) == {qa_service._cache_key(ck, q, "t_sync") for ck in expect}   # 与问答读取同一个键
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("text, expect", [
+    ("**结论**\n\n根据现有资料无法确认。\n\n**依据**\n\n参考资料中均无记载。", True),
+    ("根据现有资料无法回答该问题：知识库中没有找到足够可靠的依据。", True),
+    ("2026年10月9日。演示内容为各组项目的现场运行与讲解。", False),
+    ("**结论**\n\n中标金额为 13.57 亿元。\n\n**依据**\n\n其中工期一项现有资料无法确认。", False),
+])
+def test_is_non_answer(text, expect):
+    assert svc._is_non_answer(text) is expect
+
+
+def test_confirm_rejects_non_answer(monkeypatch):
+    """AI 草稿结论是"无法确认"时一键确认同步，原实现会把它当 FAQ 入库并以 high 写进所有模式的缓存。"""
+    from app.services import document_service
+
+    monkeypatch.setattr(document_service, "vectorize_document",
+                        lambda *a, **k: pytest.fail("非答案不应入库"))
+
+    async def go():
+        from app.db.session import AsyncSessionLocal
+        from app.models.evidence_gap import EvidenceGap
+        gid = await svc.collect(f"测试_非答案_{datetime.now().isoformat()}", "", "refused",
+                                "incorrect", "refused", "auto_crag", "t_sync")
+        res = await svc.confirm_and_sync(gid, "**结论**\n\n根据现有资料无法确认。", "admin")
+        assert not res["ok"] and "人工编辑" in res["msg"]
+        async with AsyncSessionLocal() as db:
+            row = (await db.execute(select(EvidenceGap).where(EvidenceGap.id == gid))).scalar_one()
+        assert row.status == "pending" and not row.synced_doc_id
+    asyncio.run(go())

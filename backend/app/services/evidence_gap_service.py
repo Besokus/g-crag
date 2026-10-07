@@ -239,12 +239,26 @@ async def edit_answer(gap_id: int, final_answer: str) -> dict:
         return {"ok": False, "msg": str(e)}
 
 
+_NON_ANSWER_MARKERS = ("无法确认", "无法回答", "没有找到", "未找到", "无法给出", "无法判断")
+
+
+def _is_non_answer(text: str) -> bool:
+    """结论是"无法确认"一类的非答案（AI 草稿在资料不足时就是这样）。只看第一段（跳过"结论"标题）：
+    正常答案里个别环节写"现有资料无法确认"不算。"""
+    paras = [p.strip() for p in (text or "").replace("*", "").replace("#", "").splitlines()]
+    paras = [p for p in paras if p and p.rstrip("：:") != "结论"]
+    return bool(paras) and any(m in paras[0][:60] for m in _NON_ANSWER_MARKERS)
+
+
 async def confirm_and_sync(gap_id: int, final_answer: str, operator: str,
                            model_type: str | None = None) -> dict:
     """人工确认 final_answer + 同步入库（FAQ文档 vectorize + qa_cache/Redis 双写）。状态→synced。
 
     FAQ 答案短，直接 1 个 chunk（不切块）；复用 document_service.vectorize_document 向量化。
+    非答案（结论为"无法确认"）拒绝同步：否则它会作为 FAQ 入库，并以 high 写进所有纠错模式的缓存。
     """
+    if _is_non_answer(final_answer):
+        return {"ok": False, "msg": "答案结论为“无法确认”，不能作为知识入库，请先人工编辑最终答案"}
     import uuid
     from app.config import settings
     from app.models.document import Document

@@ -18,7 +18,7 @@
     <!-- 关系图谱 -->
     <div class="card" v-show="tab === 'graph'">
       <div class="row" style="margin-bottom: 12px">
-        <input class="input" v-model="entity" placeholder="🔍 输入实体(如：主变压器)过滤" @keyup.enter="searchGraph" style="flex:1;min-width:200px" />
+        <input class="input" v-model="entity" placeholder="🔍 输入实体(如：沪渝蓉高铁)过滤" @keyup.enter="searchGraph" style="flex:1;min-width:200px" />
         <button class="btn btn-primary" @click="searchGraph">搜索</button>
         <button class="btn btn-ghost" @click="resetGraph">显示全部</button>
       </div>
@@ -54,11 +54,11 @@
     <!-- 多跳影响链 -->
     <div class="card" v-show="tab === 'path'">
       <div class="row" style="margin-bottom: 12px">
-        <input class="input" v-model="pathEntity" placeholder="🔍 起点实体(如：配电变压器)" @keyup.enter="searchPaths" style="flex:1;min-width:200px" />
+        <input class="input" v-model="pathEntity" placeholder="🔍 起点实体(如：中铁十一局)" @keyup.enter="searchPaths" style="flex:1;min-width:200px" />
         <label class="hint">跳数 <select class="select" v-model="depth" style="width:80px"><option v-for="d in [1,2,3,4,5]" :key="d" :value="d">{{ d }}</option></select></label>
         <button class="btn btn-primary" @click="searchPaths">查找影响链</button>
       </div>
-      <p class="hint">💡 多跳推理：沿「故障→处置→关联」因果链追溯影响范围（Neo4j）</p>
+      <p class="hint">💡 多跳推理：沿实体关系逐跳追溯关联实体（Neo4j）</p>
       <div v-if="!paths.length" class="empty">输入起点实体，查找其多跳因果影响链</div>
       <div v-else class="path-list">
         <div class="path-item" v-for="(p, i) in paths" :key="i">
@@ -88,19 +88,26 @@
       </div>
       <div style="overflow-x:auto">
         <table class="tbl">
-          <thead><tr><th>主体</th><th>关系</th><th>客体</th><th>来源</th><th>操作</th></tr></thead>
+          <thead><tr><th>主体</th><th>关系</th><th>客体</th><th>来源</th><th>出处</th><th>操作</th></tr></thead>
           <tbody>
-            <tr v-for="t in triples.list" :key="t.id">
+            <template v-for="t in triples.list" :key="t.id">
+            <tr>
               <td><input class="input" v-model="t.subject" style="width:140px" /></td>
               <td><input class="input" v-model="t.relation" style="width:100px" /></td>
               <td><input class="input" v-model="t.object" style="width:140px" /></td>
-              <td class="muted">{{ (t.docName||'').slice(0,20) }}</td>
+              <td class="muted" :title="t.docName">{{ (t.docName||'').slice(0,24) }}</td>
+              <td style="white-space:nowrap">
+                <span class="badge" :class="PROV[t.provenance]?.cls" :title="PROV[t.provenance]?.tip">{{ PROV[t.provenance]?.label || t.provenance }}</span>
+                <a v-if="t.chunkText" class="ev-btn" style="margin-left:6px" @click="t._open = !t._open">第 {{ t.chunkIdx + 1 }} 段 {{ t._open ? '▲' : '▼' }}</a>
+              </td>
               <td style="white-space:nowrap">
                 <button class="btn btn-primary btn-sm" @click="saveTriple(t)">💾 保存</button>
                 <button class="btn btn-danger btn-sm" @click="delTriple(t)">删除</button>
               </td>
             </tr>
-            <tr v-if="!triples.list.length"><td colspan="5" class="empty">暂无三元组</td></tr>
+            <tr v-if="t._open"><td colspan="6"><div class="prov-text" v-html="markEntities(t.chunkText, [t.subject, t.object])"></div></td></tr>
+            </template>
+            <tr v-if="!triples.list.length"><td colspan="6" class="empty">暂无三元组</td></tr>
           </tbody>
         </table>
       </div>
@@ -147,6 +154,18 @@ const paths = ref([])
 const hubs = ref([])
 const triples = ref({ total: 0, list: [] })
 const tripleKw = ref('')
+// 出处校验状态（《设计文档》§4.2）：verified 主体与客体都出现在 LLM 标注的段落；rematched 标注段落不含，按文本重新定位到别的段落；none 原文中找不到
+const PROV = {
+  verified: { label: '已校验', cls: 'badge-success', tip: '主体与客体都出现在抽取时标注的原文段落中' },
+  rematched: { label: '重新定位', cls: 'badge-warning', tip: '标注的段落不含主体或客体，已按原文重新定位到其他段落' },
+  none: { label: '无出处', cls: 'badge-neutral', tip: '原文中找不到同时包含主体与客体的段落，这条关系没有可回溯的原文' },
+}
+function markEntities(text, words) {
+  const esc = (x) => x.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const ws = words.filter(Boolean).sort((a, b) => b.length - a.length).map((w) => esc(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const html = esc(text || '')
+  return ws.length ? html.replace(new RegExp(ws.join('|'), 'g'), (m) => `<mark>${m}</mark>`) : html
+}
 const triplePage = ref(1)
 const tripleSize = 20
 const tripleTotalPages = computed(() => Math.max(1, Math.ceil((triples.value.total || 0) / tripleSize)))
@@ -271,6 +290,8 @@ onBeforeUnmount(() => { window.removeEventListener('resize', onResize); document
 </script>
 
 <style scoped>
+.prov-text { white-space: pre-wrap; font-size: 13px; line-height: 1.7; padding: 8px 12px; background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: 6px; }
+.prov-text :deep(mark) { background: rgba(250, 204, 21, .35); color: inherit; padding: 0 2px; border-radius: 3px; }
 .kg-page { display: flex; flex-direction: column; height: calc(100vh - var(--topbar-h) - 8px); gap: 14px; }
 .kg-page .stat-grid.cols-4 { flex-shrink: 0; margin-bottom: 0; }
 .kg-page .tabs { flex-shrink: 0; }

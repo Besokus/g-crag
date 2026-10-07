@@ -81,21 +81,8 @@ async def list_triples(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_perm(KG_EDIT)),
 ):
-    """三元组管理列表（分页，可按 doc_id/关键词筛）。"""
-    stmt = select(KgTriple).order_by(KgTriple.created_at.desc())
-    if doc_id:
-        stmt = stmt.where(KgTriple.doc_id == doc_id)
-    if kw:
-        like = f"%{kw}%"
-        from sqlalchemy import or_
-        stmt = stmt.where(or_(KgTriple.subject.like(like), KgTriple.object.like(like), KgTriple.relation.like(like)))
-    from sqlalchemy import func as _f
-    total = (await db.execute(select(_f.count()).select_from(stmt.subquery()))).scalar() or 0
-    rows = (await db.execute(stmt.offset((page - 1) * size).limit(size))).scalars().all()
-    return success({"total": total, "list": [
-        {"id": r.id, "subject": r.subject, "relation": r.relation, "object": r.object,
-         "docId": r.doc_id, "docName": r.doc_name,
-         "createdAt": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""} for r in rows]}, "查询成功")
+    """三元组管理列表（分页，可按 doc_id/关键词筛），带出处 chunk。"""
+    return success(await kg_service.list_triples(db, page, size, doc_id, kw), "查询成功")
 
 
 @router.put("/triples/{triple_id}")

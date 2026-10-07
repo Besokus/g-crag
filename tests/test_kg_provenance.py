@@ -140,3 +140,25 @@ def test_relation_alias_outside_whitelist_rejected(tmp_path):
     p.write_text("relation_aliases:\n  不存在的关系: [x]\n", encoding="utf-8")
     with pytest.raises(DomainPackError, match="relation_aliases"):
         load_pack("general", tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_list_triples_returns_provenance_chunk(test_db):
+    """三元组管理列表带出处：校验状态、chunk 序号与原文，供图谱页"看出处"。"""
+    from app.models.chunk import Chunk
+    from app.models.document import Document
+    from app.models.kg_triple import KgTriple
+    test_db.add(Document(id="d1", doc_name="华为发布会.txt", minio_object="x"))
+    await test_db.flush()
+    test_db.add(Chunk(id="c1", doc_id="d1", chunk_idx=3, content="华为在深圳发布了 Mate 60 Pro。"))
+    test_db.add(KgTriple(subject="华为", relation="发布", object="Mate 60 Pro", doc_id="d1",
+                         doc_name="华为发布会.txt", chunk_id="c1", provenance="verified"))
+    test_db.add(KgTriple(subject="华为", relation="位于", object="深圳", doc_id="d1",
+                         doc_name="华为发布会.txt", chunk_id="", provenance="none"))
+    await test_db.commit()
+    res = await svc.list_triples(test_db, doc_id="d1")
+    by_r = {t["relation"]: t for t in res["list"]}
+    assert res["total"] == 2
+    assert (by_r["发布"]["provenance"], by_r["发布"]["chunkIdx"]) == ("verified", 3)
+    assert "Mate 60 Pro" in by_r["发布"]["chunkText"]
+    assert (by_r["位于"]["provenance"], by_r["位于"]["chunkIdx"], by_r["位于"]["chunkText"]) == ("none", None, "")

@@ -217,6 +217,30 @@ async def _extract_from_chunks(provider, chunks: list, stats: dict | None = None
     return all_triples
 
 
+async def list_triples(db: AsyncSession, page: int = 1, size: int = 20,
+                       doc_id: str | None = None, kw: str | None = None) -> dict:
+    """三元组管理列表（新抽取的在前）。每条带出处：校验状态、出处 chunk 的序号与原文（无出处为空）。"""
+    stmt = select(KgTriple).order_by(KgTriple.created_at.desc(), KgTriple.id)
+    if doc_id:
+        stmt = stmt.where(KgTriple.doc_id == doc_id)
+    if kw:
+        like = f"%{kw}%"
+        stmt = stmt.where(or_(KgTriple.subject.like(like), KgTriple.object.like(like), KgTriple.relation.like(like)))
+    total = (await db.execute(select(func.count()).select_from(stmt.subquery()))).scalar() or 0
+    rows = (await db.execute(stmt.offset((page - 1) * size).limit(size))).scalars().all()
+    chunk_ids = {r.chunk_id for r in rows if r.chunk_id}
+    chunks = {c.id: c for c in (await db.execute(
+        select(Chunk).where(Chunk.id.in_(chunk_ids)))).scalars()} if chunk_ids else {}
+    out = []
+    for r in rows:
+        c = chunks.get(r.chunk_id or "")
+        out.append({"id": r.id, "subject": r.subject, "relation": r.relation, "object": r.object,
+                    "docId": r.doc_id, "docName": r.doc_name, "provenance": r.provenance or "none",
+                    "chunkIdx": c.chunk_idx if c else None, "chunkText": c.content if c else "",
+                    "createdAt": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""})
+    return {"total": total, "list": out}
+
+
 async def extract_triples(db: AsyncSession, doc_id: str, model_type: str | None = None,
                           *, write_lock: "asyncio.Lock | None" = None) -> dict:
     """对某文档分块批量抽取三元组，增量写 MySQL + Neo4j（不清旧，仅追加新条目）。
